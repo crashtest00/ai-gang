@@ -15,7 +15,13 @@ nodes:
     kind: decision
     check:
       description: "Does the project's selected target deployment have a corresponding boilerplate?"
-      probe: "Read the project's configured --deployment value against the supported set (currently: web)"
+      probe: >-
+        Read the project's configured deployment target against the
+        supported set (currently: web) — either --deployment / the
+        interactive prompt, or, for a config-driven initialization, the
+        already-validated project.type decision scripts/init-project.sh
+        --config binds in its place (same supported set either way; see
+        setup/graphs/engine/lib/config/catalog.js).
       error_when: probe-error
     branches:
       - when: web
