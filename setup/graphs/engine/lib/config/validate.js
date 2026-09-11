@@ -149,6 +149,4 @@ function validateConfigText(text) {
 module.exports = {
   validateConfigFile,
   validateConfigText,
-  PROJECT_NAME_PATTERN,
-  SUPPORTED_SCHEMA_VERSION,
 };

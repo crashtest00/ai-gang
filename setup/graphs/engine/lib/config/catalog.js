@@ -57,7 +57,6 @@ function isSupportedStack(target, stack) {
 }
 
 module.exports = {
-  TARGET_STACK_CATALOG,
   listSupportedTargets,
   listSupportedStacks,
   isSupportedTarget,

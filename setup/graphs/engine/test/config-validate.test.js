@@ -9,7 +9,12 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { validateConfigText, PROJECT_NAME_PATTERN } = require('../lib/config/validate');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { validateConfigText } = require('../lib/config/validate');
+
+const INIT_PROJECT_SCRIPT = path.join(__dirname, '..', '..', '..', '..', 'scripts', 'init-project.sh');
 
 function validExample(overrides = {}) {
   return {
@@ -147,8 +152,41 @@ test('validateConfigText: rejects a project name containing shell metacharacters
   assert.ok(result.errors.some((e) => /not a safe project name/.test(e)));
 });
 
-test('PROJECT_NAME_PATTERN matches the interactive-flow rule in scripts/init-project.sh', () => {
-  // scripts/init-project.sh checks `grep -qE '^[a-z][a-z0-9-]+$'` — same
-  // pattern, so a config-driven name is held to the identical rule.
-  assert.equal(PROJECT_NAME_PATTERN.source, '^[a-z][a-z0-9-]+$');
+// scripts/init-project.sh validates a typed-in project name with
+// `grep -qE '<pattern>'`; extract that same pattern straight from the
+// script source, instead of hardcoding a second copy here that could
+// silently drift, and run the identical grep check against a candidate
+// name.
+function interactiveFlowAccepts(name) {
+  const scriptText = fs.readFileSync(INIT_PROJECT_SCRIPT, 'utf8');
+  const match = scriptText.match(/grep -qE '(\^\[a-z\][^']+)'/);
+  assert.ok(match, 'expected to find the interactive project-name grep pattern in scripts/init-project.sh');
+  const pattern = match[1];
+  const result = spawnSync('bash', ['-c', `echo "$1" | grep -qE '${pattern}'`, '--', name]);
+  return result.status === 0;
+}
+
+function configFlowAccepts(name) {
+  return validateConfigText(JSON.stringify(validExample({ project: { ...validExample().project, name } }))).valid;
+}
+
+test('the interactive-flow project-name rule and the config validator accept and reject the same sample names', () => {
+  const samples = [
+    'acceptance-project', // valid
+    'a1', // valid, minimum length
+    'a-b-c', // valid, hyphenated
+    'a', // invalid, too short
+    'Acceptance-Project', // invalid, uppercase
+    '1-project', // invalid, starts with a digit
+    'a; touch x', // invalid, shell metacharacters
+    '_project', // invalid, starts with underscore
+  ];
+
+  for (const name of samples) {
+    assert.equal(
+      configFlowAccepts(name),
+      interactiveFlowAccepts(name),
+      `expected the interactive flow and the config validator to agree on "${name}"`
+    );
+  }
 });
