@@ -13,3 +13,4 @@ projects/*
 .claude/main-checkout-allowed
 CLAUDE.local.md
 .claude/pr-edit-allowed
+.claude/worktrees/
