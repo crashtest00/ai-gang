@@ -1,5 +1,5 @@
 """
-REQ-08's Django admin UI — the concrete capability this rebuild exists to
+The Django admin UI — the concrete capability this rebuild exists to
 add (the Node build's own tracked gap: "Node/Express doesn't get one for
 free"). These tests exercise the ACTUAL admin views (not just admin.py's
 configuration) through a logged-in Django test Client, confirming that an
@@ -78,7 +78,7 @@ def test_admin_add_work_item_routes_through_store_and_produces_history_and_outbo
 
 
 def test_admin_add_work_item_uses_admin_ui_origin(clean_db, monkeypatch):
-    """REQ-08 origin split: a write made through the real, session-
+    """Origin split: a write made through the real, session-
     authenticated Django admin must reach store.py as Origins.ADMIN_UI,
     never Origins.EXTERNAL_API (reserved for views.py's unauthenticated
     HTTP handlers)."""
@@ -194,8 +194,8 @@ def test_admin_add_then_edit_saves_story_detail_via_inline(clean_db):
     # WorkItemStoryDetail instance) rather than through store.py — so this
     # write does not append to work_item_history or produce its own
     # outbox_event, unlike every other write in this module. Documenting
-    # the actual behavior rather than asserting what REQ-05/REQ-06 would
-    # imply; retrofitting the inline to route through store.py is out of
+    # the actual behavior rather than asserting what history/outbox parity
+    # would imply; retrofitting the inline to route through store.py is out of
     # this feature's scope.
     from workitems.models import OutboxEvent
     events = OutboxEvent.objects.filter(work_item_id=item_id)
@@ -248,7 +248,7 @@ def test_admin_status_transition_on_jira_mode_project_is_rejected(clean_db):
     # silently applied.
     resp = client.get(f'/django-admin/workitems/workitem/{item_id}/change/')
     assert resp.status_code == 200
-    assert b'name="status"' not in resp.content, 'status must render read-only for a Jira-mode project (REQ-08)'
+    assert b'name="status"' not in resp.content, 'status must render read-only for a Jira-mode project'
 
     item = WorkItem.objects.get(id=item_id)
     assert item.status == 'proposed', 'no write should have been possible through the read-only field'

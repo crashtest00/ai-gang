@@ -32,8 +32,8 @@ function mockPublish(t) {
 test.beforeEach(() => taskStore._reset());
 
 // dispatchTask is the sole place that builds and publishes an A2A Task
-// dispatch/continuation envelope (the a2a-messaging design
-// REQ-02, REQ-07: one Task per ticket for its whole lifecycle).
+// dispatch/continuation envelope: one Task per ticket for its whole
+// lifecycle.
 
 test('dispatchTask publishes a schema-valid Message payload for a fresh Task', async (t) => {
   const published = mockPublish(t);
@@ -74,7 +74,7 @@ test('the prompt factory receives the Task id/contextId before publishing', asyn
   assert.equal(seen.taskId, ISSUE.key);
 });
 
-// REQ-07 — continuation reuses the existing Task and context, with a new Message identity
+// A continuation reuses the existing Task and context, with a new Message identity
 
 test('dispatchTask resumes an interrupted Task with a new Message, same identity', async (t) => {
   mockPublish(t);
@@ -229,7 +229,7 @@ test('handleBlockedCleared still uses the bare-description unblock prompt for a 
 });
 
 // Handler 5 — handleReleaseRequested triggers Jenkins only once the beta
-// queue is confirmed clean (release-workflow.md).
+// queue is confirmed clean.
 
 test('handleReleaseRequested triggers the release-candidate job when the beta queue is clean', async (t) => {
   t.mock.method(jira, 'getIssue', async () => ({

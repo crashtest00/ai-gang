@@ -9,8 +9,8 @@
 // cached object — no production code changes needed to make this testable.
 //
 // Gateway submissions use the canonical A2A payload shape ({ state, message,
-// artifacts? } — the a2a-messaging design), not the legacy
-// `{ type, ... }` contract that shape replaced (REQ-09). A real submission
+// artifacts? }), not the legacy
+// `{ type, ... }` contract that shape replaced. A real submission
 // only ever arrives for a Task ScrumMaster has already dispatched, so each
 // test registers its Task in the in-memory a2a/taskStore first, mirroring
 // what handlers.js's dispatchTask does in production.
@@ -363,7 +363,7 @@ test('a MaterializationValidationError from dependencies.js is dead-lettered, no
   }
 });
 
-// Regression test for the gap a 2026-09-07 doc-vs-code audit found: REQ-12's
+// Regression test for the gap a 2026-09-07 doc-vs-code audit found:
 // mode-aware routing (dependencies.js's routeMaterialization) was built and
 // unit-tested in isolation, but gateway.js's dispatch path called
 // dependencies.materializeDecomposition directly, bypassing it entirely — so

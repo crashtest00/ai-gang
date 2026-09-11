@@ -38,7 +38,7 @@ async function getIssue(key) {
   const edgeField     = process.env.JIRA_EDGE_CASES_FIELD_ID;
   const oosField      = process.env.JIRA_OUT_OF_SCOPE_FIELD_ID;
 
-  // Release ticket fields — see the release-workflow design
+  // Release ticket fields
   const targetProjectField  = process.env.JIRA_TARGET_PROJECT_FIELD_ID;
   const releaseNotesField   = process.env.JIRA_RELEASE_NOTES_FIELD_ID;
   const candidateShaField   = process.env.JIRA_CANDIDATE_SHA_FIELD_ID;
@@ -154,7 +154,7 @@ async function transitionIssue(key, statusName) {
 
 // Create a subtask under a parent issue
 // Returns the new subtask key (e.g. "GANG-43")
-// canonical-work-model.md REQ-15's connect-Jira catch-up push: creates a
+// Used by the connect-Jira catch-up push: creates a
 // top-level issue (not a subtask — see createSubtask for that) for a
 // canonical work item with no Jira counterpart yet.
 async function createIssue(projectKey, issueTypeName, summary, description) {
@@ -203,7 +203,7 @@ async function createSubtask(parentKey, projectKey, summary, description, agentF
 
 // Read-only: fetch the current options on the Agent single-select field's
 // first context, e.g. [{ id, value, disabled }, ...]. Used by the periodic
-// Jira catalog-drift audit (agent-assignment.md REQ-07) — never used to
+// Jira catalog-drift audit — never used to
 // determine whether an agent identity is valid for runtime assignment,
 // which is decided solely by the agents.json catalog.
 async function getAgentFieldOptions() {
@@ -222,10 +222,10 @@ async function getAgentFieldOptions() {
   }));
 }
 
-// --- Dependency-handling support (the dependency-handling design) ---
+// --- Dependency-handling support ---
 
 // Label prefix used to persist a Refinement Agent proposal UUID on the Jira
-// subtask it materialized to (REQ-02, REQ-04). Chosen over a new custom field
+// subtask it materialized to. Chosen over a new custom field
 // so this feature needs no Jira-side provisioning step: labels are queryable
 // via JQL and require no field/context setup. displayName is persisted as the
 // subtask's own summary, so together the label + summary satisfy "persist the
@@ -243,7 +243,7 @@ function proposalIdFromLabel(label) {
 }
 
 // Resolve and cache the Jira issue-link-type id whose outward relationship is
-// "blocks" (REQ-04: runtime behavior must key off the id, not a mutable
+// "blocks" (runtime behavior must key off the id, not a mutable
 // display label). JIRA_BLOCKS_LINK_TYPE_ID lets an operator pin the id
 // explicitly; otherwise it is discovered once from Jira's built-in "Blocks"
 // link type and cached for the life of the process.
@@ -273,7 +273,7 @@ async function getBlocksLinkTypeId() {
 
 // Fetch every Sub-task under a parent issue, with the label and status fields
 // dependency handling needs. Used to recover already-materialized proposals
-// on redelivery (REQ-04, REQ-07) — no local cache is kept between calls.
+// on redelivery — no local cache is kept between calls.
 //
 // Uses /search/jql (the legacy /search endpoint was removed by Atlassian —
 // see https://developer.atlassian.com/changelog/#CHANGE-2046). This is a
@@ -316,7 +316,7 @@ async function getIssueLinks(key) {
 // Create a `blockerKey blocks dependentKey` / `dependentKey is blocked by
 // blockerKey` link using the configured link type. Jira does not dedupe
 // identical links on repeated creation — callers must check getIssueLinks
-// first to stay idempotent across redelivery (REQ-04, REQ-07).
+// first to stay idempotent across redelivery.
 async function createIssueLink(blockerKey, dependentKey) {
   const linkTypeId = await getBlocksLinkTypeId();
   await client.post('/issueLink', {
@@ -328,7 +328,7 @@ async function createIssueLink(blockerKey, dependentKey) {
 
 // Create a subtask for one Refinement Agent decomposition proposal, labeled
 // with its proposal UUID so a later redelivery can recognize it as already
-// materialized (REQ-02, REQ-04). Kept separate from createSubtask (used by
+// materialized. Kept separate from createSubtask (used by
 // the unrelated create_subtask gateway operation) rather than changing that
 // function's signature.
 async function createSubtaskForProposal(parentKey, projectKey, { summary, description, agentFieldValue, proposalId }) {

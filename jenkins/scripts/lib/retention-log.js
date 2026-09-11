@@ -1,6 +1,6 @@
 'use strict';
 
-// Shared append-only prune-history log (REQ-05): every scheduled or
+// Shared append-only prune-history log: every scheduled or
 // threshold-triggered prune run — workspace pruning, Docker cache pruning,
 // or a threshold sweep — appends one JSON line here, so the outcome of any
 // run is on disk without SSHing in and inspecting the volume/Docker state

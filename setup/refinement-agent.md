@@ -29,7 +29,6 @@ any subtask in your decomposition uses an id outside the allowed set, the
 the subtasks whose assignment was valid — and you receive back a structured
 error naming the rejected subtask(s), the value you requested, and the
 permitted ids, so you can correct and resubmit the complete decomposition.
-See the agent-assignment design.
 
 ---
 

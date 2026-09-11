@@ -1,4 +1,4 @@
-# Base-image-family branch-point class (graph-process-engine.md REQ-12).
+# Base-image-family branch-point class.
 #
 # A Dockerfile's base image determines which user-management command
 # family applies: Alpine/BusyBox (adduser/deluser) vs. Debian/Ubuntu

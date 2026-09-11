@@ -1,18 +1,17 @@
 'use strict';
 
-// canonical-work-model.md REQ-21 — dispatch is triggered by canonical
-// domain events, not by ingestion path. A work item's transition into a
-// dispatch-eligible state MUST trigger agent dispatch via the SAME
-// mechanism regardless of which mode or ingress produced that transition
-// — a Jira-originated event validated by work-item-service (REQ-11), a
-// Django Admin Panel write (local mode), or any future ingress. This is
-// that single mechanism: one durable Streams consumer on
-// work-item-service's outbound canonical-event stream
+// Dispatch is triggered by canonical domain events, not by ingestion path.
+// A work item's transition into a dispatch-eligible state MUST trigger
+// agent dispatch via the SAME mechanism regardless of which mode or
+// ingress produced that transition — a Jira-originated event validated by
+// work-item-service, a Django Admin Panel write (local mode), or any
+// future ingress. This is that single mechanism: one durable Streams
+// consumer on work-item-service's outbound canonical-event stream
 // (aigang:workitems:{project}:events — the same stream
 // jiraCatchupConsumer.js already consumes, for a different purpose; this
 // is a second, independent consumer group, Streams' normal fan-out).
 //
-// REQ-22 — this is ALSO where ScrumMaster's now-deleted `routeWebhookEvent`
+// This is ALSO where ScrumMaster's now-deleted `routeWebhookEvent`
 // Jira-mode side effects (posting a comment, setting the Agent/Blocked
 // custom fields, mirroring a dispatch to Jira's "In Progress" status,
 // triggering the Release Jenkins jobs) are re-homed, driven by the small,
@@ -24,9 +23,9 @@
 //
 // Known simplification (flagged in the final report): dispatch-eligibility
 // below checks `status === 'ready'` literally rather than resolving a
-// project's custom status configuration to its baseline
-// (canonical-work-model.md REQ-02) — ScrumMaster has no local copy of
-// ProjectStatusConfig and no HTTP endpoint currently exposes it. A project
+// project's custom status configuration to its baseline — ScrumMaster has
+// no local copy of ProjectStatusConfig and no HTTP endpoint currently
+// exposes it. A project
 // using ONLY the ten fixed minimum-vocabulary statuses (the common case,
 // and the only case any test in this repo exercises) is unaffected; a
 // project that renames 'ready' via a custom status would not dispatch
@@ -69,8 +68,8 @@ async function stopDispatchConsumers() {
 // serializers.serialize_work_item_full) into the same "issue"-shaped
 // object jira.getIssue() returns, so the existing dispatchTask/
 // buildTaskPrompt/buildUnblockPrompt/buildRetryPrompt pipeline needs no
-// local-mode-specific branch of its own (REQ-21's acceptance: "no
-// local-mode-specific dispatch code path").
+// local-mode-specific branch of its own — dispatch deliberately has no
+// local-mode-specific code path.
 function issueLikeFromCanonical(full) {
   const detail = full.storyDetail || {};
   return {
@@ -94,7 +93,7 @@ function issueLikeFromCanonical(full) {
 
 // Jira-mode: always fetch the live issue for full fidelity, exactly as
 // every dispatch before this change did — the canonical mirror is
-// authoritative for status/assignment (REQ-01) but does not project every
+// authoritative for status/assignment but does not project every
 // Jira-only field (summary/description text formatting, live comment
 // authorship) into canonical events. Local mode: no Jira issue exists at
 // all, so the canonical record IS the full record.
@@ -155,7 +154,7 @@ async function maybeDispatch(workItemId, envelope) {
 }
 
 // handleReworkRequested's trigger: a human moved a ticket from "In Review"
-// back to "In Progress" (release-workflow.md REQ-11). Detected from the
+// back to "In Progress". Detected from the
 // item's own append-only history rather than from any Jira-specific
 // string — the canonical status_changed event and the history row behind
 // it are all this needs.
@@ -257,8 +256,8 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
   }
 
   if (eventType === 'work_item.jira_release_event') {
-    // canonical-release-workflow.md V2.1 — the same event type now also
-    // carries a local-mode-originated candidate-cut/abandon/done, keyed by
+    // The same event type now also carries a local-mode-originated
+    // candidate-cut/abandon/done, keyed by
     // `workItemId`/`project` instead of `jiraIssueKey` (work-item-service's
     // store.py `_publish_release_event`, no jiraIssueKey in the payload).
     // handlers.js branches on which one is present; this routing is

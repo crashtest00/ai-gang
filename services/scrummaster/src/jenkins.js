@@ -4,7 +4,7 @@ const axios = require('axios');
 
 // dev → beta promotion is no longer triggered here — it happens automatically,
 // per-project, inside each project's own Jenkinsfile pipeline on merge to `dev`.
-// See the release-workflow design. ScrumMaster's role in the release
+// ScrumMaster's role in the release
 // flow is now limited to the three jobs below, all fired from a Release ticket.
 
 async function invoke(token, payload) {
@@ -19,7 +19,7 @@ async function invoke(token, payload) {
 }
 
 // `ref` is `'GANG-42'` (a bare Jira issue key, Jira mode — unchanged) or
-// `{ workItemId }` (local mode, canonical-release-workflow.md V2.1 — no
+// `{ workItemId }` (local mode — no
 // Jira ticket). Sent as distinct payload fields (`issueKey` vs.
 // `workItemId`), never both, so jenkins.yaml's genericTrigger can tell
 // which mode a build is for and route its writeback stage accordingly
@@ -33,7 +33,7 @@ function _refLabel(ref) {
 }
 
 // Fired once ScrumMaster (Jira mode) or work-item-service (local mode, via
-// REQ-03's Django-side check) has confirmed beta's queue is clean for a new
+// its own Django-side check) has confirmed beta's queue is clean for a new
 // release. Jenkins pins the candidate SHA, cuts `release/<sha>`, opens the
 // `release/<sha> → prod` PR, and stands up the preview container.
 async function triggerReleaseCandidate(ref, projectName) {

@@ -68,7 +68,7 @@ Apply the one-container-per-repo principle:
 - **One repo → one container.** The container subscribes to all agent channels for the project.
 - **N repos → N containers.** Each container subscribes only to its own agent channel.
 
-Assign an `AGENT_CHANNEL_SUFFIX` to each container based on its role. Common values: `frontend`, `backend`, `mobile`, `api`, `web`. The suffix must match the agent's `routing.channelSuffix` entry in `agents.json` (the canonical agent catalog — see the agent-assignment design).
+Assign an `AGENT_CHANNEL_SUFFIX` to each container based on its role. Common values: `frontend`, `backend`, `mobile`, `api`, `web`. The suffix must match the agent's `routing.channelSuffix` entry in `agents.json` (the canonical agent catalog).
 
 Every container uses `AGENT_CHANNEL_SUFFIX` — there is no special handling for single-repo projects. A single-repo project sets one suffix (e.g. `AGENT_CHANNEL_SUFFIX=api`).
 
@@ -95,21 +95,19 @@ This shapes Phase 3 (one pass per repo) and Phase 4 (E2E test scenario).
 *These steps are scoped to the Jira instance, not the project. Skip any step that is already done for this Jira instance.*
 
 This phase has been converted to graph form —
-Graph-Based Process Engine
-REQ-17, `setup/graphs/jira-instance-setup.graph.yaml` — covering, as an
+`setup/graphs/jira-instance-setup.graph.yaml` — covering, as an
 `escalation` node (a human's declared preference, not a check on observable
 state), whether this AI Gang deployment will connect any project to Jira at
 all before doing the instance-level setup below, per
-`setup/graphs/migration-status.md`. This is not the same decision as
-`canonical-work-model.md` REQ-14's per-project Jira-vs-local mode switch,
-which always defaults to local mode at project initialization and connects
-Jira later, separately, per project. **Walk the graph — do not follow the
-steps below directly.** They describe the same underlying procedure for
-reference only; running them directly skips the escalation gate above and
-performs Jira-instance setup unconditionally, which is exactly the
-REQ-14/REQ-17 violation this graph exists to prevent. Only fall back to
-them manually if the graph engine itself is unavailable, and note that
-deviation in the run's log:
+`setup/graphs/migration-status.md`. This is not the same decision as the
+per-project Jira-vs-local mode switch, which always defaults to local mode
+at project initialization and connects Jira later, separately, per
+project. **Walk the graph — do not follow the steps below directly.** They
+describe the same underlying procedure for reference only; running them
+directly skips the escalation gate above and performs Jira-instance setup
+unconditionally, which is exactly the violation this graph exists to
+prevent. Only fall back to them manually if the graph engine itself is
+unavailable, and note that deviation in the run's log:
 
 ### 1.0 Jira Service Account
 
@@ -190,8 +188,7 @@ When adding a new project, apply existing fields via `init-project.sh` — do no
 **The tunnel must be live before Jenkins starts.** Jenkins registers its GitHub webhook at first boot — if the tunnel isn't routing when Jenkins boots, the registration fails silently and must be done manually afterward.
 
 This phase has been converted to graph form —
-Graph-Based Process Engine
-REQ-10/REQ-11, `setup/graphs/cloudflare-setup.graph.yaml` — covering account/
+`setup/graphs/cloudflare-setup.graph.yaml` — covering account/
 token presence, tunnel existence, the subdomain-var combinations, and
 `CF_ACCOUNT_ID` presence as decision nodes with their own remediation, per
 `setup/graphs/migration-status.md`. **Walk the graph — do not follow the
@@ -205,8 +202,8 @@ engine itself is unavailable, and note that deviation in the run's log:
 - Run `./scripts/setup-cloudflare-tunnel.sh`
   - Creates a named tunnel (`ai-gang`) via Cloudflare's account-scoped
     Tunnel REST API, authenticated by `CF_API_KEY`/`CF_ACCOUNT_ID` —
-    **no interactive `cloudflared tunnel login` browser step** (REQ-11;
-    superseded the previous manual step this section used to list here)
+    **no interactive `cloudflared tunnel login` browser step** (superseded
+    the previous manual step this section used to list here)
   - Adds DNS records for HQ and Jenkins subdomains via Cloudflare API
   - Writes `~/.cloudflared/config.yml`
   - Installs and starts `cloudflared` as a systemd service
@@ -258,7 +255,7 @@ After Jenkins is up:
 - `[HUMAN]` Verify Jira connection: **Manage Jenkins → System → Jira → Test Connection**
 - Wire `JENKINS_URL` into ScrumMaster config so ScrumMaster can trigger builds
 
-**Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule. See the release-workflow design for the full flow.
+**Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule.
 
 **Jenkinsfile template**: Copy `setup/Jenkinsfile.template` into the project's repo root and fill in its four TODO blocks (install, test, build, deploy-to-Beta-VM) based on the project's tech stack and deployment target. It already implements the test gate, auto-merge to `dev`, and automatic `beta` promotion + deploy — only the project-specific commands are missing.
 
@@ -276,7 +273,7 @@ After Jenkins is up:
 **Branch protection** (see `setup/JenkinsConfig.md` §7 for the full settings and `gh api` commands):
 - `dev`: require status checks to pass + branch up to date + do not allow bypassing
 - `beta`: no direct pushes — Jenkins only, fast-forward from `dev` only
-- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review (release-workflow.md).
+- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review.
 
 ### 2.5 Beta VM Bootstrap
 
@@ -352,18 +349,16 @@ cd ~/ai-gang && ./scripts/init-project.sh
 ```
 
 This prompts for: project name, GitHub HTTPS URL, `GH_TOKEN`, and
-deployment target. Initializes in **local mode by default**
-(`canonical-work-model.md` REQ-14: local mode is the unconditional default,
-Jira mode cannot be chosen at init) — no Jira project key is asked for and
-no Jira API call is made. Deployment-target boilerplate selection
-(currently `web` or `desktop`) is also represented as a graph node —
-Deployment-Target Boilerplate
-REQ-02/REQ-03, `setup/graphs/deployment-target-boilerplate.graph.yaml` —
-which resolves the target from the project's `.aigang-config-identity.json`
-file's `type` field when the project was initialized with `--config`,
-rather than asking again; an unsupported target reaches that graph's
-remediation node (or this script's own equivalent guidance) rather than an
-empty, unexplained repository.
+deployment target. Initializes in **local mode by default** — local mode
+is the unconditional default, Jira mode cannot be chosen at init — no Jira
+project key is asked for and no Jira API call is made. Deployment-target
+boilerplate selection (currently `web` or `desktop`) is also represented
+as a graph node — `setup/graphs/deployment-target-boilerplate.graph.yaml`
+— which resolves the target from the project's
+`.aigang-config-identity.json` file's `type` field when the project was
+initialized with `--config`, rather than asking again; an unsupported
+target reaches that graph's remediation node (or this script's own
+equivalent guidance) rather than an empty, unexplained repository.
 
 Creates:
 - `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
@@ -375,7 +370,7 @@ Pass `--connect-jira` to additionally prompt for a Jira project key and
 perform one-time Jira-instance bootstrapping for this project (creates the
 Jira project, the AI Gang Kanban workflow, and applies custom fields to its
 screens) — this is always an explicit, separate opt-in, never offered by
-the default flow above (REQ-14/REQ-15).
+the default flow above.
 
 **Before running this**: `JENKINS_GITHUB_USER` must be set in `~/ai-gang/.env` (the platform `.env`, not the project's) — see `.env.template`. Without it, `dev` branch protection is still applied but `beta`/`prod` protection is skipped with a warning. Also, applying branch protection at all requires the `GH_TOKEN` you provide here to include **Administration: Read and write** on top of its Contents/Pull requests/Metadata scopes (see 3.2 below) — without it, the branch-creation step still succeeds but each protection call gets a `403` and prints a warning to configure it manually per `setup/JenkinsConfig.md` §7.
 
@@ -393,8 +388,7 @@ cp ~/ai-gang/Docker\ Templates/Dockerfile-node.template ./Dockerfile   # or pyth
 Which user-management syntax the chosen template needs (Alpine's
 `adduser`/`deluser` vs. Debian/Ubuntu's `useradd`) is a base-image-family
 branch point, also represented as a graph —
-Graph-Based Process Engine
-REQ-12, `setup/graphs/base-image-family.graph.yaml` — walkable against a
+`setup/graphs/base-image-family.graph.yaml` — walkable against a
 Dockerfile to confirm which family it's in before customising it further.
 
 Customise the Dockerfile for the repo's tech stack, then:
@@ -460,7 +454,7 @@ For deployment target-specific pipeline steps:
 ### 3.7 Release Promotion (Release ticket, not manual)
 
 There is no manual `beta → prod` PR for a human to open — `prod` only changes
-via the Release-ticket flow (the release-workflow design):
+via the Release-ticket flow:
 1. Human creates a Jira Release ticket (Target Project field required) once
    enough has accumulated on `beta`
 2. Jenkins checks `beta`'s queue is clean, pins the candidate SHA, cuts

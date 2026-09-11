@@ -1,19 +1,16 @@
-# AI Gang Internal Work-Item Service — deployment stack.
-# (the internal-work-item-service design; standing this up is
-# called out explicitly in the V2-E2E-TEST-PLAN design's Phase 2.1-2.4
-# section as new-for-V2 work, distinct from docker-compose.test.yml's
-# ephemeral pytest fixtures.)
+# AI Gang Internal Work-Item Service — deployment stack, distinct from
+# docker-compose.test.yml's ephemeral pytest fixtures.
 #
 # Four services from one image (see Dockerfile):
 #   - postgres   — persistent datastore (named volume, not tmpfs)
 #   - migrate    — one-shot `manage.py migrate`; others wait on its clean exit
-#   - api        — HTTP surface (REQ-04/REQ-08), container name
+#   - api        — HTTP surface, container name
 #                   "work-item-service" to match scrummaster's
 #                   canonicalWorkItems.js default WORKITEM_SERVICE_URL
 #                   (http://work-item-service:9100)
-#   - relay      — outbox relay (REQ-06), its own container so it can be
+#   - relay      — outbox relay, its own container so it can be
 #                   killed/restarted independently of api/consumers
-#   - consumers  — Streams command + webhook consumers (REQ-03/REQ-09/REQ-11)
+#   - consumers  — Streams command + webhook consumers
 services:
   workitem-postgres:
     image: postgres:16-alpine

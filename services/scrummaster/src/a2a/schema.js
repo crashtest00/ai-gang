@@ -4,9 +4,9 @@
 //
 // This is a hand-rolled validator rather than a JSON Schema library: the
 // object model is small and fixed (Part, Message, Task, Artifact, AgentCard,
-// the pub/sub envelope), and strict "no unknown top-level keys" checking is
-// exactly what REQ-04 asks for (routing/integration data must live in
-// `metadata`, never invented as a sibling top-level field).
+// the pub/sub envelope), and strict "no unknown top-level keys" checking
+// keeps routing/integration data confined to `metadata`, never invented as
+// a sibling top-level field.
 
 class A2AValidationError extends Error {
   constructor(objectKind, errors) {

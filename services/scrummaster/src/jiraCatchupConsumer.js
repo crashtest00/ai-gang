@@ -1,10 +1,10 @@
 'use strict';
 
-// canonical-work-model.md REQ-15 — the downstream half of the connect-Jira
+// The downstream half of the connect-Jira
 // catch-up push. services/work-item-service/workitems/catchup.py selects local work
 // items still missing an external_key and emits one
 // work_item.jira_catchup_requested event per item via the normal outbox/
-// relay mechanism (internal-work-item-service.md REQ-05/REQ-06); catchup.py's
+// relay mechanism; catchup.py's
 // own module comment names this module as the other half of that split: "a
 // downstream Jira-facing consumer (ScrumMaster's jira.js) creates the actual
 // Jira issue and reports the resulting key back via recordExternalKey,
@@ -13,7 +13,7 @@
 // One durable consumer per project on the internal work-item service's
 // outbound event stream (aigang:workitems:{project}:events, group
 // "jira-catchup") — the same "any interested subscriber creates its own
-// group" pattern REQ-05/REQ-06 describe, mirroring gateway.js's per-project
+// group" pattern, mirroring gateway.js's per-project
 // consumer setup.
 
 const jira = require('./jira');
@@ -29,8 +29,8 @@ const ISSUE_TYPE_BY_CANONICAL_TYPE = {
   task: 'Task',
 };
 
-// canonical-work-item-schema.md §3.1: "type ... e.g. story, task, subtask.
-// Vocabulary owned by this feature" — not an exhaustive enum, so an
+// The canonical work item schema's `type` field is a vocabulary (e.g.
+// story, task, subtask), not an exhaustive enum, so an
 // unrecognized type falls back to a capitalized guess rather than failing.
 function issueTypeFor(canonicalType) {
   if (ISSUE_TYPE_BY_CANONICAL_TYPE[canonicalType]) return ISSUE_TYPE_BY_CANONICAL_TYPE[canonicalType];
@@ -77,8 +77,8 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
 async function pushWorkItemToJira(workItemId, projectName) {
   const item = await canonicalWorkItems.getWorkItem(workItemId);
   if (!item) return; // deleted/unknown by the time this ran — nothing to push.
-  // REQ-15: "a canonical id that already has a recorded Jira key from a
-  // prior attempt MUST be skipped rather than re-created" — checked here,
+  // A canonical id that already has a recorded Jira key from a
+  // prior attempt must be skipped rather than re-created — checked here,
   // not only in recordExternalKey, so a redelivered event (e.g. this
   // handler crashed after creating the Jira issue but before publishing
   // recordExternalKey) can't create a second Jira issue for the same item.

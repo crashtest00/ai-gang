@@ -29,7 +29,7 @@ function freshTask(overrides = {}) {
 
 test.beforeEach(() => taskStore._reset());
 
-// REQ-02 — Task identity and lifecycle
+// Task identity and lifecycle
 
 test('register + applyTransition exercises every lifecycle state', () => {
   const { task, taskId } = freshTask();
@@ -131,7 +131,7 @@ test('an interrupted task is resumable without changing task identity', () => {
   assert.equal(taskStore.lastMessage(taskId).messageId, replyId, 'a new Message identity is created for the continuation');
 });
 
-// REQ-06 — lineage and immutability
+// Lineage and immutability
 
 test('lineage can be walked backward through referenceMessageId', () => {
   const { task, taskId, contextId, messageId } = freshTask();

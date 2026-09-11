@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # init-project.sh
 #
-# Initialises a new AI Gang project in local mode (canonical-work-model.md
-# REQ-14: local mode is the unconditional default, Jira mode cannot be
-# chosen at init):
+# Initialises a new AI Gang project in local mode (local mode is the
+# unconditional default; Jira mode cannot be chosen at init):
 #   1. Prompts for project name
 #   2. Creates the project folder under ~/ai-gang/projects/
 #   3. Registers the project (local mode, no Jira project/workflow)
 #
 # Pass --connect-jira to additionally perform one-time Jira-instance
-# bootstrapping for this project (REQ-14/REQ-15: connecting Jira is always a
-# separate, later, explicitly-requested operation — never offered as part of
-# the default interactive flow above):
+# bootstrapping for this project (connecting Jira is always a separate,
+# later, explicitly-requested operation — never offered as part of the
+# default interactive flow above):
 #   4. Prompts for a Jira project key
 #   5. Runs create-jira-fields.sh (idempotent — creates missing fields, skips existing)
 #   6. Registers the Jira webhook
@@ -921,7 +920,7 @@ echo ""
 echo "Done."
 echo ""
 if [[ "$CONNECT_JIRA" != "true" ]]; then
-  echo "  Initialised in local mode (default, REQ-14) — no Jira project or workflow was created."
+  echo "  Initialised in local mode (default) — no Jira project or workflow was created."
   echo "  To connect this project to Jira later, re-run with --connect-jira."
   echo ""
 fi

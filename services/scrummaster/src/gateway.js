@@ -18,7 +18,7 @@ const { redispatchImplementationOwner, dispatchTask, reportAssignmentFailure: re
 // One durable consumer per project's gateway stream (aigang:gateway:{project},
 // group "scrummaster") — replaces the single `PSUBSCRIBE jira-gateway:*`
 // subscriber. Project identity comes from which stream a consumer is bound
-// to, never from message content (redis-streams.md REQ-03).
+// to, never from message content.
 const consumers = [];
 
 async function startGatewaySubscriber() {
@@ -45,8 +45,8 @@ async function stopGatewaySubscriber() {
 
 // Top-level entry point for every gateway stream entry. Rejects a payload
 // whose declared project doesn't match the stream it arrived on (dead-letters
-// without ever reaching a handler — REQ-03), then runs the operation exactly
-// once per messageId (REQ-05) so a redelivered entry that already completed
+// without ever reaching a handler), then runs the operation exactly
+// once per messageId so a redelivered entry that already completed
 // doesn't repeat its side effects.
 async function handleGatewayEnvelope(envelope, projectName) {
   const expectedProject = registry.normalizeProjectName(projectName);
@@ -71,16 +71,15 @@ async function handleGatewayEnvelope(envelope, projectName) {
 
 // Routes a gateway envelope to the right handler family:
 //  - kind=TASK_STATUS: the project container's own subscriber reporting an
-//    execution outcome (redis-streams.md REQ-07) — infrastructure-level, not
-//    agent-authored A2A content.
-//  - operation=materializeDecomposition: dependency-handling.md's own
-//    structured-data contract, out of this feature's REQ-09 list.
-//  - type=pipeline_retry: Jenkins-originated, not agent-authored A2A content
-//    (release-workflow.md REQ-11).
-//  - everything else: agent-authored A2A content (the
-//    a2a-messaging design) — comment, reassign, create_subtask, blocked, and
-//    completed (with an optional pull-request Artifact) all arrive here as
-//    one canonical `{ state, message, artifacts? }` submission.
+//    execution outcome — infrastructure-level, not agent-authored A2A
+//    content.
+//  - operation=materializeDecomposition: dependency handling's own
+//    structured-data contract.
+//  - type=pipeline_retry: Jenkins-originated, not agent-authored A2A content.
+//  - everything else: agent-authored A2A content — comment, reassign,
+//    create_subtask, blocked, and completed (with an optional pull-request
+//    Artifact) all arrive here as one canonical
+//    `{ state, message, artifacts? }` submission.
 async function dispatchGatewayOperation(envelope, projectName) {
   if (envelope.kind === KIND.TASK_STATUS) {
     return handleTaskStatus(envelope, projectName);
@@ -99,11 +98,10 @@ async function dispatchGatewayOperation(envelope, projectName) {
   return handleA2ASubmission(envelope, projectName);
 }
 
-// Materialize a Refinement Agent decomposition, mode-aware per
-// canonical-work-model.md REQ-12: dependencies.js's routeMaterialization
-// sends a Jira-mode project through the exact existing Jira-subtask-and-
-// dependency-link path (dependency-handling.md) unchanged, and a local-mode
-// project to the Internal Work-Item Service instead. Validation and
+// Materialize a Refinement Agent decomposition, mode-aware:
+// dependencies.js's routeMaterialization sends a Jira-mode project through
+// the exact existing Jira-subtask-and-dependency-link path unchanged, and a
+// local-mode project to the Internal Work-Item Service instead. Validation and
 // no-progress failures already post an explanatory Jira comment inside
 // dependencies.js's Jira-mode path — retrying an unmodified invalid/stalled
 // decomposition can't succeed, so those are re-thrown as permanent to
@@ -132,7 +130,7 @@ async function handleMaterializeDecomposition(msg, projectName) {
 }
 
 // Handle a terminal Task outcome reported by a project container's
-// subscriber (redis-streams.md REQ-07). A 'completed' status is informational
+// subscriber. A 'completed' status is informational
 // — the agent's own gateway submission already carries the human-readable
 // summary. A 'failed' status (retry exhaustion, timeout, or an invalid
 // message) has no such comment, so ScrumMaster must post one itself and
@@ -189,8 +187,8 @@ async function handleTaskStatus(envelope, projectName) {
   return null;
 }
 
-// Handle a pipeline-failure retry request from Jenkins (release-workflow.md
-// REQ-11). The message identifies the ticket and the failed build but never
+// Handle a pipeline-failure retry request from Jenkins. The message
+// identifies the ticket and the failed build but never
 // asserts an agent owner — ScrumMaster looks up the ticket's own preserved
 // Agent field and redispatches that agent. Deduplicated per (ticket, build) —
 // a domain-level dedupe independent of this message's own messageId, since
@@ -222,8 +220,7 @@ async function handlePipelineRetry(msg, _projectName) {
 // the resulting state/message/artifacts into the canonical-state side
 // effects the legacy per-type gateway operations used to perform directly
 // against Jira (comment, set_blocked, set_agent_field, create_subtask,
-// open_pr — see the a2a-messaging design REQ-09). Mode-aware
-// per canonical-work-model.md REQ-07/REQ-12/REQ-18: a Jira-mode project
+// open_pr). Mode-aware: a Jira-mode project
 // keeps the exact existing Jira-write behavior; a local-mode project routes
 // the same decisions through the Internal Work-Item Service's Streams
 // command channel instead — the same split dependencies.js's
@@ -231,8 +228,8 @@ async function handlePipelineRetry(msg, _projectName) {
 // below is the Task's stable external-facing key regardless of mode: in
 // Jira mode it's the real Jira issue key, in local mode it's the canonical
 // work item id (handlers.js's dispatchTask stores `issue.key` under this
-// name in both cases — REQ-21's "no local-mode-specific dispatch code
-// path").
+// name in both cases — dispatch deliberately has no local-mode-specific
+// code path).
 async function handleA2ASubmission(envelope, projectName) {
   const msg = envelope.payload || {};
   const errors = [];
@@ -387,8 +384,8 @@ function formatReference(reference) {
 // `reference` is untyped agent-supplied data (dataPart.data.reference) —
 // either a plain string or a { file, function } pair. The internal API's
 // appendComment command has dedicated referenceFile/referenceFunction
-// fields (canonical-work-model.md REQ-18), so pull them out structurally
-// when available; a bare string reference has nothing to split and still
+// fields, so pull them out structurally when available; a bare string
+// reference has nothing to split and still
 // reaches the reader via the formatted comment body itself.
 function referenceFields(reference) {
   if (reference && typeof reference === 'object') {
@@ -398,12 +395,12 @@ function referenceFields(reference) {
 }
 
 // Post one comment, mode-aware. `formattedBody` is the exact text both
-// modes post — REQ-18's acceptance requires "the same body/reference
-// content in both modes", so this does not reformat per destination, only
-// redirect it: Jira mode keeps the existing jira.postComment call, local
-// mode routes the same text through the Internal Work-Item Service's
-// appendComment Streams command (REQ-07 — no Jira call may be required to
-// succeed). `ctx.messageId` is threaded through as the comment's
+// modes post — both modes must show the same body/reference content, so
+// this does not reformat per destination, only redirect it: Jira mode
+// keeps the existing jira.postComment call, local mode routes the same
+// text through the Internal Work-Item Service's appendComment Streams
+// command (no Jira call may be required to succeed). `ctx.messageId` is
+// threaded through as the comment's
 // sourceMessageId so a redelivered gateway entry can't double-post it
 // (append_comment's own redelivery guard).
 async function postComment(ticketKey, ctx, agentName, formattedBody, reference) {
@@ -439,8 +436,8 @@ async function postFormattedComment(ticketKey, agentName, body, reference, ctx) 
 
 // Jira mode represents "blocked/needs input" as a boolean field layered on
 // top of whatever status the ticket is already in. The canonical vocabulary
-// has no equivalent boolean — 'needs-clarification' (canonical-work-model.md
-// REQ-02) is the minimum-vocabulary status that means the same thing, so
+// has no equivalent boolean — 'needs-clarification' is the
+// minimum-vocabulary status that means the same thing, so
 // local mode transitions into it instead of flipping a flag.
 async function handleInterrupted(ticketKey, agentName, state, body, reference, ctx) {
   const label = state === 'auth-required' ? 'AUTHORIZATION REQUIRED' : 'BLOCKED';
@@ -486,8 +483,8 @@ async function handleTerminalFailure(ticketKey, agentName, state, body, ctx) {
 // a PR — post a comment only. Opening a PR must not move the ticket out of
 // "In Progress" or change its recorded implementation owner: Jenkins is the
 // sole owner of the "In Review" transition, firing only after tests pass,
-// merge, and beta deploy succeed (release-workflow.md REQ-10) — a Jira-mode
-// concern only (canonical-work-model.md REQ-22's Release carve-out), so
+// merge, and beta deploy succeed — a Jira-mode
+// concern only (Release work items are carved out of this), so
 // local mode has no status transition to make here in either branch.
 async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   const prArtifact = (artifacts || []).find(a => a.name === 'pull-request');
@@ -511,9 +508,8 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
 }
 
 // Report a rejected agent-field/agentFieldValue assignment back to the
-// requester, mode-aware (agent-assignment.md REQ-09 "visible assignment
-// failure" — canonical-work-model.md REQ-13 requires this property to keep
-// holding for canonical work items too). Jira mode keeps the existing
+// requester, mode-aware — a visible assignment failure must stay visible
+// for canonical work items too, not just Jira ones. Jira mode keeps the existing
 // handlers.js behavior untouched. Local mode has no Blocked field to flip,
 // so it transitions to 'needs-clarification' like handleInterrupted above.
 async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
@@ -546,9 +542,9 @@ async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
   console.error(`[gateway] ${ticketKey} assignment rejected — requested "${requestedAgent}" (${result.code})`);
 }
 
-// Change a ticket's recorded implementation owner (the
-// agent-assignment design REQ-05: every path that creates or changes agent
-// responsibility must go through the same catalog-backed validator).
+// Change a ticket's recorded implementation owner. Every path that creates
+// or changes agent responsibility must go through the same catalog-backed
+// validator.
 async function handleReassign(record, agentFieldValue, agentName, ctx) {
   const ticketKey = record.jiraIssueKey;
   if (!agentFieldValue) {
@@ -590,15 +586,15 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
 // Refinement Agent decompositions (a single-subtask, no-dependency
 // decomposition is a degenerate case of the same contract; materialize.py
 // creates it and immediately transitions it to 'ready'). This is
-// deliberate, not a shortcut: canonical-work-model.md REQ-21 requires every
-// dispatch-eligible transition to go through the same
+// deliberate, not a shortcut: every
+// dispatch-eligible transition must go through the same
 // work-item-service-event -> dispatchConsumer.js path regardless of
 // ingress, so this function must NOT call dispatchTask directly for a
 // local-mode subtask — dispatchConsumer.js's existing consumer on
 // work_item.status_changed picks up the 'ready' transition and dispatches
 // it the same way it dispatches every other local-mode work item. The
 // subtask id is minted here (a bare UUID — WorkItem.id is a UUIDField,
-// REQ-01's "AI-Gang-issued id") and guarded by the same
+// an AI-Gang-issued id) and guarded by the same
 // getOutcome/recordOutcome idempotency pattern as the Jira-mode subtask key,
 // so a from-scratch retry reuses the same id instead of materializing a
 // second work item.

@@ -2,7 +2,6 @@ name: Release desktop
 
 # Triggered only by a version tag Jenkins pushes as part of the production-promote
 # job, once a Release ticket moves to Done (see
-# the desktop-app-support design REQ-07 and
 # jenkins/scripts/tag-desktop-release.sh). No human or agent pushes this tag
 # directly — Jenkins is the only caller.
 on:

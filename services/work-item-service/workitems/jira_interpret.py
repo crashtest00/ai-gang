@@ -1,5 +1,5 @@
 """
-canonical-work-model.md REQ-22 — platform-specific interpretation of a Jira
+Platform-specific interpretation of a Jira
 webhook payload lives entirely here (and in webhook_consumer.py, which
 calls these functions), never in ScrumMaster or any other Streams client.
 
@@ -55,7 +55,7 @@ def _text_field(fields: dict, env_name: str) -> Optional[str]:
     return value or None
 
 
-# REQ-17 — the same five fields handlers.js's REQUIRED_STORY_FIELDS gates,
+# The same five fields handlers.js's REQUIRED_STORY_FIELDS gates,
 # with the same human-readable labels (used verbatim in the Jira comment
 # ScrumMaster's Jira-effects consumer posts, so the operator-facing text is
 # byte-for-byte the same as V1).
@@ -69,7 +69,7 @@ REQUIRED_STORY_FIELDS = (
 
 
 def parse_story_fields(fields: dict) -> dict[str, Optional[str]]:
-    """REQ-17 — the seven-field Story schema contract. Title is handled by
+    """The seven-field Story schema contract. Title is handled by
     the caller (issue.fields.summary -> display_name); this returns the
     remaining six that live in work_item_story_detail."""
     fields = fields or {}
@@ -85,7 +85,7 @@ def parse_story_fields(fields: dict) -> dict[str, Optional[str]]:
 
 
 def missing_story_fields(detail: dict) -> list[str]:
-    """Returns the human-readable labels of any of the five REQ-17-required
+    """Returns the human-readable labels of any of the five required
     fields that are empty — same rule and same labels as handlers.js's
     REQUIRED_STORY_FIELDS gate."""
     detail = detail or {}
@@ -103,7 +103,7 @@ def parse_agent_field(fields: dict) -> Optional[str]:
 
 
 def parse_release_fields(fields: dict) -> dict[str, Optional[str]]:
-    """Release ticket fields — the release-workflow design.
+    """Release ticket fields.
     Target Project is a Jira project-picker field: {key, name, ...}."""
     fields = fields or {}
     target_project_field = _field_id('JIRA_TARGET_PROJECT_FIELD_ID')

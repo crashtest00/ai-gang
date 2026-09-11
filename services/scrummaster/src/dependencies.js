@@ -1,6 +1,6 @@
 'use strict';
 
-// Dependency-aware subtask handling (the dependency-handling design).
+// Dependency-aware subtask handling.
 //
 // ScrumMaster is not an AI agent: this module performs only the deterministic
 // Jira writes and reads the spec describes. It never infers a dependency that
@@ -27,12 +27,11 @@ class MaterializationNoProgressError extends Error {
   }
 }
 
-// services/scrummaster/src/assignment.js (agent-assignment.md) owns catalog-backed
-// validation of proposed agent owners. It is required, not optional: PRD
-// section 7.2 prohibits any path that creates or changes agent responsibility
-// without that validation, so if the module cannot be loaded this function
-// fails closed (refuses to materialize anything) rather than silently
-// skipping the check.
+// services/scrummaster/src/assignment.js owns catalog-backed
+// validation of proposed agent owners. It is required, not optional: no
+// path may create or change agent responsibility without that validation,
+// so if the module cannot be loaded this function fails closed (refuses to
+// materialize anything) rather than silently skipping the check.
 function loadAssignmentModule() {
   try {
     // eslint-disable-next-line global-require
@@ -42,9 +41,9 @@ function loadAssignmentModule() {
   }
 }
 
-// REQ-01 through REQ-07 of dependency-handling.md: process one complete
-// Refinement Agent decomposition message and materialize it into Jira as
-// subtasks and dependency links, order-independently and idempotently.
+// Process one complete Refinement Agent decomposition message and
+// materialize it into Jira as subtasks and dependency links,
+// order-independently and idempotently.
 //
 // message: { parentJiraIssueKey, subtasks: [{ id, displayName, description,
 //   agent, "Blocked By": [] }, ...] } — the structured-data content of the
@@ -70,8 +69,7 @@ async function materializeDecomposition(message, projectName, deps = {}) {
   }
 
   // Assignment integrity: reject the whole decomposition atomically on any
-  // invalid owner. Nothing is written to Jira from a rejected decomposition
-  // (agent-assignment.md REQ-03/04, PRD AC-10).
+  // invalid owner. Nothing is written to Jira from a rejected decomposition.
   const validation = assignment.validateDecomposition(projectName, subtasks);
   if (!validation.ok) {
     const list = validation.rejected
@@ -90,8 +88,8 @@ async function materializeDecomposition(message, projectName, deps = {}) {
 
   // Recover proposal UUID -> Jira key from subtasks already materialized
   // under this parent, so redelivery after a partial run (crash, retry)
-  // reuses existing subtasks and links instead of duplicating them
-  // (REQ-04, REQ-07). This map is scratch state for this call only — it is
+  // reuses existing subtasks and links instead of duplicating them.
+  // This map is scratch state for this call only — it is
   // never persisted or reused across invocations.
   const existingSubtasks = await jira.getSubtasksByParent(parentJiraIssueKey);
   const idToKey = new Map();
@@ -119,11 +117,10 @@ async function materializeDecomposition(message, projectName, deps = {}) {
   const pending = subtasks.slice();
   let progressed = true;
 
-  // Order-independent multi-pass materialization (dependency-handling.md
-  // "Order-independent materialization handler"). A proposal resolved
+  // Order-independent multi-pass materialization. A proposal resolved
   // earlier in this same invocation counts as existing for a later proposal
-  // in the same pass — the spec explicitly allows this ("a subtask created
-  // earlier in this invocation... qualifies as existing").
+  // in the same pass — a subtask created earlier in this invocation
+  // deliberately qualifies as already existing.
   while (pending.length > 0 && progressed) {
     progressed = false;
 
@@ -196,10 +193,9 @@ async function materializeDecomposition(message, projectName, deps = {}) {
   return { idToKey };
 }
 
-// Triggered when a Sub-task transitions to Done (dependency-handling.md
-// "Done Handler"). Stateless and idempotent: derives every decision from
-// live Jira status and links, so a replayed or out-of-order Done event
-// cannot dispatch the same dependent subtask twice (REQ-07).
+// Triggered when a Sub-task transitions to Done. Stateless and idempotent:
+// derives every decision from live Jira status and links, so a replayed or
+// out-of-order Done event cannot dispatch the same dependent subtask twice.
 async function handleSubtaskDone(issueKey, deps = {}) {
   const jira = deps.jira || jiraDefault;
 
@@ -227,14 +223,12 @@ async function handleSubtaskDone(issueKey, deps = {}) {
   }
 }
 
-// canonical-work-model.md's Implementation Status item: "Extend catalog-
-// backed assignment validation... to validate and record against canonical
-// work item ids" and the sibling item covering the internal dependency
+// Extends catalog-backed assignment validation to validate and record
+// against canonical work item ids, and covers the internal dependency
 // graph — this is the mode-aware entry point that satisfies both without
 // touching materializeDecomposition above, which remains the exact,
-// unmodified Jira-mode implementation every existing dependency-handling.md
-// acceptance check already covers (REQ-12: no regression for a Jira-mode
-// project).
+// unmodified Jira-mode implementation with no regression for a Jira-mode
+// project.
 //
 // message: { parentId, subtasks } — `parentId` is a Jira issue key in Jira
 // mode or a canonical work item id in local mode; the caller does not need
@@ -250,7 +244,7 @@ async function routeMaterialization(message, projectName, deps = {}) {
   const mode = await canonicalWorkItems.getMode(projectName);
 
   if (mode.mode === 'jira') {
-    // Unchanged path — REQ-12.
+    // Unchanged path — no regression for a Jira-mode project.
     return materializeDecomposition(
       { parentJiraIssueKey: message.parentId, subtasks: message.subtasks },
       projectName,
@@ -259,13 +253,12 @@ async function routeMaterialization(message, projectName, deps = {}) {
   }
 
   // Local mode: no Jira ticket exists to materialize into. Publish a single
-  // Streams command to the Internal Work-Item Service's command channel
-  // (internal-work-item-service.md REQ-03) — the service's own
-  // materialize.js applies the identical order-independent, atomic-rejection
-  // algorithm against its own store. This function does not itself validate
-  // agents or write anything: REQ-10's write-gating and REQ-13's
-  // single-validator rule both require that to happen only inside the
-  // internal API's own write path, not duplicated here.
+  // Streams command to the Internal Work-Item Service's command channel —
+  // the service's own materialize.js applies the identical
+  // order-independent, atomic-rejection algorithm against its own store.
+  // This function does not itself validate agents or write anything: the
+  // write-gating and single-validator rules both require that to happen
+  // only inside the internal API's own write path, not duplicated here.
   return canonicalWorkItems.publishCommand(projectName, {
     command: 'materializeDecomposition',
     actor: 'refinement-agent',

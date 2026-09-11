@@ -4,13 +4,12 @@
 // lineage validation for A2A Tasks, Messages, and Artifacts.
 //
 // This store is intentionally in-memory only and does not survive a
-// ScrumMaster restart. Durable, restart-safe Task state is the explicit
-// concern of FEATURE-REDIS-STREAMS (the redis-streams design);
-// this feature (A2A messaging) defines the object model and lifecycle rules,
-// not their persistence. A restart while Tasks are in flight loses in-memory
-// Task identity — REQ-07's "must not create a new assignment for the
-// continuation" therefore only holds within one ScrumMaster process lifetime
-// until that follow-on feature lands.
+// ScrumMaster restart. Durable, restart-safe Task state is a separate
+// concern handled by Redis Streams; this module defines the object model
+// and lifecycle rules, not their persistence. A restart while Tasks are in
+// flight loses in-memory Task identity — the guarantee that a continuation
+// must not create a new assignment therefore only holds within one
+// ScrumMaster process lifetime.
 
 const schema = require('./schema');
 
@@ -124,7 +123,7 @@ function checkArtifactLineage(record, artifact) {
 //
 // Idempotent per task.id: a caller's handler can legitimately be retried in
 // full (a partial-failure retry of the surrounding webhook/gateway handler —
-// see dispatch.js and redis-streams.md's dedupeKey pattern) and rebuild the
+// see dispatch.js and the Streams dedupeKey pattern) and rebuild the
 // same taskId from scratch. The *first* registration's initial message wins;
 // a retried registration attempt is a no-op that returns the existing record
 // unchanged, since the actual dispatch it would have produced is separately

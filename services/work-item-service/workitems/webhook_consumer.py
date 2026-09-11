@@ -1,26 +1,26 @@
 """
-canonical-work-model.md REQ-09 (durable, retried webhook ingestion), REQ-11
-(Jira-originated events are validated before being applied) and REQ-22
-(all platform-specific interpretation lives in Django; every ingested
-event is republished).
+Durable, retried webhook ingestion; Jira-originated events are validated
+before being applied; and all platform-specific interpretation lives in
+Django, with every ingested event republished.
 
-**Amended 2026-09-09 for REQ-09/REQ-22.** This module originally only
-applied a `changelog` entry with `field == 'status'` and silently ignored
-everything else (comments, issue links, issue creation, Release events) —
-a known, tracked gap. It now interprets the full webhook payload:
+**Amended 2026-09-09 to close a durability/coverage gap.** This module
+originally only applied a `changelog` entry with `field == 'status'` and
+silently ignored everything else (comments, issue links, issue creation,
+Release events) — a known, tracked gap. It now interprets the full webhook
+payload:
 
   - `jira:issue_created` for a Story: creates the canonical work item
-    (REQ-17's five-field gate decides whether it starts `ready`
+    (the five-field gate decides whether it starts `ready`
     (dispatch-eligible) or stuck in `proposed`), matching
     handlers.js's `handleStoryCreated`.
   - `jira:issue_created` for a Release: recorded and republished as a
     `work_item.jira_release_event` (kind `requested`) — see the module
     docstring section below on the Release scope carve-out.
-  - `comment_created`/`comment_updated`: projected into REQ-18's
-    canonical comment thread via `store.append_comment` (previously
+  - `comment_created`/`comment_updated`: projected into the canonical
+    comment thread via `store.append_comment` (previously
     silently discarded).
   - `jira:issue_updated` changelog, per item:
-      - `field == 'status'`: the existing REQ-11-validated transition
+      - `field == 'status'`: the existing validated transition
         path (`_apply_validated_status_change`), now also branching to a
         `work_item.jira_release_event` for a Release ticket's `Done`
         transition (production-promote gate).
@@ -31,16 +31,15 @@ a known, tracked gap. It now interprets the full webhook payload:
         `work_item.jira_release_event` (kind `abandoned`).
       - anything else (issue links, arbitrary custom fields): durably
         recorded and republished as a generic `work_item.jira_event_received`
-        event rather than dropped (REQ-22: "a consumer with no use for a
-        given event today MAY ignore it, but Django MUST NOT decide on
-        ingestion that an event is irrelevant and drop it").
+        event rather than dropped — a consumer with no use for a
+        given event today may ignore it, but Django must not decide on
+        ingestion that an event is irrelevant and drop it.
 
 **Scope carve-out, deliberate (see final report for the full reasoning):**
 Release-ticket business logic (the beta-queue-clean check ahead of cutting
 a release candidate, and the Jenkins job triggers themselves) is NOT
-reimplemented here. `internal-work-item-service.md`'s own REQ-09
-resolution establishes that this service "has no Jira client of its own
-... and never calls Jira directly," and the beta-queue-clean check needs a
+reimplemented here. This service has no Jira client of its own and never
+calls Jira directly, and the beta-queue-clean check needs a
 live Jira JQL search ScrumMaster's Jira-mode subtask-creation path
 (`dependencies.js`'s `materializeDecomposition`, unchanged/out of scope
 for this task) does not mirror into this service's own store — so this
@@ -55,11 +54,11 @@ now invoked by ScrumMaster's new dispatch/side-effect consumer
 `server.js`'s deleted `routeWebhookEvent`.
 
 Design decision (carried over unchanged from before this amendment):
-REQ-09's durability requirement itself is satisfied by
+The durability requirement itself is satisfied by
 `workitems/views.py`'s `jira_webhook` view, which now durably enqueues
 every inbound Jira webhook onto `aigang:webhooks:{project}` — moved here
-from `services/scrummaster/src/server.js` per REQ-09's 2026-09-09 amendment ("Django
-... is AI Gang's sole external-facing surface"). This module remains the
+from `services/scrummaster/src/server.js` since Django is now AI Gang's
+sole external-facing surface. This module remains the
 consumer half: the `workitemservice` consumer group on that same stream.
 """
 
@@ -96,12 +95,12 @@ def default_resolve_work_item_id(issue_key: str):
     return row.id if row else None
 
 
-# canonical-work-model.md REQ-02: "each canonical status MUST map to a
+# Each canonical status must map to a
 # configured Jira status through validated project configuration, not a
-# hardcoded or display-label-dependent mapping." This is the fallback for a
+# hardcoded or display-label-dependent mapping. This is the fallback for a
 # project that hasn't declared its own mapping via
 # project_config.declare_custom_status — not itself the validated
-# configuration REQ-02 requires.
+# configuration that rule requires.
 DEFAULT_JIRA_STATUS_MAP = {
     'Shovel Ready': 'ready',
     'In Progress': 'in-progress',
@@ -113,7 +112,7 @@ DEFAULT_JIRA_STATUS_MAP = {
 
 def jira_status_to_canonical(project: str, jira_status_name: str) -> str:
     """Per-project configured mapping first (ProjectStatusConfig rows,
-    covering both minimum-set overrides and custom statuses — REQ-02 does
+    covering both minimum-set overrides and custom statuses — this mapping does
     not distinguish the two for mapping purposes), falling back to the
     built-in default map for a project that hasn't configured its own."""
     for row in project_config.get_custom_statuses(project):
@@ -130,7 +129,7 @@ def _publish_side_effect(project: str, work_item_id, jira_issue_key: str, kind: 
     the consumer only executes the Jira/Jenkins call using values this
     event already carries. Must be called from inside an existing
     transaction.atomic() block so it lands atomically with whatever
-    canonical write (if any) it accompanies (REQ-06)."""
+    canonical write (if any) it accompanies."""
     store.write_outbox_event(
         project=project, event_type='work_item.jira_side_effect', work_item_id=work_item_id,
         payload={'kind': kind, 'jiraIssueKey': jira_issue_key, 'detail': detail},
@@ -138,9 +137,9 @@ def _publish_side_effect(project: str, work_item_id, jira_issue_key: str, kind: 
 
 
 def _record_generic_event(project: str, work_item_id, jira_issue_key: str, envelope: dict, detail: dict) -> None:
-    """REQ-22: "Django MUST durably record and republish every ingested
-    event as a canonical domain event ... not only the subset that maps to
-    an existing canonical work-item field." Catch-all for anything this
+    """Django durably records and republishes every ingested
+    event as a canonical domain event, not only the subset that maps to
+    an existing canonical work-item field. Catch-all for anything this
     module has no specific interpretation for yet (issue links, arbitrary
     changelog fields, unrecognized top-level event kinds, or an event
     whose issue key hasn't (yet) become a tracked canonical work item)."""
@@ -156,7 +155,7 @@ def _issuetype_of(issue: dict) -> Optional[str]:
 
 
 def _sync_story_detail(item: WorkItem, fields: dict) -> None:
-    """Re-parse the REQ-17 story fields from a webhook's current `issue`
+    """Re-parse the story fields from a webhook's current `issue`
     snapshot and persist them, so a later edit in Jira (after this item's
     canonical record was first created) is reflected before any gate
     re-check. No-op for a non-story item."""
@@ -183,9 +182,9 @@ def _apply_validated_status_change(item: WorkItem, jira_status_name: str, issue_
         store.transition_status(item.id, target_status, actor=f'jira-webhook:{issue_key}',
                                  origin=write_gate.Origins.JIRA_WEBHOOK)
     except Exception as err:
-        # REQ-11: "MUST be rejected and recorded as a failure event...
-        # rather than applied... MUST NOT be treated as automatically
-        # correct because it originated in Jira."
+        # Rejected and recorded as a failure event
+        # rather than applied — never treated as automatically
+        # correct just because it originated in Jira.
         record_failure(item.project, item.id, issue_key, str(err),
                         {'jiraStatusName': jira_status_name, 'envelopeId': envelope.get('messageId')})
 
@@ -260,10 +259,10 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
             _sync_story_detail(item, issue.get('fields') or {})
 
         # Mirrors handleStoryCreated/handleBlockedCleared's refinement-agent
-        # branch: re-run the exact same REQ-17 gate by attempting the same
+        # branch: re-run the exact same story-fields gate by attempting the same
         # transition a fresh Shovel-Ready-equivalent would attempt. Success
         # publishes the ordinary work_item.status_changed event, which is
-        # all the dispatch consumer needs (REQ-21) — no extra event required.
+        # all the dispatch consumer needs — no extra event required.
         try:
             with transaction.atomic():
                 store.transition_status(item.id, 'ready', actor=f'jira-webhook:{issue_key}',
@@ -292,7 +291,7 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
 
 
 # ---------------------------------------------------------------------------
-# Comments (REQ-18) and Release events — see module docstring for the
+# Comments and Release events — see module docstring for the
 # Release scope carve-out.
 # ---------------------------------------------------------------------------
 
@@ -384,7 +383,7 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         return
 
     # Issue links, arbitrary custom fields, anything not specifically
-    # interpreted above — recorded and republished, never dropped (REQ-22).
+    # interpreted above — recorded and republished, never dropped.
     _record_generic_event(project, work_item_id, issue_key, envelope,
                            {'field': field, 'from': change.get('fromString'), 'to': change.get('toString')})
 
@@ -393,7 +392,7 @@ def handle_webhook_envelope(envelope: dict[str, Any], *,
                              resolve_work_item_id: Callable[[str], Any] = default_resolve_work_item_id) -> None:
     """envelope['payload']: { event, issue, body } — the same shape
     workitems/views.py's jira_webhook view (moved here from
-    services/scrummaster/src/server.js per REQ-09's amendment) publishes for every
+    services/scrummaster/src/server.js per the durability amendment) publishes for every
     Jira webhook."""
     delay_ms = int(os.environ.get(_ROW_DELAY_ENV, '0') or 0)
     if delay_ms:
@@ -426,7 +425,7 @@ def handle_webhook_envelope(envelope: dict[str, Any], *,
         return
 
     # An event kind this module has no specific interpretation for —
-    # durably recorded, never silently dropped (REQ-22).
+    # durably recorded, never silently dropped.
     work_item_id = resolve_work_item_id(issue_key)
     _record_generic_event(project, work_item_id, issue_key, envelope, {'event': event})
 

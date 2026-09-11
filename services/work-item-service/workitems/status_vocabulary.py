@@ -1,9 +1,9 @@
 """
-canonical-work-model.md REQ-02 — the minimum canonical status vocabulary.
+The minimum canonical status vocabulary.
 Direct port of the Node service's src/statusVocabulary.js. Fixed names,
-never stored in the database, never reconfigurable — REQ-02: "the minimum
+never stored in the database, never reconfigurable — the minimum
 ten statuses remain available under their fixed names regardless of
-project configuration."
+project configuration.
 """
 
 MINIMUM_STATUSES = (
@@ -21,7 +21,7 @@ MINIMUM_STATUSES = (
 
 MINIMUM_STATUS_SET = set(MINIMUM_STATUSES)
 
-# Terminal-ish statuses REQ-20's rollup policy keys off of.
+# Terminal-ish statuses the parent-rollup policy keys off of.
 TERMINAL_STATUSES = ('done', 'cancelled', 'failed')
 
 
@@ -62,6 +62,6 @@ def validate_status(status, custom_statuses):
 
 def baseline_of(status, custom_statuses):
     """Resolve a status to its baseline (itself, if already a minimum-set
-    status) — used by REQ-20 rollup and dispatch-eligibility logic."""
+    status) — used by parent-rollup and dispatch-eligibility logic."""
     result = validate_status(status, custom_statuses)
     return result['baseline'] if result['ok'] else None

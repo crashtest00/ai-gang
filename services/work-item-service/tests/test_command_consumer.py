@@ -85,9 +85,9 @@ def test_req03_unknown_command_is_dead_lettered(clean_db, redis_client, redis_fa
         consumer.stop()
 
 
-def test_req15_record_external_key_command_over_streams_is_idempotent(clean_db, redis_client, redis_factory):
-    """canonical-work-model.md REQ-15: jiraCatchupConsumer.js reports a
-    newly-created Jira issue's key back via this command. Not REQ-10-gated
+def test_record_external_key_command_over_streams_is_idempotent(clean_db, redis_client, redis_factory):
+    """jiraCatchupConsumer.js reports a
+    newly-created Jira issue's key back via this command. Not gated
     (external_key isn't a status/assignment/dependency field), and applying
     it twice (a redelivered command) must not error or overwrite a
     different key — record_external_key's own idempotency contract."""
@@ -111,7 +111,7 @@ def test_req15_record_external_key_command_over_streams_is_idempotent(clean_db, 
     assert store.get_work_item(item_id).external_key == 'GANG-1'
 
 
-def test_req10_status_change_against_jira_mode_project_is_dead_lettered(clean_db, redis_client, redis_factory):
+def test_status_change_against_jira_mode_project_is_dead_lettered(clean_db, redis_client, redis_factory):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Gated'})
     project_config.set_mode(PROJECT, 'jira')
@@ -130,10 +130,10 @@ def test_req10_status_change_against_jira_mode_project_is_dead_lettered(clean_db
 
 
 def test_release_candidate_cut_against_dirty_queue_is_dead_lettered(clean_db, redis_client, redis_factory):
-    """canonical-release-workflow.md REQ-03 — a store.ReleaseGateError is a
+    """A store.ReleaseGateError is a
     well-formed rejection (a dirty beta queue, not a transient failure), so
     a candidate-cut command arriving over Streams must be dead-lettered
-    immediately rather than retried, same as REQ-10's write-gate rejection
+    immediately rather than retried, same as the write-gate rejection
     above."""
     release_id = uuid.uuid4()
     outstanding_id = uuid.uuid4()

@@ -69,8 +69,8 @@ function envelope({ contextId, referenceMessageId, state, parts, artifacts }) {
 test.beforeEach(() => taskStore._reset());
 
 // Every existing test in this file exercises Jira-mode behavior (the
-// existing, unmodified jira.* side effects) — canonical-work-model.md
-// REQ-12: no required behavior change for a Jira-mode project. gateway.js
+// existing, unmodified jira.* side effects) — no required behavior change
+// for a Jira-mode project. gateway.js
 // now reads the project's mode via canonicalWorkItems.getMode() before
 // deciding which side effect to perform, so that real HTTP call needs
 // stubbing out here the same way jira.js's calls already are.
@@ -201,7 +201,7 @@ test('completed with a pull-request artifact posts only a comment — no transit
     PROJECT_NAME
   );
 
-  assert.equal(calls.length, 1, 'only postComment — Jenkins owns the In Review transition (release-workflow.md REQ-10)');
+  assert.equal(calls.length, 1, 'only postComment — Jenkins owns the In Review transition');
   assert.equal(calls[0][0], 'postComment');
   assert.match(calls[0][2], /github\.com\/org\/repo\/pull\/7/);
 });
@@ -506,7 +506,7 @@ test('create_subtask rejection names every missing required field and blocks cau
   assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'working');
 });
 
-// REQ-03 — the gateway direction must not accept a reversed (client) role
+// The gateway direction must not accept a reversed (client) role
 
 test('a message with role "client" on the gateway channel is dropped', async (t) => {
   const { contextId, messageId } = registerTask();
@@ -557,7 +557,7 @@ test('an invalid submission (bad state) is dropped without touching Jira', async
   assert.equal(called, false);
 });
 
-// handlePipelineRetry (release-workflow.md REQ-11) — Jenkins reports a failed
+// handlePipelineRetry — Jenkins reports a failed
 // build back over the gateway channel; ScrumMaster redispatches the ticket's
 // recorded implementation owner. redispatchImplementationOwner/dispatchTask
 // are destructured into gateway.js at load time, so they run for real here —
@@ -621,8 +621,8 @@ test('the pipeline_retry dedupe key is derived from the ticket and build, fallin
   assert.equal(dedupeKey, 'retry-dispatch:GANG-70:17');
 });
 
-// --- Local-mode routing (canonical-work-model.md REQ-07/REQ-12/REQ-18/
-// REQ-21) — the same submissions above, but for a project in local mode:
+// --- Local-mode routing — the same submissions above, but for a project
+// in local mode:
 // every write must go through canonicalWorkItems.publishCommand's Streams
 // command channel instead of jira.*, and no Jira call may occur.
 
@@ -789,7 +789,7 @@ test('local mode: create_subtask publishes a single-subtask materializeDecomposi
   assert.equal(subtask.agent, 'backend-agent');
   assert.ok(subtask.id, 'a canonical subtask id must be minted');
   assert.equal(recorded, subtask.id, 'the minted id is recorded for idempotent retry');
-  assert.equal(publishToAgentStream, false, 'gateway.js must not dispatch directly — REQ-21 requires dispatch to follow the work_item.status_changed event');
+  assert.equal(publishToAgentStream, false, 'gateway.js must not dispatch directly — dispatch must follow the work_item.status_changed event');
 });
 
 test('local mode: create_subtask reuses the previously-minted id on a from-scratch retry, without re-publishing', async (t) => {
@@ -836,7 +836,7 @@ test('local mode: create_subtask with an invalid agent reports a visible failure
   assert.equal(transition.payload.status, 'needs-clarification');
 });
 
-// handleTaskStatus (redis-streams.md REQ-07 execution-outcome signal) — a
+// handleTaskStatus (execution-outcome signal) — a
 // container's subscriber wrapper reporting retry exhaustion, exercised
 // against both modes since it has its own mode branch independent of
 // handleA2ASubmission's.

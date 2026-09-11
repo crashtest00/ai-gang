@@ -6,7 +6,7 @@ const path = require('node:path');
 
 // Point the singleton registry at the fixture catalog/project config before
 // requiring assignment.js (which requires registry.js internally) —
-// agent-assignment.md REQ-03..REQ-05: this is the sole validator every
+// this is the sole validator every
 // assignment-producing path must call.
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, 'fixtures', 'agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, 'fixtures', 'projects.json');

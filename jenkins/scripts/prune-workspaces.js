@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// Scheduled workspace pruning (REQ-01), invoked nightly by the
+// Scheduled workspace pruning, invoked nightly by the
 // jenkins-cache-retention-nightly job (jenkins/jenkins.yaml), and also
-// callable directly by the threshold sweep (REQ-03,
-// disk-usage-sweep.js) — the two triggers share this exact logic per the
-// spec's "one policy, two triggers" design.
+// callable directly by the threshold sweep (disk-usage-sweep.js) — the two
+// triggers share this exact logic: one policy, two triggers.
 //
 // Impure orchestration only: all actual prune/keep decisions come from
 // lib/retention-policy.js. This file's job is to gather real inputs
@@ -51,7 +50,7 @@ async function main(argv = process.argv.slice(2), overrides = {}) {
 
   // Ask Jenkins first: which jobs are multibranch parents (needed to walk
   // the workspace tree correctly at all) and which job/branches are
-  // currently building (REQ-04) both come from the same API call.
+  // currently building both come from the same API call.
   let buildingKeys, multibranchJobNames;
   try {
     ({ buildingKeys, multibranchJobNames } = await fetchJenkinsJobState({
@@ -62,8 +61,8 @@ async function main(argv = process.argv.slice(2), overrides = {}) {
     }));
   } catch (err) {
     // If we can't reliably learn what's building, the only safe behavior
-    // (REQ-04 outranks REQ-01's cadence) is to prune nothing this run
-    // rather than guess.
+    // (never pruning outranks staying on cadence) is to prune nothing this
+    // run rather than guess.
     console.error(`prune-workspaces: could not query Jenkins for in-progress builds (${err.message}); skipping this run to avoid pruning an active build's workspace`);
     appendPruneRecord({ trigger, skipped: true, reason: 'jenkins-api-unreachable' });
     return;

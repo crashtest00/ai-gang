@@ -5,7 +5,6 @@ const { deriveAgentCard } = require('./a2a/agentCard');
 
 // Canonical agent catalog (services/scrummaster/config/agents.json) and per-project
 // available-agent configuration (services/scrummaster/config/projects.json).
-// See the agent-assignment design REQ-01 and REQ-02.
 //
 // Both are loaded and validated once, at first use (effectively at process
 // startup — see index.js, which calls load() eagerly so a malformed catalog
@@ -153,9 +152,9 @@ function load() {
   projects = parseProjects(readJson(pPath), pPath, catalog);
   console.log(`[registry] Loaded ${projects.size} project(s) from ${pPath}`);
 
-  // Fail fast: every registered agent must produce a valid AgentCard (REQ-08
-  // of the a2a-messaging design). A catalog entry that can't
-  // derive one is a configuration error, not a runtime-recoverable condition.
+  // Fail fast: every registered agent must produce a valid AgentCard. A
+  // catalog entry that can't derive one is a configuration error, not a
+  // runtime-recoverable condition.
   agentCardsById = new Map();
   for (const id of catalog.ids) {
     agentCardsById.set(id, deriveAgentCard(catalog.byId.get(id)));
@@ -215,18 +214,17 @@ function getEffectiveAgents(projectName) {
     .filter(Boolean);
 }
 
-// Stream topology (the redis-streams design §4). Logical
+// Stream topology. Logical
 // names are stable configuration, never accepted from an untrusted payload —
 // every caller must derive `project` from the configured destination it is
 // already bound to (a Jira issue's own project, or the stream a consumer is
 // reading), not from message content.
 const GATEWAY_GROUP = 'scrummaster';
-// canonical-work-model.md REQ-15 / internal-work-item-service.md REQ-05-06:
-// this service's own consumer group on the internal work-item service's
+// This service's own consumer group on the internal work-item service's
 // outbound event stream (any interested subscriber creates its own group —
 // see services/work-item-service/workitems/stream_topology.py's module comment).
 const JIRA_CATCHUP_GROUP = 'jira-catchup';
-// canonical-work-model.md REQ-21 — ScrumMaster's dispatch-trigger consumer
+// ScrumMaster's dispatch-trigger consumer
 // group on that SAME outbound event stream. A second, independent
 // subscriber (Streams' normal fan-out — every interested consumer gets its
 // own group), not a replacement for JIRA_CATCHUP_GROUP.

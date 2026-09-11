@@ -2,8 +2,7 @@ services:
   scrummaster:
     build: .
     container_name: scrummaster
-    # internal-work-item-service.md REQ-08 / canonical-work-model.md REQ-09
-    # (both amended 2026-09-09): Django/work-item-service is AI Gang's sole
+    # Django/work-item-service is AI Gang's sole
     # external-facing surface; ScrumMaster MUST NOT expose any externally
     # reachable port or route. No `ports:` mapping at all — the container
     # still listens on 9000 for /health, reachable only from other

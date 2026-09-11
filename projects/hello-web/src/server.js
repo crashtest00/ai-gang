@@ -1,7 +1,6 @@
 'use strict';
 
-// AI Gang web deployment-target boilerplate
-// (the deployment-target-boilerplate design REQ-01/REQ-02).
+// AI Gang web deployment-target boilerplate.
 //
 // Deliberately minimal, but real: a working Express server serving a
 // static page and a health endpoint, the same role `expo init`/

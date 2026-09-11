@@ -1,8 +1,7 @@
 """
-canonical-work-model.md's dependency-graph-port item: "Implement the
-internal dependency graph store and port the order-independent multi-pass
-materialization and no-progress handling from dependency-handling.md §4 to
-operate against it." Direct port of the Node service's src/materialize.js,
+The internal dependency graph store, porting the order-independent
+multi-pass materialization and no-progress handling to
+operate against it. Direct port of the Node service's src/materialize.js,
 itself a port of services/scrummaster/src/dependencies.js's materializeDecomposition
 algorithm — same order-independent multi-pass loop, same no-progress
 detection, same atomic all-or-nothing assignment validation — retargeted
@@ -39,9 +38,9 @@ class MaterializationNoProgressError(Exception):
 def materialize_decomposition(message: dict, project: str, *, actor: str = 'refinement-agent') -> dict:
     """message: { parentWorkItemId, subtasks: [{ id, displayName,
     description, agent, "Blocked By": [] }, ...] } — same shape
-    dependency-handling.md's decomposition contract already defines, with
+    the decomposition contract already defines, with
     `parentJiraIssueKey` renamed to `parentWorkItemId` (a canonical id, not
-    a Jira key — REQ-01)."""
+    a Jira key)."""
     parent_work_item_id = message and message.get('parentWorkItemId')
     subtasks = message and message.get('subtasks')
 
@@ -72,7 +71,7 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
         for proposal in subtasks:
             existing = store.get_work_item(proposal['id'])
             if existing:
-                id_to_work_item_id[proposal['id']] = proposal['id']  # canonical id === proposal id, REQ-01.
+                id_to_work_item_id[proposal['id']] = proposal['id']  # canonical id === proposal id.
 
         linked_pairs: set[str] = set()
 
@@ -105,7 +104,7 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
                         'description': proposal.get('description'),
                         'assigneeAgentId': proposal.get('agent'),
                         'parentId': parent_work_item_id or None,
-                        # REQ-02's minimum vocabulary distinguishes
+                        # The minimum status vocabulary distinguishes
                         # 'waiting-on-dependency' from 'proposed'; a
                         # dependent subtask starts life already known to be
                         # gated. Root subtasks stay 'proposed' here and are
@@ -131,7 +130,7 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
             raise MaterializationNoProgressError(unresolved)
 
         # Only root (independent) subtasks enter 'ready' — dependents stay
-        # 'waiting-on-dependency', gated by REQ-04's blockers check in
+        # 'waiting-on-dependency', gated by the blockers check in
         # store.py.
         for proposal_id in root_proposal_ids:
             store.transition_status(proposal_id, 'ready', actor=actor, origin=write_gate.Origins.DIRECT)

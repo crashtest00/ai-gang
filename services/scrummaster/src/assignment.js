@@ -1,11 +1,10 @@
 'use strict';
 
 // Catalog-backed agent-assignment validation — the sole acceptance boundary
-// for agent responsibility (the agent-assignment design
-// REQ-03..REQ-05). Every path that creates or changes agent responsibility
-// (initial refinement/decomposition, Shovel Ready dispatch, blocked-clear
-// redispatch, reassignment) MUST call this module rather than writing a
-// literal agent id to Jira or dispatching an agent directly.
+// for agent responsibility. Every path that creates or changes agent
+// responsibility (initial refinement/decomposition, Shovel Ready dispatch,
+// blocked-clear redispatch, reassignment) MUST call this module rather than
+// writing a literal agent id to Jira or dispatching an agent directly.
 //
 // Pure and transport-agnostic: no Jira or Redis calls, so callers on any
 // transport (pub/sub today, Redis Streams elsewhere) can use it identically.
@@ -46,7 +45,7 @@ function validateAssignment(projectName, agentId) {
 }
 
 // Validate an entire proposed decomposition atomically: every subtask's
-// `agent` must be valid, or the whole batch is rejected together (REQ-04).
+// `agent` must be valid, or the whole batch is rejected together.
 // subtasks: [{ id, displayName, agent, ... }]
 // Returns { ok: true } or:
 //   { ok: false, errorCode: 'INVALID_AGENT_ASSIGNMENT',

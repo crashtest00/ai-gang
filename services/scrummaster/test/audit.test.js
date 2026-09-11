@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { diffAgentFieldOptions } = require('../src/audit');
 
-// agent-assignment.md REQ-07: the audit must identify each of the four drift
+// The audit must identify each of the four drift
 // classes independently and report ok:true only when none are present.
 
 test('reports ok when Jira options exactly match the catalog', () => {

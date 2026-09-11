@@ -1,9 +1,8 @@
 # Hello Web
 
 The checked-in, running reference instance of AI Gang's web
-deployment-target boilerplate
-(the deployment-target-boilerplate design REQ-01),
-paralleling `projects/hello-desktop/`'s role for the desktop target.
+deployment-target boilerplate, paralleling `projects/hello-desktop/`'s role
+for the desktop target.
 
 This top-level `Dockerfile`/`docker-compose.yml` is the generic AI Gang
 agent dev container (mounts `./src` as `/workspace`, same as every other

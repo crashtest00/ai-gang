@@ -1,9 +1,8 @@
 'use strict';
 
-// messageId format ("msg-<uuid>") matches the A2A id convention
-// (a2a-messaging.md) so the two features don't mint competing shapes. Now
-// that a2a-messaging.md has landed, this repoints to the canonical generator
-// rather than minting its own — see a2a/ids.js.
+// messageId format ("msg-<uuid>") matches the A2A id convention so the two
+// features don't mint competing shapes. This repoints to the canonical
+// generator rather than minting its own — see a2a/ids.js.
 const { newMessageId } = require('./a2a/ids');
 
 const SCHEMA_VERSION = '1';
@@ -13,12 +12,11 @@ const KIND = Object.freeze({
   TASK_STATUS: 'task_status',
   JIRA_OPERATION: 'jira_operation',
   WEBHOOK_EVENT: 'webhook_event',
-  // the internal-work-item-service design REQ-03/REQ-05: a
-  // command into, or an outbound change/rejection event out of, the
+  // A command into, or an outbound change/rejection event out of, the
   // Internal Work-Item Service's canonical work-item store. Added for V2
   // rather than reusing WEBHOOK_EVENT/JIRA_OPERATION — neither name
   // describes a canonical work-item command/event, and this envelope
-  // format (not a new one) is exactly what REQ-03 requires reusing.
+  // format (not a new one) is what's meant to be reused here.
   WORK_ITEM_COMMAND: 'work_item_command',
   WORK_ITEM_EVENT: 'work_item_event',
 });

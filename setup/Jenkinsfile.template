@@ -5,8 +5,7 @@
 // actual install/test/build/deploy commands (see docs/ClaudeInstructions.md
 // Phase 2 and setup/DEVOPS_HANDBOOK_v1.md).
 //
-// Implements the per-story flow from the release-workflow design
-// (REQ-01, REQ-10, REQ-11) as TWO builds of this one file. A single build
+// Implements the per-story flow as TWO builds of this one file. A single build
 // can't do it all: the PR build IS the required status check that unlocks
 // the merge, and GitHub only performs that merge after the build has posted
 // its final status -- i.e. after the build has ended. So anything that must
@@ -17,7 +16,7 @@
 //      Install -> Test -> Build, then `gh pr merge --auto`. GitHub squash-
 //      merges the PR into `dev` once this build reports success. Nothing
 //      beta- or Jira-status-related happens here. The ticket stays In
-//      Progress (REQ-10).
+//      Progress.
 //
 //   2. dev build (BRANCH_NAME = dev), triggered by the push that merge makes
 //      Install -> Test -> Build again on the merged tip (the only build that
@@ -35,9 +34,9 @@
 //
 // On failure of either build, Jenkins posts attributable evidence to the
 // affected ticket(s) and publishes a `pipeline_retry` message to ScrumMaster
-// over the same durable gateway Streams transport agents use (REQ-11), via
-// the same gateway-publish.js helper agent prompts call (redis-streams.md
-// REQ-01 -- no PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It never
+// over the same durable gateway Streams transport agents use, via
+// the same gateway-publish.js helper agent prompts call (Streams-based
+// delivery only -- no PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It never
 // names an agent; ScrumMaster looks up the ticket's recorded owner.
 //
 // Release preview and production promotion are NOT handled here -- they're
@@ -221,8 +220,8 @@ pipeline {
         }
 
         // TODO: project-specific deploy-to-Beta-VM command. Per the Beta VM
-        // remote-deploy mechanism (release-workflow.md Dependencies),
-        // Jenkins connects over a restricted SSH key forced to a fixed
+        // remote-deploy mechanism, Jenkins connects over a restricted SSH
+        // key forced to a fixed
         // deploy command -- it never gets a shell or direct Docker API access:
         //   sh "ssh beta-deploy@\$BETA_VM_HOST deploy ${env.PROJECT_NAME} ${env.PROMOTE_SHA}"
         echo 'TODO: deploy this build to the Beta VM'
@@ -247,8 +246,8 @@ pipeline {
         // the same way jira.js's postComment() and transitionIssue() do.
         //
         // Evidence first, then -- and only then -- In Review: this is the
-        // single place a ticket leaves In Progress on the happy path
-        // (REQ-10). A ticket with no In Review transition available (e.g.
+        // single place a ticket leaves In Progress on the happy path.
+        // A ticket with no In Review transition available (e.g.
         // already reviewed or Done) keeps its evidence and its status.
         sh '''
           for ticket in $PROMOTE_TICKETS; do
@@ -293,7 +292,7 @@ pipeline {
           // Ticket never left In Progress on this run, so there's nothing to
           // transition back -- just post attributable evidence and ask
           // ScrumMaster to redispatch the ticket's own recorded owner. The
-          // message never names an agent (REQ-11) -- ScrumMaster is the only
+          // message never names an agent -- ScrumMaster is the only
           // thing allowed to decide who that is. A failed comment must not
           // swallow the retry signal, so each step is best-effort.
           withEnv(["FAILED_TICKETS=${tickets.join(' ')}", "FAILURE_TEXT=${what}"]) {

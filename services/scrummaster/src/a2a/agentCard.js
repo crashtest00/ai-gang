@@ -6,10 +6,10 @@ const schema = require('./schema');
 // `agentCard` block. Routing metadata (id, definitionPath,
 // routing.channelSuffix) is a separate concern and is not part of the card.
 //
-// agent-assignment.md's own catalog contract (REQ-01) requires only
-// `agentCard.{name,description}` — a card is still derivable from just that,
-// per this feature's REQ-08 ("a machine-readable AgentCard MUST be derivable
-// from that definition"). When `skills` is absent, synthesize the one
+// The catalog contract requires only `agentCard.{name,description}` — a
+// card is still derivable from just that, since a machine-readable
+// AgentCard must be derivable from any catalog entry. When `skills` is
+// absent, synthesize the one
 // implicit skill an agent with a single description obviously has, rather
 // than hard-failing catalog load for every entry that predates this field.
 function deriveAgentCard(entry) {

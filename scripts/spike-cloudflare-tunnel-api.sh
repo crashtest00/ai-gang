@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # spike-cloudflare-tunnel-api.sh
 #
-# One-shot spike for REQ-11 of the graph-process-engine design
-# ("Token-based tunnel creation"). NOT part of the production setup path —
-# do not wire this into scripts/setup-cloudflare-tunnel.sh yet.
+# One-shot spike for token-based tunnel creation. NOT part of the
+# production setup path — do not wire this into
+# scripts/setup-cloudflare-tunnel.sh yet.
 #
 # RESOLVED 2026-09-06 against a real account: token-based creation works with
 # config_src="local" (a locally-managed tunnel — the same kind
@@ -12,9 +12,8 @@
 # generic "Authentication error" (code 10000) regardless of token
 # permissions added — that failure is specific to the remotely-managed
 # tunnel type, not a token/permission gap, and is not something this
-# feature needs to solve since "local" already satisfies REQ-11 (no browser
-# login step). See graph-process-engine.md's Open Questions section for the
-# full writeup.
+# feature needs to solve since "local" already satisfies the no-browser-
+# login-step requirement.
 #
 # What this script does, against a real Cloudflare account:
 #   1. Creates a throwaway tunnel via POST /accounts/{account_id}/cfd_tunnel
@@ -71,7 +70,7 @@ echo "Test tunnel name: $TEST_TUNNEL_NAME"
 # --- Step 1: create ---
 # config_src="local" is required here — "cloudflare" (remotely-managed)
 # fails on this account regardless of token permissions; see the header
-# comment and graph-process-engine.md's Open Questions section.
+# comment above.
 echo ""
 echo "Creating tunnel via POST /accounts/{account_id}/cfd_tunnel..."
 CREATE_RESULT=$(auth_curl -X POST "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnel" \

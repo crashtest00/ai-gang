@@ -1,12 +1,11 @@
 """
-Starts the two Streams consumers (REQ-03 command channel, REQ-09/REQ-11
-webhook validation) for every configured project, and blocks until
+Starts the two Streams consumers (the command channel and webhook
+validation) for every configured project, and blocks until
 SIGTERM/SIGINT. Mirrors the consumer half of the Node service's
 src/index.js `main()` — the HTTP API is served separately (Django's own
 runserver/gunicorn against workitemservice.wsgi, see manage.py runserver /
 Procfile-style deployment), and the outbox relay runs as its own process
-(`python manage.py relay`) so it can be killed/restarted independently
-(REQ-06's Open Question 1).
+(`python manage.py relay`) so it can be killed/restarted independently.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 'use strict';
 
-// Detection logic for the branch-tracking/stale-ref branch-point class
-// (graph-process-engine.md REQ-13): does the current branch's upstream
+// Detection logic for the branch-tracking/stale-ref branch-point class:
+// does the current branch's upstream
 // tracking ref still match the remote's actual current default branch,
 // or has a server-side rename left it stale?
 //

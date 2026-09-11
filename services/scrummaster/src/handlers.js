@@ -15,11 +15,11 @@ const { buildTextPart, buildMessage, buildTask } = require('./a2a/parts');
 const { buildEnvelope, KIND } = require('./envelope');
 const { buildTaskPrompt, buildUnblockPrompt, buildRetryPrompt } = require('./prompt');
 
-// Dispatch or continue the one A2A Task for a Jira issue (the a2a-messaging
-// design REQ-02, REQ-07: one Task per ticket for its
-// whole lifecycle — assignment, unblock, and pipeline-retry/rework
-// redispatch are all continuations of the same Task, never a new
-// assignment). `promptFactory(task, message)` receives the not-yet-
+// Dispatch or continue the one A2A Task for a Jira issue: one Task per
+// ticket for its whole lifecycle — assignment, unblock, and
+// pipeline-retry/rework redispatch are all continuations of the same
+// Task, never a new assignment. `promptFactory(task, message)` receives
+// the not-yet-
 // published task id/contextId/messageId so prompt text can embed them for
 // the agent to reference in its replies.
 //
@@ -27,7 +27,7 @@ const { buildTaskPrompt, buildUnblockPrompt, buildRetryPrompt } = require('./pro
 // the triggering webhook envelope's own messageId) so that a partial-failure
 // retry of the calling handler (dispatch succeeds, a later Jira call throws)
 // does not launch a second concurrent copy of the same task when the handler
-// re-runs from scratch (redis-streams.md REQ-05). Known limitation: such a
+// re-runs from scratch. Known limitation: such a
 // retry does re-run this function and appends a second, never-actually-
 // transmitted continuation message to the in-memory Task record before
 // streams.publish's own dedupeKey discards the duplicate XADD — harmless
@@ -86,8 +86,8 @@ async function dispatchTask(issue, agent, { dispatchId, promptFactory }) {
   console.log(`[handler] Dispatched (${state}) for ${issue.key} to ${agent.id} on ${stream}`);
 }
 
-// Post a durable, visible record of a rejected agent assignment
-// (the agent-assignment design REQ-09). Identifies the
+// Post a durable, visible record of a rejected agent assignment.
+// Identifies the
 // attempted responsibility, requested agent, failure reason, and recovery
 // action, and never reports the responsibility as assigned, in progress, or
 // complete — callers must return without dispatching or transitioning.
@@ -161,8 +161,8 @@ async function handleStoryCreated(issueKey, { dispatchId } = {}) {
 
   // The Refinement Agent's assignment decisions become authoritative only
   // through the catalog-backed decomposition tool, but it still needs the
-  // project's effective allowed-agent set up front to choose sensibly
-  // (agent-assignment.md REQ-03) — derived from the catalog, never hardcoded.
+  // project's effective allowed-agent set up front to choose sensibly —
+  // derived from the catalog, never hardcoded.
   const allowedAgents = registry.getEffectiveAgents(issue.projectName);
 
   await dispatchTask(issue, agent, {
@@ -274,16 +274,16 @@ async function handleBlockedCleared(issueKey, { dispatchId } = {}) {
 
 // Handler 4: A ticket's status changed to "Done".
 // For a Sub-task, this also runs the dependency-handling Done Handler, which
-// dispatches any dependent subtask whose blockers are now all Done
-// (the dependency-handling design) — independent of, and in
+// dispatches any dependent subtask whose blockers are now all Done —
+// independent of, and in
 // addition to, the rest of this function. For a Story/Sub-task otherwise,
 // Done means "accepted on beta" — beta already has the code from the
 // automatic per-merge deploy, so there's nothing to promote. For a Release
 // ticket, Done is the single production-approval gate: promote the exact SHA
-// that was previewed. See the release-workflow design.
+// that was previewed.
 // `ref` is `{ jiraIssueKey }` (Jira mode — unchanged) or
-// `{ workItemId, project }` (local mode, canonical-release-workflow.md
-// V2.1 — no Jira ticket to fetch). dispatchConsumer.js branches the raw
+// `{ workItemId, project }` (local mode — no Jira ticket to fetch).
+// dispatchConsumer.js branches the raw
 // event payload into one or the other before calling in.
 async function handleDone(ref) {
   const { jiraIssueKey, workItemId, project } = ref;
@@ -316,7 +316,7 @@ async function handleDone(ref) {
   }
 
   // Local mode: this handler is only ever reached for a `release` work
-  // item's own Done transition (REQ-05) — the Sub-task dependency-unblock
+  // item's own Done transition — the Sub-task dependency-unblock
   // branch above is Jira-mode-only; store.py's transition_status already
   // does the local-mode-native equivalent (_unblock_dependents) for every
   // mode-agnostic work item, release or otherwise, so there is nothing to
@@ -334,12 +334,12 @@ async function handleDone(ref) {
 
 // Handler 5: A new Release ticket was created in Jira, or a local-mode
 // `release` work item's own `proposed` -> `in-review` transition was
-// validated (canonical-release-workflow.md REQ-03/REQ-04). Jira mode's
+// validated. Jira mode's
 // beta-queue-clean check runs HERE, as it always has; local mode's runs in
 // Django BEFORE this event is ever published (store.py's
 // transition_status), so there is nothing left to re-check here — a local-
 // mode event reaching this handler at all already means the queue was
-// clean, per REQ-21's "same event, same consumer" pattern.
+// clean, since both modes route through this same event/consumer pair.
 async function handleReleaseRequested(ref) {
   const { jiraIssueKey, workItemId, project } = ref;
 
@@ -380,7 +380,7 @@ async function handleReleaseRequested(ref) {
 }
 
 // Handler 6: A Release ticket was abandoned (resolution set to "Abandoned"),
-// or a local-mode `release` work item reached `cancelled` (REQ-06). Tears
+// or a local-mode `release` work item reached `cancelled`. Tears
 // down its preview container so it doesn't outlive the release.
 async function handleReleaseAbandoned(ref) {
   const { jiraIssueKey, workItemId, project } = ref;
@@ -404,7 +404,7 @@ async function handleReleaseAbandoned(ref) {
 }
 
 // Redispatch a ticket's recorded implementation owner with updated Jira
-// context (release-workflow.md REQ-11). Used both for a Jenkins pipeline-retry
+// context. Used both for a Jenkins pipeline-retry
 // message and for a human moving a ticket from "In Review" back to
 // "In Progress" after requesting rework in a comment. Never invents an
 // owner — if the ticket has none recorded, it is surfaced rather than guessed.
@@ -437,7 +437,7 @@ async function redispatchImplementationOwner(issueKey, evidence, { dispatchId } 
 }
 
 // Handler 7: a human moved a ticket from "In Review" back to "In Progress"
-// to request rework after beta review (release-workflow.md REQ-11). The
+// to request rework after beta review. The
 // human is expected to have already left a comment explaining the request;
 // redispatchImplementationOwner includes the full comment thread in the
 // agent's prompt.
@@ -486,7 +486,7 @@ module.exports = {
   // assignment-validation paths as webhook-triggered dispatch.
   dispatchTask,
   reportAssignmentFailure,
-  // Exported for reuse by dispatchConsumer.js's REQ-21 continuation
+  // Exported for reuse by dispatchConsumer.js's continuation
   // dispatch (the same BLOCKED-marker resume flow handleBlockedCleared's
   // non-refinement branch already used).
   findBlockedMarker,

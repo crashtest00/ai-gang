@@ -1,9 +1,8 @@
 """
 Catalog-backed agent/project registry — a Python reimplementation of the
 parts of services/scrummaster/src/registry.js this service needs for catalog-backed
-assignment validation (agent-assignment.md REQ-01/REQ-02, reused here per
-canonical-work-model.md REQ-03/REQ-13's "validated against the same
-catalog-backed validator agent-assignment.md already requires").
+assignment validation, reused here since assignment must be validated
+against the same catalog-backed validator the platform already requires.
 
 Architectural decision (see final report): a Python/Django service cannot
 require() services/scrummaster/src/registry.js. Two options existed: (a) reimplement
@@ -181,8 +180,8 @@ def normalize_project_name(name: str) -> str:
     return str(name).strip().lower()
 
 
-# Stream topology names ScrumMaster's own gateway/webhook flows use
-# (redis-streams.md §4) — reused verbatim so webhook_consumer.py can read
+# Stream topology names ScrumMaster's own gateway/webhook flows use —
+# reused verbatim so webhook_consumer.py can read
 # the SAME webhookStreamName ScrumMaster's server.js already publishes to
 # (see that module's comment for why: a second, independent consumer group
 # on ScrumMaster's existing stream, not a new stream).

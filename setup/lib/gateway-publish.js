@@ -3,9 +3,7 @@
 
 /**
  * Gateway publish helper — replaces `redis-cli publish jira-gateway:$PROJECT`
- * in agent prompts (redis-streams.md: "Replace Pub/Sub commands in generated
- * prompts and agent instructions with a supported Streams gateway
- * command/helper").
+ * in agent prompts with a supported Streams gateway command/helper.
  *
  * Usage:
  *   node /agent-docs/lib/gateway-publish.js <project-name> <path-to-json-file>
@@ -17,13 +15,13 @@
  * operation was NOT durably accepted" and retry.
  *
  * The normal V1 payload shape is the canonical A2A submission documented in
- * SCRUMMASTER_SPEC_v1.md and the a2a-messaging design:
+ * SCRUMMASTER_SPEC_v1.md:
  *   { state, message: { taskId, contextId, ... }, artifacts?: [...] }
  * taskId/contextId for the transport envelope come from that message —
  * never from agent-supplied top-level fields, so an agent cannot misroute a
  * submission by writing a different id at the top level. The legacy
  * ticket_key/parent_ticket_key/parentJiraIssueKey fallbacks below exist only
- * for the dependency-handling.md materializeDecomposition operation, which
+ * for the materializeDecomposition operation, which
  * defines its own structured-data contract outside A2A Message shape.
  */
 

@@ -1,21 +1,22 @@
-# Jira instance setup pilot graph for the escalation node kind
-# (graph-process-engine.md REQ-17), converting docs/ClaudeInstructions.md
+# Jira instance setup pilot graph for the escalation node kind,
+# converting docs/ClaudeInstructions.md
 # Phase 1 (1.0 Jira Service Account, 1.1 Jira Custom Fields).
 #
 # This is scoped to the Jira *instance*, not any one project
 # (docs/ClaudeInstructions.md Phase 1's own framing: "these steps are scoped
 # to the Jira instance, not the project"). It is deliberately NOT the same
-# decision as canonical-work-model.md REQ-14's per-project Jira-vs-local
-# mode switch — REQ-14 explicitly bars selecting Jira mode during a
+# decision as the per-project Jira-vs-local
+# mode switch, which explicitly bars selecting Jira mode during a
 # project's own initialization (every project completes initialization in
-# local mode; connecting Jira is always a separate, later operation, REQ-15)
+# local mode; connecting Jira is always a separate, later operation)
 # — so that per-project switch has no node here at all. What this graph's
 # entry escalation node asks instead is upstream of any single project:
 # whether this AI Gang deployment (this Jira instance) will ever support
 # Jira mode for any project, which gates whether it's worth doing the
 # one-time instance-level setup (service account, custom fields) at all.
 # That's a human's declared preference, not observable environment state —
-# unrepresentable before REQ-17 existed, per setup/graphs/migration-status.md.
+# unrepresentable before the escalation node kind existed, per
+# setup/graphs/migration-status.md.
 #
 # The two branches below aren't full decision/remediation subgraphs of their
 # own: 1.0 and 1.1 remain linear, idempotent action steps once the
@@ -27,12 +28,12 @@ graph_id: jira-instance-setup
 schema_version: 1
 entry: want-jira-integration
 nodes:
-  # --- Escalation: human preference, not observable state (REQ-17) ---
+  # --- Escalation: human preference, not observable state ---
   - id: want-jira-integration
     kind: escalation
     prompt: >-
       Will this AI Gang deployment (this Jira instance) ever connect a
-      project to Jira (Jira mode, canonical-work-model.md REQ-14), or will
+      project to Jira (Jira mode), or will
       every project on it stay in local mode? Jira is optional — decide
       before doing any Jira instance-level setup below.
     branches:
@@ -45,10 +46,10 @@ nodes:
     kind: action
     procedure: >-
       No-op — this AI Gang deployment will not connect any project to Jira
-      for now. Every project stays in local mode
-      (canonical-work-model.md REQ-14); nothing under Phase 1 needs to run.
+      for now. Every project stays in local mode; nothing under Phase 1
+      needs to run.
       This choice is reversible: re-walk this graph and answer "yes"
-      whenever a project first wants to connect Jira (REQ-15).
+      whenever a project first wants to connect Jira.
     writes:
       files: []
       services: []

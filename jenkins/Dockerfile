@@ -30,7 +30,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # `redis` npm package for setup/lib/gateway-publish.js, which the Jenkinsfile
 # invokes to publish the pipeline_retry message durably onto the gateway
-# Streams transport (redis-streams.md REQ-01) instead of legacy Pub/Sub.
+# Streams transport instead of legacy Pub/Sub.
 # gateway-publish.js itself reaches this image via setup/ being bind-mounted
 # read-only at /agent-docs (jenkins/docker-compose.yml), the same mount every
 # project container already uses for its own agent tooling. NODE_PATH must

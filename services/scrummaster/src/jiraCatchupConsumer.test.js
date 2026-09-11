@@ -46,7 +46,7 @@ test('a non-catchup event on the fan-out stream is silently ignored', async (t) 
   assert.equal(called, false);
 });
 
-test('an item that already has an external_key is skipped — REQ-15 idempotency', async (t) => {
+test('an item that already has an external_key is skipped for idempotency', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({ external_key: 'GANG-1' }));
   let createIssueCalled = false;
   t.mock.method(jira, 'createIssue', async () => { createIssueCalled = true; });

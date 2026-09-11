@@ -9,7 +9,7 @@ process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json
 const registry = require('./registry');
 const schema = require('./a2a/schema');
 
-// REQ-08 — every registered agent produces a valid derived AgentCard, and
+// Every registered agent produces a valid derived AgentCard, and
 // advertised skills are distinguishable from internal operating methods.
 
 test('every registered agent produces a valid derived AgentCard', () => {

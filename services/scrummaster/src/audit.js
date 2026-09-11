@@ -1,7 +1,7 @@
 'use strict';
 
-// Periodic Jira Agent-field drift audit (the agent-assignment design
-// REQ-07). Compares the live Jira Agent single-select options against the
+// Periodic Jira Agent-field drift audit. Compares the live Jira Agent
+// single-select options against the
 // agents.json catalog and reports drift; it never modifies agents.json or
 // Jira, and drift here MUST NOT cause runtime assignment validation
 // (services/scrummaster/src/assignment.js) to accept a Jira-only value — that

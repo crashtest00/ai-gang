@@ -39,12 +39,12 @@ function statusChangedEnvelope(workItemId, extra = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// REQ-21's own acceptance test: a local-mode work item (no Jira issue at
+// A local-mode work item (no Jira issue at
 // all) reaches dispatch through the SAME mechanism a Jira-originated one
 // does — no local-mode-specific branch in maybeDispatch.
 // ---------------------------------------------------------------------------
 
-test('REQ-21: a local-mode Story reaching ready dispatches to refinement-agent with no Jira involvement', async (t) => {
+test('a local-mode Story reaching ready dispatches to refinement-agent with no Jira involvement', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
     id: 'wi-local-1', project: PROJECT, type: 'story', status: 'ready',
     assignee_agent_id: 'refinement-agent', external_key: null, parent_id: null,
@@ -69,7 +69,7 @@ test('REQ-21: a local-mode Story reaching ready dispatches to refinement-agent w
   assert.match(dispatched[0].prompt, /## ALLOWED AGENTS/);
 });
 
-test('REQ-21: a Jira-mode item reaching ready dispatches through the identical maybeDispatch code path', async (t) => {
+test('a Jira-mode item reaching ready dispatches through the identical maybeDispatch code path', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
     id: 'wi-jira-1', project: PROJECT, type: 'task', status: 'ready',
     assignee_agent_id: 'backend-agent', external_key: 'GANG-42', parent_id: null,
@@ -138,7 +138,7 @@ test('a dev-agent item already having a Task uses the unblock prompt on redispat
 // rather than a raw Jira changelog match.
 // ---------------------------------------------------------------------------
 
-test('REQ-22: In Review -> In Progress redispatches with the retry prompt (rework)', async (t) => {
+test('In Review -> In Progress redispatches with the retry prompt (rework)', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
     id: 'wi-6', project: PROJECT, type: 'task', status: 'in-progress', assignee_agent_id: 'backend-agent',
     external_key: 'GANG-7', parent_id: null,

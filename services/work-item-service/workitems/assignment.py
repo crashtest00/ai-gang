@@ -1,8 +1,8 @@
 """
 Catalog-backed agent-assignment validation — a Python reimplementation of
-services/scrummaster/src/assignment.js's exact acceptance rules
-(agent-assignment.md REQ-03..REQ-05), reused per canonical-work-model.md
-REQ-03/REQ-13. See registry.py's module comment for why this is a
+services/scrummaster/src/assignment.js's exact acceptance rules, reused
+since assignment must be validated against the same catalog-backed rules
+platform-wide. See registry.py's module comment for why this is a
 reimplementation reading the same on-disk catalog rather than a runtime
 call into ScrumMaster, and the tradeoff that choice carries.
 
@@ -43,7 +43,7 @@ def validate_assignment(project_name: str, agent_id: str) -> dict[str, Any]:
 def validate_decomposition(project_name: str, subtasks: list[dict]) -> dict[str, Any]:
     """Validate an entire proposed decomposition atomically: every
     subtask's `agent` must be valid, or the whole batch is rejected
-    together (REQ-04)."""
+    together."""
     project = registry.get_project(project_name)
     permitted_agents = list(project['agents']) if project else []
 

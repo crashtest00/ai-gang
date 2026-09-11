@@ -35,7 +35,7 @@ test('walks a decision -> action -> terminal path and records a full transcript'
   assert.deepEqual(refs, ['g#check:yes', 'g#do-it:next', 'g#done']);
 });
 
-test('single-node-at-a-time (REQ-07): the walker never records more than one "current" node per step', async () => {
+test('single-node-at-a-time: the walker never records more than one "current" node per step', async () => {
   const doc = decisionDoc();
   const seenConcurrently = [];
   let inFlight = 0;
@@ -101,7 +101,7 @@ test('an unresolved loop is bounded by maxSteps rather than hanging forever', as
   );
 });
 
-// --- fan-out sequential fallback (REQ-16) ---
+// --- fan-out sequential fallback ---
 
 function fanOutDoc() {
   return {
@@ -172,7 +172,7 @@ test('with a dispatchFanOut handler supplied, the walker hands off instead of fa
   assert.deepEqual(entry.branches, ['left', 'right']);
 });
 
-// --- escalation nodes (REQ-17) ---
+// --- escalation nodes ---
 
 function escalationDoc() {
   return {
@@ -195,7 +195,7 @@ function escalationDoc() {
   };
 }
 
-test('walks an escalation node by following the human-resolved branch (REQ-17)', async () => {
+test('walks an escalation node by following the human-resolved branch', async () => {
   const doc = escalationDoc();
   const result = await walkGraph(doc, { resolveEscalation: async () => 'right' });
   assert.equal(result.outcome, 'success');
@@ -215,7 +215,7 @@ test('resolveEscalation is only ever asked once per visit, never derived from a 
   assert.equal(calls, 1);
 });
 
-test('an escalation answer that is not a declared "when" key is rejected (REQ-17)', async () => {
+test('an escalation answer that is not a declared "when" key is rejected', async () => {
   const doc = escalationDoc();
   await assert.rejects(
     () => walkGraph(doc, { resolveEscalation: async () => 'middle' }),
@@ -223,7 +223,7 @@ test('an escalation answer that is not a declared "when" key is rejected (REQ-17
   );
 });
 
-test('reaching an escalation node with no resolveEscalation handler halts the walk (REQ-17)', async () => {
+test('reaching an escalation node with no resolveEscalation handler halts the walk', async () => {
   const doc = escalationDoc();
   await assert.rejects(() => walkGraph(doc, {}), /halts the walk pending a human choice/);
 });

@@ -1,5 +1,5 @@
 """
-internal-work-item-service.md REQ-06 — the outbox relay: reads
+The outbox relay: reads
 OutboxEvent rows written in the same transaction as a datastore write
 (store.py), publishes each to this service's outbound event stream, and
 marks it published. Never the sole mechanism connecting a write to its
@@ -14,7 +14,7 @@ marking published_at, the row is still published_at IS NULL on restart, so
 it is picked up again — and the redo is itself a no-op at the Streams
 layer because `dedupe_key` below reuses the exact same idempotency key on
 every attempt for a given outbox row (streams.py's own SET NX pattern,
-redis-streams.md REQ-05's existing idempotency mechanism).
+the Streams layer's existing idempotency mechanism).
 
 Direct port of the Node service's src/relay.js.
 """

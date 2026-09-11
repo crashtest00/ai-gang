@@ -254,7 +254,7 @@ def test_release_candidate_cut_req03_rejected_when_beta_queue_dirty(clean_db):
 
 def test_release_candidate_cut_ignores_other_releases_in_review(clean_db):
     """A different Release work item sitting in 'in-review' must not itself
-    count as outstanding beta-queue work — REQ-03's Jira-mode-mirrored
+    count as outstanding beta-queue work — the Jira-mode-mirrored
     query explicitly excludes `issuetype != Release`."""
     other_release = _make_release(clean_db)
     store.transition_status(other_release, 'in-review', actor='tester')

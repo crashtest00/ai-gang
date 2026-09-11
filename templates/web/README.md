@@ -1,10 +1,8 @@
 # Hello Web
 
-AI Gang's web deployment-target boilerplate
-(the deployment-target-boilerplate design REQ-01) — a
-minimal, real, independently runnable and deployable Express web app,
-generalizing the pattern V1's `hello-desktop` proved for desktop
-(the desktop-app-support design).
+AI Gang's web deployment-target boilerplate — a minimal, real,
+independently runnable and deployable Express web app, generalizing the
+pattern V1's `hello-desktop` proved for desktop.
 
 - `npm install && npm start` runs it locally (default `http://localhost:3000`).
 - `npm test` runs its test suite (`node --test`).

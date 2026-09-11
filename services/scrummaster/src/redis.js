@@ -6,8 +6,8 @@ const REDIS_URL = `redis://${process.env.REDIS_HOST || 'localhost'}:${process.en
 
 // A single shared connection. Redis Streams commands (XADD, XREADGROUP,
 // XACK, ...) don't need the dedicated subscribe-only connection Pub/Sub
-// required — this replaces the old publisher/subscriber pair (redis-streams.md
-// REQ-01: no PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation).
+// required — this replaces the old publisher/subscriber pair (no
+// PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation).
 let client;
 
 async function connect() {

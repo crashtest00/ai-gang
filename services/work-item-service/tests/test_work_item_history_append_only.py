@@ -1,4 +1,4 @@
-"""canonical-work-item-schema.md REQ-05 — DB-level append-only enforcement
+"""DB-level append-only enforcement
 (migration 0002_work_item_history_append_only): a raw UPDATE or DELETE
 against work_item_history must be rejected by the database itself, not
 merely avoided by application code going through store.py."""
