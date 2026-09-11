@@ -489,3 +489,122 @@ test('a missing dependency this path needs is reported with a clear diagnostic b
   assert.match(result.stderr || '', /requires 'jq'/);
   assert.deepEqual(fs.readdirSync(projectsDir), []);
 });
+
+// ---- stable input across retries: a genuine interruption ----
+
+// The two "stable input across retries" tests above exercise the retry
+// logic itself, but only against a synthetic starting state (a completed
+// run, or a hand-written identity file) — neither ever actually interrupts
+// a live scripts/init-project.sh process. This section drives a real
+// --config run, kills it partway through, and then retries against
+// whatever it genuinely left behind.
+
+// Resolves `commandName` against `originalPath` the same way a shell would,
+// for use as the delegate target of pathWithDelayedCommand below.
+function findRealCommand(commandName, originalPath) {
+  const result = spawnSync('sh', ['-c', `command -v ${commandName}`], {
+    env: { PATH: originalPath },
+    encoding: 'utf8',
+  });
+  const resolved = (result.stdout || '').trim();
+  assert.ok(resolved, `could not resolve a real "${commandName}" on PATH for test setup`);
+  return resolved;
+}
+
+// Like pathWithoutCommand, but instead of removing `commandName` outright,
+// replaces it with a wrapper that sleeps for `delayMs` before delegating to
+// the real binary. scripts/init-project.sh calls `git init` well after the
+// config-identity write this section interrupts after, so slowing that one
+// later step down gives a reliable multi-second window in which to detect
+// the identity file and kill the process, instead of racing a run that
+// would otherwise complete in well under a second.
+function pathWithDelayedCommand(originalPath, commandName, delayMs) {
+  const curatedDir = pathWithoutCommand(originalPath, commandName);
+  const realCommand = findRealCommand(commandName, originalPath);
+  const wrapperPath = path.join(curatedDir, commandName);
+  fs.writeFileSync(
+    wrapperPath,
+    `#!/usr/bin/env bash\nsleep ${(delayMs / 1000).toFixed(3)}\nexec "${realCommand}" "$@"\n`
+  );
+  fs.chmodSync(wrapperPath, 0o755);
+  return curatedDir;
+}
+
+function waitForFile(filePath, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function check() {
+      if (fs.existsSync(filePath)) return resolve();
+      if (Date.now() - start > timeoutMs) return reject(new Error(`timed out waiting for ${filePath}`));
+      setTimeout(check, 20);
+    })();
+  });
+}
+
+function waitForExit(child) {
+  return new Promise((resolve) => child.on('exit', resolve));
+}
+
+test('a genuine interrupt after registration, then a retry with the same config: no duplicate registration, no repeated selection prompts; a further retry with a changed decision against that state is refused', async () => {
+  const { root, projectsDir, projectsConfigPath, env } = makeIsolatedEnv();
+  const configPath = writeConfigFile(root, 'config.json', VALID_CONFIG);
+  const projectDir = path.join(projectsDir, 'acceptance-project');
+  const identityPath = path.join(projectDir, '.aigang-config-identity.json');
+
+  // Spawn the real entrypoint (not spawnSync — this run must be killed
+  // mid-flight), with `git` slowed down on PATH so the interrupt below
+  // lands reliably after the config-identity write but before completion.
+  const delayedPath = pathWithDelayedCommand(env.PATH, 'git', 2000);
+  const child = spawn('bash', [SCRIPT_PATH, '--config', configPath], {
+    cwd: REPO_ROOT,
+    env: { ...env, PATH: delayedPath },
+    // Own process group, so killing the group also kills any descendant
+    // (the delayed-git wrapper's `sleep`, or git itself) instead of
+    // orphaning it to finish writing in the background after the kill.
+    detached: true,
+  });
+  child.stdin.write(CONFIRM_STDIN);
+  child.stdin.end();
+
+  await waitForFile(identityPath, 10000);
+  process.kill(-child.pid, 'SIGKILL');
+  await waitForExit(child);
+
+  assert.ok(fs.existsSync(identityPath), 'the interrupted run must have written the config identity before being killed');
+
+  // Retry with the same config: idempotent resume, no duplicate
+  // registration, no repeated prompt for name/type/stack.
+  const retry = runScript(['--config', configPath], { env });
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+  assert.match(retry.stdout, /resuming idempotently/);
+  const retryOutput = retry.stdout + retry.stderr;
+  assert.doesNotMatch(retryOutput, /Deployment target \(web\/mobile/);
+  assert.doesNotMatch(retryOutput, /Project name \(lowercase/);
+
+  const registryAfterRetry = readProjectsConfig(projectsConfigPath);
+  const matchesAfterRetry = registryAfterRetry.projects.filter((p) => p.name === 'acceptance-project');
+  assert.equal(matchesAfterRetry.length, 1, 'the retry after a genuine interrupt must not register a duplicate project');
+
+  // Against that same (now-completed) state, a further retry with a
+  // changed decision must be refused before any further mutation. The
+  // shipped catalog has exactly one (type, stack) pair, so — the same way
+  // the synthetic "resuming ... different decisions" test above does — the
+  // conflicting prior decision is simulated by tampering the identity
+  // record directly, standing in for what a run under a different catalog
+  // version would have left behind.
+  fs.writeFileSync(
+    identityPath,
+    JSON.stringify({ schemaVersion: 1, name: 'acceptance-project', type: 'web', stack: 'some-other-stack' })
+  );
+  const canary = path.join(projectDir, 'src', 'canary.txt');
+  fs.writeFileSync(canary, 'pre-existing, must not be touched by a refused run');
+
+  const refused = runScript(['--config', configPath], { env });
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /different configuration/);
+  assert.equal(fs.readFileSync(canary, 'utf8'), 'pre-existing, must not be touched by a refused run');
+
+  const registryAfterRefusal = readProjectsConfig(projectsConfigPath);
+  const matchesAfterRefusal = registryAfterRefusal.projects.filter((p) => p.name === 'acceptance-project');
+  assert.equal(matchesAfterRefusal.length, 1, 'a refused retry must not mutate the registry');
+});
