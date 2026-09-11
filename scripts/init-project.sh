@@ -36,6 +36,19 @@
 # resumes idempotently; retrying with a changed name/type/stack against an
 # already-initialised project folder is refused before any further change.
 #
+# A runnable example lives at scripts/init-project.example.json — copy it
+# and edit "name" to try --config directly:
+#   ./scripts/init-project.sh --config scripts/init-project.example.json
+#
+# "type" and "stack" are each one of a fixed, discrete set of identifiers —
+# not free text — from the shipped target/stack compatibility catalog
+# (setup/graphs/engine/lib/config/catalog.js). Today that catalog supports
+# exactly one target and one stack for it:
+#   "type":  "web"
+#   "stack": "node-express" (the only stack profile supported for "web")
+# catalog.js is the authoritative list as it grows — an unsupported value
+# for either field is rejected with the current supported choices listed.
+#
 # Prerequisites:
 #   - With --connect-jira: ~/ai-gang/.env contains JIRA_URL, JIRA_EMAIL, JIRA_TOKEN, HQ_URL
 #   - ~/ai-gang/.env optionally contains JENKINS_GITHUB_USER (the GitHub username

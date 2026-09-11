@@ -21,10 +21,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
+const { validateConfigFile } = require('../lib/config/validate');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'init-project.sh');
+const EXAMPLE_CONFIG_PATH = path.join(REPO_ROOT, 'scripts', 'init-project.example.json');
 
 const VALID_CONFIG = {
   schemaVersion: 1,
@@ -100,6 +102,21 @@ test('a valid config initializes the project through the real entrypoint', () =>
 
   const registry = readProjectsConfig(projectsConfigPath);
   assert.ok(registry.projects.some((p) => p.name === 'acceptance-project'));
+});
+
+test('the shipped example config passes validation and drives the real entrypoint to success', () => {
+  const validation = validateConfigFile(EXAMPLE_CONFIG_PATH);
+  assert.equal(validation.valid, true, (validation.errors || []).join('; '));
+
+  const { projectsDir, projectsConfigPath, env } = makeIsolatedEnv();
+
+  const result = runScript(['--config', EXAMPLE_CONFIG_PATH], { env });
+
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const projectName = validation.decisions.name;
+  assert.ok(fs.existsSync(path.join(projectsDir, projectName)), 'project directory should be created');
+  const registry = readProjectsConfig(projectsConfigPath);
+  assert.ok(registry.projects.some((p) => p.name === projectName));
 });
 
 test('a missing config file is rejected before any project creation', () => {
