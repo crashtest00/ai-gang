@@ -1,0 +1,12 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*.sqlite3
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+staticfiles/
+
+# Local env overrides
+.env

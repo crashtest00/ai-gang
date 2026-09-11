@@ -1,0 +1,60 @@
+# AI Gang - Dockerfile Template (Node.js)
+# Save this as: Dockerfile
+
+FROM node:22-alpine
+
+# Create non-root user for security
+RUN deluser node && adduser -D -u 1000 aigang
+
+# Install Claude Code CLI globally
+# pm2 runs the Redis subscriber (and, if this project has one, its dev
+# server) as an always-restarted process — see the ENTRYPOINT below.
+RUN npm install -g @anthropic-ai/claude-code redis pm2
+
+# Install additional development tools
+RUN apk add --no-cache \
+    git \
+    bash \
+    vim \
+    nano \
+    curl \
+    openssh-client \
+    ripgrep \
+    github-cli
+
+# Set working directory
+ENV NODE_PATH=/usr/local/lib/node_modules
+
+WORKDIR /workspace
+
+# Optional: Copy package files and install dependencies
+# Uncomment these lines if you want dependencies pre-installed in image:
+# COPY --chown=aigang:aigang package*.json ./
+# RUN npm ci
+
+# Switch to non-root user
+USER aigang
+
+# Always (re)start the pm2-managed Redis subscriber as part of the
+# container's actual startup, on every start — including a
+# `docker compose up -d --force-recreate` — instead of relying on a manual
+# post-startup `docker exec ... pm2 start ...`, which silently gets dropped
+# on any recreate (see docs/ClaudeInstructions.md Phase 3.5). `pm2 kill`
+# first clears out any pm2 daemon state left over from a previous run of
+# this same container (e.g. a plain `docker restart`) so the start below is
+# always from a clean slate.
+#
+# To also run this project's own dev server under pm2 (e.g. a Vite
+# frontend), add another `pm2 start` line here before `exec "$@"` — e.g.
+# `pm2 start npm --name frontend -- run dev` (see docs/UserGuide.md's
+# `pm2 start npm -- run dev` example).
+#
+# Whatever this image is run with — this template's own `bash` default
+# below, or a docker-compose.yml `command:` override, e.g. this repo's
+# `sh -c "gh auth setup-git && tail -f /dev/null"` example projects use —
+# still becomes the container's actual foreground process via the final
+# `exec "$@"`; this only adds pm2-managed processes ahead of it.
+ENTRYPOINT ["sh", "-c", "pm2 kill >/dev/null 2>&1; pm2 start /agent-docs/subscriber.js --name subscriber; exec \"$@\"", "sh"]
+
+# Container stays running for interactive development
+CMD ["bash"]

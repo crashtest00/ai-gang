@@ -1,0 +1,15 @@
+*:Zone.Identifier
+.env
+.env.local
+*.env
+node_modules/
+projects/*
+!projects/hello-desktop/
+!projects/hello-desktop/**
+!projects/hello-web/
+!projects/hello-web/**
+.vscode/
+.claude/settings.local.json
+.claude/main-checkout-allowed
+CLAUDE.local.md
+.claude/pr-edit-allowed

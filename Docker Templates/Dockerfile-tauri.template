@@ -1,0 +1,83 @@
+# AI Gang - Dockerfile Template (Tauri desktop)
+# Save this as: Dockerfile
+#
+# Debian-family base, matching hello-desktop's landed Alpine-to-Debian
+# switch (projects/hello-desktop/Dockerfile uses node:22-bookworm) — this is
+# the checked-in fixture for the base-image-family branch-point class
+# (the graph-process-engine design REQ-12/REQ-14): its
+# user-management step uses `useradd`, not Alpine's `adduser`/`deluser`.
+#
+# This template only builds the *container* used for AI Gang agent
+# development (editing the Tauri/React source, running `npm run dev` for
+# the web-preview build). Native `.exe`/`.dmg`/`.AppImage` packaging happens
+# on GitHub-hosted runners via `.github/workflows/build-desktop.yml` /
+# `release-desktop.yml`, not in this container — see
+# setup/DESKTOP_HANDBOOK_v1.md.
+
+FROM node:22-bookworm
+
+# Create non-root user for security (Debian/Ubuntu family: useradd, not
+# Alpine's adduser/deluser — see Docker Templates/Dockerfile-python.template
+# for the same pattern).
+RUN useradd -m -u 1000 aigang
+
+# System libraries `npm run tauri build`/`tauri dev` need to compile and
+# link the native shell (webkit2gtk, appindicator, rsvg) plus general build
+# tooling for Rust's native dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    wget \
+    file \
+    git \
+    vim \
+    nano \
+    ca-certificates \
+    openssh-client \
+    ripgrep \
+    libwebkit2gtk-4.1-dev \
+    libxdo-dev \
+    libssl-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI globally
+# pm2 runs the Redis subscriber (and, if this project has one, its dev
+# server) as an always-restarted process — see the ENTRYPOINT below, and
+# Docker Templates/Dockerfile-node.template for the pattern this mirrors.
+RUN npm install -g @anthropic-ai/claude-code redis pm2
+
+# Rust toolchain — required to build the native Tauri shell. Installed as
+# the aigang user (not root) since rustup installs into $HOME by default.
+USER aigang
+ENV HOME=/home/aigang
+ENV PATH="/home/aigang/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+
+USER root
+ENV NODE_PATH=/usr/local/lib/node_modules
+WORKDIR /workspace
+
+# Optional: Copy package files and install dependencies
+# Uncomment these lines if you want dependencies pre-installed in image:
+# COPY --chown=aigang:aigang package*.json ./
+# RUN npm ci
+
+# Switch to non-root user
+USER aigang
+
+# Always (re)start the pm2-managed Redis subscriber as part of the
+# container's actual startup — see Docker Templates/Dockerfile-node.template
+# for the full rationale (also applies verbatim here).
+ENTRYPOINT ["sh", "-c", "pm2 kill >/dev/null 2>&1; pm2 start /agent-docs/subscriber.js --name subscriber; exec \"$@\"", "sh"]
+
+# Container stays running for interactive development
+CMD ["bash"]

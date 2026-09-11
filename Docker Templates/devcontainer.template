@@ -1,0 +1,88 @@
+{
+  // AI Gang - VS Code devcontainer configuration
+  // Save this as: .devcontainer/devcontainer.json
+  
+  // Display name in VS Code
+  "name": "My App Dev Container",
+  
+  // Use docker-compose for container setup
+  "dockerComposeFile": "../docker-compose.yml",
+  
+  // Which service from docker-compose to connect to
+  "service": "dev",
+  
+  // Where to open the workspace inside the container
+  "workspaceFolder": "/workspace",
+  
+  // VS Code customizations
+  "customizations": {
+    "vscode": {
+      // Extensions to install in the container
+      "extensions": [
+        // JavaScript/TypeScript
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        
+        // Python (uncomment if using Python)
+        // "ms-python.python",
+        // "ms-python.vscode-pylance",
+        
+        // Git
+        "eamodio.gitlens",
+        
+        // Docker
+        "ms-azuretools.vscode-docker",
+        
+        // Other useful extensions
+        "streetsidesoftware.code-spell-checker",
+        "wayou.vscode-todo-highlight"
+      ],
+      
+      // VS Code settings inside container
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        
+        // Python settings (uncomment if using Python)
+        // "python.defaultInterpreterPath": "/usr/local/bin/python",
+        // "python.linting.enabled": true,
+        // "python.linting.pylintEnabled": true,
+        // "python.formatting.provider": "black",
+        
+        // Files to exclude from search
+        "files.exclude": {
+          "**/.git": true,
+          "**/node_modules": true,
+          "**/__pycache__": true
+        }
+      }
+    }
+  },
+  
+  // User to run VS Code as inside container (matches Dockerfile)
+  "remoteUser": "aigang",
+  
+  // Command to run after container is created
+  "postCreateCommand": "echo '✅ Container ready! Run claude to start Claude Code.' && echo '📚 Agent docs available at /agent-docs'",
+  
+  // Optional: Forward ports
+  // Uncomment and customize based on your app
+  // "forwardPorts": [3000, 8000],
+  
+  // Optional: Port attributes
+  // "portsAttributes": {
+  //   "3000": {
+  //     "label": "Application",
+  //     "onAutoForward": "notify"
+  //   }
+  // },
+  
+  // Optional: Environment variables for VS Code in container
+  // "remoteEnv": {
+  //   "NODE_ENV": "development"
+  // },
+  
+  // Keep container running when VS Code disconnects
+  "shutdownAction": "none"
+}

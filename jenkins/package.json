@@ -1,0 +1,12 @@
+{
+  "name": "jenkins-infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Gang Jenkins controller config and maintenance scripts (workspace/cache retention — see the jenkins-cache-retention design)",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

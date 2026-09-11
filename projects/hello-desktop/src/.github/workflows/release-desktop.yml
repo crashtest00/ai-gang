@@ -1,0 +1,113 @@
+name: Release desktop
+
+# Triggered only by a version tag Jenkins pushes as part of the production-promote
+# job, once a Release ticket moves to Done (see
+# the desktop-app-support design REQ-07 and
+# jenkins/scripts/tag-desktop-release.sh). No human or agent pushes this tag
+# directly — Jenkins is the only caller.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            artifact: '*.exe'
+            tauri_bundle: nsis
+          - platform: macos
+            os: macos-latest
+            artifact: '*.dmg'
+            tauri_bundle: dmg
+          - platform: linux
+            os: ubuntu-22.04
+            artifact: '*.AppImage'
+            tauri_bundle: appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Detect framework
+        id: framework
+        shell: bash
+        run: |
+          if [ -d src-tauri ]; then
+            echo "name=tauri" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=electron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux' && steps.framework.outputs.name == 'tauri'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up Rust
+        if: steps.framework.outputs.name == 'tauri'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        if: steps.framework.outputs.name == 'tauri'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build Tauri package
+        if: steps.framework.outputs.name == 'tauri'
+        run: npm run tauri build -- --bundles ${{ matrix.tauri_bundle }}
+
+      - name: Build Electron package
+        if: steps.framework.outputs.name == 'electron'
+        run: npm run build:desktop
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ github.ref_name }}
+          path: |
+            src-tauri/target/release/bundle/**/${{ matrix.artifact }}
+            dist/**/${{ matrix.artifact }}
+            release/**/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release-assets/**/*

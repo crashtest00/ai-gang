@@ -1,0 +1,22 @@
+# AI Gang Internal Work-Item Service — Django implementation
+# (the internal-work-item-service design §4 "Implementation
+# intent": "a Django application as this service, with PostgreSQL as its
+# datastore").
+Django>=5.0,<5.1
+psycopg2-binary>=2.9,<3.0
+redis>=5.0,<6.0
+python-dotenv>=1.0,<2.0
+gunicorn>=22.0,<27.0
+whitenoise>=6.6,<7.0
+
+# Test tooling (pytest-django chosen over Django's built-in TestCase — see
+# services/work-item-service/README's test section / final report for why: it lets
+# the outbox-relay subprocess/SIGKILL integration test and the
+# fixture-heavy Streams tests live as plain functions with explicit
+# per-test Postgres/Redis fixtures, closer to the Node
+# `node:test`-per-file style the reference implementation used, rather than
+# forcing them into TestCase's class/transaction-per-test model, which
+# actively fights a test that must observe a REAL, separately committed
+# transaction from a killed-and-restarted child process).
+pytest>=8.0
+pytest-django>=4.8,<5.0

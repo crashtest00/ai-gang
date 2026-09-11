@@ -1,0 +1,34 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai-gang-redis
+    # Internal Docker network only — not exposed to host
+    restart: unless-stopped
+    # Stream persistence (redis-streams.md REQ-02): AOF gives a bounded
+    # (<=1s, appendfsync everysec) data-loss window on a hard crash; the RDB
+    # save points are a supplementary snapshot for faster restart. Without
+    # this, a durably "accepted" XADD (REQ-02) would not actually survive a
+    # container restart, which is the exact failure mode this feature
+    # replaces Pub/Sub to fix.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-gang
+
+volumes:
+  # Named volume so stream data (pending work, dead-letter entries, retained
+  # history) survives a normal container recreate/restart, not just a
+  # process restart inside the same container.
+  redis-data:
+
+networks:
+  ai-gang:
+    name: ai-gang
+    driver: bridge

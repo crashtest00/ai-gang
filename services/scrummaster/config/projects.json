@@ -1,0 +1,19 @@
+{
+  "projects": [
+    {
+      "name": "hello-world",
+      "jiraProjectKey": "HW",
+      "agents": ["refinement-agent", "backend-agent", "frontend-agent", "devops-agent"]
+    },
+    {
+      "name": "hello-desktop",
+      "jiraProjectKey": "HD",
+      "agents": ["refinement-agent", "backend-agent", "frontend-agent", "devops-agent"]
+    },
+    {
+      "name": "hello-world-desktop",
+      "jiraProjectKey": "HWD2",
+      "agents": ["refinement-agent", "backend-agent", "frontend-agent", "devops-agent"]
+    }
+  ]
+}

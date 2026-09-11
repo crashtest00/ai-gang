@@ -1,0 +1,95 @@
+name: Build desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA selected by the Jenkins Release-ticket flow
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            artifact: '*.exe'
+            tauri_bundle: nsis
+          - platform: macos
+            os: macos-latest
+            artifact: '*.dmg'
+            tauri_bundle: dmg
+          - platform: linux
+            os: ubuntu-22.04
+            artifact: '*.AppImage'
+            tauri_bundle: appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out requested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - name: Verify requested commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.sha }}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Detect framework
+        id: framework
+        shell: bash
+        run: |
+          if [ -d src-tauri ]; then
+            echo "name=tauri" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=electron" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux' && steps.framework.outputs.name == 'tauri'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Set up Rust
+        if: steps.framework.outputs.name == 'tauri'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        if: steps.framework.outputs.name == 'tauri'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build Tauri package
+        if: steps.framework.outputs.name == 'tauri'
+        run: npm run tauri build -- --bundles ${{ matrix.tauri_bundle }}
+
+      - name: Build Electron package
+        if: steps.framework.outputs.name == 'electron'
+        run: npm run build:desktop
+
+      - name: Upload unsigned installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ inputs.sha }}
+          path: |
+            src-tauri/target/release/bundle/**/${{ matrix.artifact }}
+            dist/**/${{ matrix.artifact }}
+            release/**/${{ matrix.artifact }}
+          if-no-files-found: error

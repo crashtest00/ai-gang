@@ -1,0 +1,16 @@
+{
+  "name": "aigang-graph-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Graph-based process engine (schema validation, addressing, walking) and parallel branch coordination for AI Gang V2 initialization/setup procedures. See the graph-process-engine design and the parallel-branch-execution design.",
+  "main": "lib/index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

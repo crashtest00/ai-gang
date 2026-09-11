@@ -1,0 +1,70 @@
+# Deployment-target boilerplate selection
+# (deployment-target-boilerplate.md REQ-02, REQ-03).
+#
+# Represents boilerplate selection as an explicit node in the
+# initialization graph, replacing `init-repo.sh --deployment` as the sole
+# selection mechanism (the flag still exists and still does the actual
+# file copy — see scripts/init-repo.sh — but is now also addressable as a
+# graph node per graph-process-engine.md's schema, and an unsupported
+# target reaches remediation instead of an empty or broken project).
+graph_id: deployment-target-boilerplate
+schema_version: 1
+entry: select-target-deployment
+nodes:
+  - id: select-target-deployment
+    kind: decision
+    check:
+      description: "Does the project's selected target deployment have a corresponding boilerplate?"
+      probe: "Read the project's configured --deployment value against the supported set (currently: web)"
+      error_when: probe-error
+    branches:
+      - when: web
+        to: scaffold-web-boilerplate
+      - when: unsupported
+        to: remediate-unsupported-target
+      - when: probe-error
+        to: remediate-target-selection-probe-error
+
+  - id: scaffold-web-boilerplate
+    kind: action
+    procedure: >-
+      Copy templates/web/ into the new project's repository root
+      (scripts/init-repo.sh --deployment web), so the repository begins
+      from a real, minimal, independently runnable and deployable web app
+      instead of an empty scaffold (REQ-01, REQ-02).
+    writes:
+      files: ["<target_dir>/**"]
+      services: []
+    next: boilerplate-scaffolded
+
+  - id: boilerplate-scaffolded
+    kind: action
+    procedure: "No-op — boilerplate scaffolding complete."
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: success
+
+  - id: remediate-unsupported-target
+    kind: remediation
+    guidance: |
+      [HUMAN] The requested target deployment has no corresponding
+      boilerplate. V2 officially supports the web target only
+      (deployment-target-boilerplate.md REQ-01); desktop
+      (templates/desktop/, projects/hello-desktop/) remains available but
+      experimental and outside this graph's acceptance bar. To add a new
+      supported target: create templates/<target>/ with a minimal, real,
+      independently runnable and deployable application, extend
+      scripts/init-repo.sh's --deployment handling to scaffold it, and add
+      a branch for it here.
+    next: select-target-deployment
+
+  - id: remediate-target-selection-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] Reading the project's configured deployment target failed
+      unexpectedly. Confirm --deployment was passed to
+      scripts/init-project.sh (or answer the interactive prompt), then
+      re-run.
+    next: select-target-deployment

@@ -1,0 +1,39 @@
+# Traefik reverse proxy for the Beta VM.
+#
+# Routes both rc-<sha>.<PREVIEW_DOMAIN> preview requests and the long-lived
+# <project>.<BETA_DOMAIN> app requests to the matching container, reading
+# routing rules from Docker labels the moment deploy.sh/preview-deploy.sh
+# starts it — no config file edits or restarts per release or per deploy.
+# Any container Traefik should route sets `traefik.enable=true` plus its own
+# host-rule/port labels (see deploy.sh and preview-deploy.sh); everything
+# else stays invisible to it (`exposedByDefault=false`).
+#
+# cloudflared runs on the Dev VM (see scripts/setup-cloudflare-tunnel.sh),
+# not here, so this can't be reached over loopback alone — it forwards both
+# the preview wildcard and the beta-app wildcard to this service's published
+# port (BETA_VM_TRAEFIK_PORT) over the network. Traefik itself does not
+# terminate TLS — the Cloudflare Tunnel already does that at the edge — so
+# this listens on plain HTTP, published on all interfaces and relying on the
+# Beta VM's firewall (see beta-vm/README.md) to allow inbound only from the
+# Dev VM.
+
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: beta-vm-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --entrypoints.web.address=:8181
+      - --log.level=INFO
+    ports:
+      - "8181:8181"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - beta
+
+networks:
+  beta:
+    external: true

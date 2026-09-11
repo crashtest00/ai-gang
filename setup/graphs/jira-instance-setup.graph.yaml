@@ -1,0 +1,95 @@
+# Jira instance setup pilot graph for the escalation node kind
+# (graph-process-engine.md REQ-17), converting docs/ClaudeInstructions.md
+# Phase 1 (1.0 Jira Service Account, 1.1 Jira Custom Fields).
+#
+# This is scoped to the Jira *instance*, not any one project
+# (docs/ClaudeInstructions.md Phase 1's own framing: "these steps are scoped
+# to the Jira instance, not the project"). It is deliberately NOT the same
+# decision as canonical-work-model.md REQ-14's per-project Jira-vs-local
+# mode switch — REQ-14 explicitly bars selecting Jira mode during a
+# project's own initialization (every project completes initialization in
+# local mode; connecting Jira is always a separate, later operation, REQ-15)
+# — so that per-project switch has no node here at all. What this graph's
+# entry escalation node asks instead is upstream of any single project:
+# whether this AI Gang deployment (this Jira instance) will ever support
+# Jira mode for any project, which gates whether it's worth doing the
+# one-time instance-level setup (service account, custom fields) at all.
+# That's a human's declared preference, not observable environment state —
+# unrepresentable before REQ-17 existed, per setup/graphs/migration-status.md.
+#
+# The two branches below aren't full decision/remediation subgraphs of their
+# own: 1.0 and 1.1 remain linear, idempotent action steps once the
+# yes/no fork is resolved (setup/graphs/migration-status.md's original
+# "linear steps" finding for those two phases still holds *given* the
+# instance wants Jira at all — only the fork itself was previously
+# unrepresentable).
+graph_id: jira-instance-setup
+schema_version: 1
+entry: want-jira-integration
+nodes:
+  # --- Escalation: human preference, not observable state (REQ-17) ---
+  - id: want-jira-integration
+    kind: escalation
+    prompt: >-
+      Will this AI Gang deployment (this Jira instance) ever connect a
+      project to Jira (Jira mode, canonical-work-model.md REQ-14), or will
+      every project on it stay in local mode? Jira is optional — decide
+      before doing any Jira instance-level setup below.
+    branches:
+      - when: "yes"
+        to: create-jira-service-account
+      - when: "no"
+        to: jira-integration-skipped
+
+  - id: jira-integration-skipped
+    kind: action
+    procedure: >-
+      No-op — this AI Gang deployment will not connect any project to Jira
+      for now. Every project stays in local mode
+      (canonical-work-model.md REQ-14); nothing under Phase 1 needs to run.
+      This choice is reversible: re-walk this graph and answer "yes"
+      whenever a project first wants to connect Jira (REQ-15).
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: skipped
+
+  # --- 1.0 Jira Service Account (docs/ClaudeInstructions.md) ---
+  - id: create-jira-service-account
+    kind: action
+    procedure: >-
+      [HUMAN] Create a dedicated Atlassian service account for AI Gang
+      (e.g. ai-gang-bot@your-domain.com, via a shared mailbox or email
+      alias) rather than a personal account. Invite it to the Jira instance
+      (Jira Settings -> User Management -> Invite Users) with a Member
+      (not Admin) project role. Log in as the service account and create an
+      API token named ai-gang-hq (Manage Account -> Security -> Create and
+      manage API tokens). Add JIRA_USER_EMAIL/JIRA_API_TOKEN to
+      services/scrummaster/.env and JIRA_EMAIL/JIRA_TOKEN/JIRA_URL to
+      ~/ai-gang/.env. Verify with:
+      `curl -u "$JIRA_EMAIL:$JIRA_TOKEN" "$JIRA_URL/rest/api/3/myself"`
+      returning the service account's own info as JSON.
+    writes:
+      files: ["services/scrummaster/.env", "~/ai-gang/.env"]
+      services: []
+    next: create-jira-custom-fields
+
+  # --- 1.1 Jira Custom Fields (docs/ClaudeInstructions.md) ---
+  - id: create-jira-custom-fields
+    kind: action
+    procedure: >-
+      Run `./scripts/create-jira-fields.sh` once for this Jira instance.
+      Creates the Agent and Blocked single-select fields plus the 7
+      story-schema paragraph fields (Value Hypothesis, Test & Measurement,
+      Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of
+      Scope), and writes all 9 JIRA_*_FIELD_ID vars to services/scrummaster/.env
+      automatically. Verify with:
+      `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l` returning
+      9. Every later project applies these already-created fields via
+      init-project.sh — this step is not repeated per project.
+    writes:
+      files: ["services/scrummaster/.env"]
+      services: []
+    terminal: true
+    outcome: success

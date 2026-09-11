@@ -1,0 +1,76 @@
+# AI Gang - docker-compose.yml Template
+# Save this as: docker-compose.yml
+
+version: '3.8'
+
+services:
+  dev:
+    build: .
+    
+    # IMPORTANT: Change this to match your project name
+    # Example: user-service-dev, landing-page-dev, etc.
+    container_name: my-app-dev
+    
+    # Keep stdin open and allocate pseudo-TTY for interactive use
+    stdin_open: true
+    tty: true
+    
+    volumes:
+      # Mount this project directory to /workspace in container
+      - .:/workspace
+      
+      # Mount shared agent definitions (read-only)
+      # All containers can see these best practices
+      - ../../setup:/agent-docs:ro
+      
+      # Optional: Mount SSH keys for git operations
+      # Uncomment if you need to push/pull from inside container
+      # - ~/.ssh:/home/aigang/.ssh:ro
+    
+    environment:
+      # Set environment variables here
+      - NODE_ENV=development
+      # - PYTHON_ENV=development
+      
+      # Optional: Set environment from .env file
+      # Create .env file in project directory (add to .gitignore!)
+      # - DATABASE_URL=${DATABASE_URL}
+      # - API_KEY=${API_KEY}
+    
+    # Optional: Expose ports for web services
+    # Uncomment and customize as needed
+    # ports:
+    #   - "3000:3000"  # Node.js apps
+    #   - "8000:8000"  # Python/FastAPI apps
+    #   - "5173:5173"  # Vite dev server
+    
+    # Keep container running (required for persistent workspace)
+    command: tail -f /dev/null
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Optional: Add database or other services
+    # Uncomment and customize as needed
+    # depends_on:
+    #   - db
+  
+  # Optional: Add PostgreSQL database
+  # Uncomment if your app needs a database
+  # db:
+  #   image: postgres:16-alpine
+  #   container_name: my-app-db
+  #   environment:
+  #     POSTGRES_DB: myapp
+  #     POSTGRES_USER: aigang
+  #     POSTGRES_PASSWORD: devpassword
+  #   volumes:
+  #     - db-data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   restart: unless-stopped
+
+# Optional: Define named volumes
+# Uncomment if using database or other persistent services
+# volumes:
+#   db-data:

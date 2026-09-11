@@ -1,0 +1,49 @@
+# AI Gang - Dockerfile Template (Python)
+# Save this as: Dockerfile
+
+FROM python:3.11-slim
+
+# Create non-root user for security
+RUN useradd -m -u 1001 aigang
+
+# Install Node.js (required for Claude Code)
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    vim \
+    nano \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y nodejs gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI globally
+RUN npm install -g @anthropic-ai/claude-code redis
+
+# Install common Python development tools
+RUN pip install --no-cache-dir \
+    pytest \
+    black \
+    pylint \
+    ipython
+
+# Set working directory
+ENV NODE_PATH=/usr/local/lib/node_modules
+
+WORKDIR /workspace
+
+# Optional: Copy requirements and install dependencies
+# Uncomment these lines if you want dependencies pre-installed in image:
+# COPY --chown=aigang:aigang requirements.txt ./
+# RUN pip install --no-cache-dir -r requirements.txt
+
+# Switch to non-root user
+USER aigang
+
+# Container stays running for interactive development
+CMD ["bash"]

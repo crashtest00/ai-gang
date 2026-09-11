@@ -1,0 +1,28 @@
+{
+  "agents": [
+    {
+      "id": "refinement-agent",
+      "displayName": "Refinement Agent",
+      "definitionPath": "/agent-docs/refinement-agent.md",
+      "routing": { "channelSuffix": "refinement" },
+      "agentCard": { "name": "Refinement Agent", "description": "Decomposes stories into subtasks." }
+    },
+    {
+      "id": "backend-agent",
+      "displayName": "Backend Agent",
+      "definitionPath": "/agent-docs/backend-agent.md",
+      "routing": { "channelSuffix": "backend" },
+      "agentCard": { "name": "Backend Agent", "description": "Implements APIs." }
+    },
+    {
+      "id": "frontend-agent",
+      "displayName": "Frontend Agent",
+      "definitionPath": "/agent-docs/frontend-agent.md",
+      "routing": { "channelSuffix": "frontend" },
+      "agentCard": { "name": "Frontend Agent", "description": "Implements UI." }
+    }
+  ],
+  "retiredAgents": [
+    { "id": "qa-agent", "retiredAt": "2026-01-01", "reason": "Folded into backend-agent." }
+  ]
+}

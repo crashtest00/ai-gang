@@ -1,0 +1,101 @@
+'use strict';
+
+// Periodic Jira Agent-field drift audit (the agent-assignment design
+// REQ-07). Compares the live Jira Agent single-select options against the
+// agents.json catalog and reports drift; it never modifies agents.json or
+// Jira, and drift here MUST NOT cause runtime assignment validation
+// (services/scrummaster/src/assignment.js) to accept a Jira-only value — that
+// validator never reads Jira at all.
+
+const jira = require('./jira');
+const registry = require('./registry');
+
+// Compare the catalog against live Jira Agent-field options.
+// Returns { missing, unexpected, mismatched, retiredButEnabled, ok }.
+//
+//   missing            catalog id has no corresponding Jira option at all —
+//                       needs scripts/reconcile-agent-field.sh (creates it).
+//   unexpected         a Jira option whose value is not, and never was
+//                       (per retiredAgents), part of the catalog — likely a
+//                       manual/erroneous addition.
+//   mismatched         a currently active catalog id has a Jira option that
+//                       is disabled — an active agent that new work can't be
+//                       assigned to in Jira's UI.
+//   retiredButEnabled  a Jira option whose value matches a formally retired
+//                       catalog id (agents.json retiredAgents) but is still
+//                       enabled in Jira — retirement wasn't (fully) applied.
+function diffAgentFieldOptions(catalogIds, retiredIds, jiraOptions) {
+  const catalogSet = new Set(catalogIds);
+  const retiredSet = new Set(retiredIds);
+  const optionByValue = new Map(jiraOptions.map(o => [o.value, o]));
+
+  const missing = catalogIds.filter(id => !optionByValue.has(id));
+
+  const unexpected = jiraOptions
+    .filter(o => !catalogSet.has(o.value) && !retiredSet.has(o.value))
+    .map(o => o.value);
+
+  const mismatched = catalogIds
+    .filter(id => optionByValue.has(id) && optionByValue.get(id).disabled)
+    .map(id => id);
+
+  const retiredButEnabled = jiraOptions
+    .filter(o => retiredSet.has(o.value) && !o.disabled)
+    .map(o => o.value);
+
+  return {
+    missing,
+    unexpected,
+    mismatched,
+    retiredButEnabled,
+    ok: missing.length === 0 && unexpected.length === 0 && mismatched.length === 0 && retiredButEnabled.length === 0,
+  };
+}
+
+// Run one audit pass. Never throws for drift — only for a Jira API failure,
+// which the caller should log and treat as "audit did not complete" rather
+// than "no drift found".
+async function auditAgentFieldDrift() {
+  const catalogIds = registry.getAllAgentIds();
+  const retiredIds = registry.getRetiredAgentIds();
+  const jiraOptions = await jira.getAgentFieldOptions();
+
+  const result = diffAgentFieldOptions(catalogIds, retiredIds, jiraOptions);
+
+  if (result.ok) {
+    console.log('[audit] Agent field drift check: no drift.');
+    return result;
+  }
+
+  console.warn('[audit] Agent field drift detected:');
+  if (result.missing.length > 0) {
+    console.warn(`  missing (in catalog, no Jira option): ${result.missing.join(', ')}`);
+  }
+  if (result.unexpected.length > 0) {
+    console.warn(`  unexpected (Jira option, not in catalog): ${result.unexpected.join(', ')}`);
+  }
+  if (result.mismatched.length > 0) {
+    console.warn(`  mismatched (active catalog id, Jira option disabled): ${result.mismatched.join(', ')}`);
+  }
+  if (result.retiredButEnabled.length > 0) {
+    console.warn(`  retired-but-enabled (retired catalog id, Jira option still enabled): ${result.retiredButEnabled.join(', ')}`);
+  }
+  console.warn('  Recovery: run scripts/reconcile-agent-field.sh to sync Jira options from agents.json.');
+
+  return result;
+}
+
+// Run the audit at startup and every intervalMs thereafter. Logs and
+// swallows Jira API failures so a transient Jira outage doesn't crash
+// ScrumMaster or block the next scheduled attempt.
+function scheduleAgentFieldAudit(intervalMs = 24 * 60 * 60 * 1000) {
+  const run = () => {
+    auditAgentFieldDrift().catch(err => {
+      console.error('[audit] Agent field drift check failed:', err.message);
+    });
+  };
+  run();
+  return setInterval(run, intervalMs);
+}
+
+module.exports = { auditAgentFieldDrift, scheduleAgentFieldAudit, diffAgentFieldOptions };

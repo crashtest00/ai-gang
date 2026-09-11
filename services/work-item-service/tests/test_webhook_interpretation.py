@@ -1,0 +1,297 @@
+"""
+canonical-work-model.md REQ-22 — Django-owned interpretation of the full
+Jira webhook payload (not just `changelog` entries with `field ==
+'status'`). Each test here proves ONE of `services/scrummaster/src/server.js`'s
+former `routeWebhookEvent` scenarios now produces the same resulting
+canonical behavior via `workitems/webhook_consumer.py` +
+`workitems/jira_interpret.py`, per REQ-22's own acceptance criterion.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from workitems import project_config, registry, store, write_gate
+from workitems.envelope import Kind, build_envelope
+from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment
+from workitems.webhook_consumer import handle_webhook_envelope
+
+PROJECT = 'test-project'
+
+STORY_FIELD_IDS = {
+    'JIRA_BEHAVIOR_FIELD_ID': 'customfield_behavior',
+    'JIRA_AC_FIELD_ID': 'customfield_ac',
+    'JIRA_CONSTRAINTS_FIELD_ID': 'customfield_constraints',
+    'JIRA_EDGE_CASES_FIELD_ID': 'customfield_edge',
+    'JIRA_OUT_OF_SCOPE_FIELD_ID': 'customfield_oos',
+}
+
+
+def _set_story_field_env(monkeypatch):
+    for env_name, field_id in STORY_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+
+
+def _adf(text):
+    return {'type': 'doc', 'version': 1, 'content': [{'type': 'paragraph', 'content': [{'type': 'text', 'text': text}]}]}
+
+
+def _story_fields(summary='A new story', complete=True, project=PROJECT):
+    fields = {
+        'summary': summary,
+        'issuetype': {'name': 'Story'},
+        'project': {'name': project, 'key': 'TP'},
+    }
+    if complete:
+        fields.update({
+            'customfield_behavior': _adf('Users can log in.'),
+            'customfield_ac': _adf('Given valid creds, a session is created.'),
+            'customfield_constraints': _adf('Must use OAuth.'),
+            'customfield_edge': _adf('Invalid creds are rejected.'),
+            'customfield_oos': _adf('SSO is out of scope.'),
+        })
+    return fields
+
+
+def envelope_for(issue_key, event, issue_fields, *, body_extra=None, project=PROJECT):
+    body = {'webhookEvent': event, 'issue': {'key': issue_key, 'fields': issue_fields}}
+    if body_extra:
+        body.update(body_extra)
+    return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(project), payload={
+        'event': event, 'issue': body['issue'], 'body': body,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Handler 1 — Story created (handlers.js `handleStoryCreated`)
+# ---------------------------------------------------------------------------
+
+def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(clean_db, monkeypatch):
+    _set_story_field_env(monkeypatch)
+    handle_webhook_envelope(envelope_for('TP-1', 'jira:issue_created', _story_fields(complete=True)))
+
+    item = WorkItem.objects.get(external_key='TP-1')
+    assert item.type == 'story'
+    assert item.status == 'ready', "REQ-17/REQ-21: fields complete -> immediately dispatch-eligible"
+    assert item.assignee_agent_id == 'refinement-agent'
+    assert item.story_detail.behavior == 'Users can log in.'
+
+    side_effect = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item.id)
+    assert side_effect.payload == {'kind': 'story_intake', 'jiraIssueKey': 'TP-1', 'detail': {'ok': True, 'missing': []}}
+
+    created_event = OutboxEvent.objects.get(event_type='work_item.created', work_item_id=item.id)
+    assert created_event.payload['status'] == 'ready'
+
+
+def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_db, monkeypatch):
+    _set_story_field_env(monkeypatch)
+    handle_webhook_envelope(envelope_for('TP-2', 'jira:issue_created', _story_fields(complete=False)))
+
+    item = WorkItem.objects.get(external_key='TP-2')
+    assert item.status == 'proposed', "REQ-17: must not leave 'proposed' with required fields missing"
+    assert item.assignee_agent_id == 'refinement-agent', 'handlers.js sets the Agent field regardless of validation outcome'
+
+    side_effect = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item.id)
+    detail = side_effect.payload['detail']
+    assert detail['ok'] is False
+    assert detail['missing'] == ['Behavior', 'Acceptance Criteria', 'Constraints', 'Edge Cases', 'Out of Scope']
+
+
+def test_story_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
+    _set_story_field_env(monkeypatch)
+    env = envelope_for('TP-3', 'jira:issue_created', _story_fields(complete=True))
+    handle_webhook_envelope(env)
+    handle_webhook_envelope(env)  # redelivery — must not create a second work item.
+
+    assert WorkItem.objects.filter(external_key='TP-3').count() == 1
+
+
+def test_issue_created_of_an_unhandled_issuetype_is_recorded_not_dropped(clean_db):
+    fields = {'summary': 'A bug', 'issuetype': {'name': 'Bug'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    handle_webhook_envelope(envelope_for('TP-4', 'jira:issue_created', fields))
+
+    assert WorkItem.objects.filter(external_key='TP-4').count() == 0, 'no canonical type for Bug — no work item invented'
+    event = OutboxEvent.objects.get(event_type='work_item.jira_event_received')
+    assert event.payload['jiraIssueKey'] == 'TP-4'
+    assert event.payload['detail']['issuetype'] == 'Bug'
+
+
+# ---------------------------------------------------------------------------
+# Handler 3 — Blocked field cleared (handlers.js `handleBlockedCleared`),
+# including the refinement-agent Story regression this task calls out
+# explicitly.
+# ---------------------------------------------------------------------------
+
+def _blocked_change(from_val, to_val):
+    return {'field': 'Blocked', 'fieldId': 'customfield_blocked', 'from': from_val, 'to': to_val}
+
+
+def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_full_context(clean_db, monkeypatch):
+    _set_story_field_env(monkeypatch)
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+
+    handle_webhook_envelope(envelope_for('TP-5', 'jira:issue_created', _story_fields(complete=False)))
+    item = WorkItem.objects.get(external_key='TP-5')
+    assert item.status == 'proposed'
+
+    # The human filled in the missing fields in Jira, then cleared Blocked.
+    # The webhook's `issue` snapshot now carries the complete field set.
+    complete_fields = _story_fields(complete=True)
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-5', 'fields': complete_fields},
+            'changelog': {'items': [_blocked_change('10001', None)]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    item.refresh_from_db()
+    assert item.status == 'ready', 'REQ-17 gate now passes -> dispatch-eligible, matching handleBlockedCleared'
+    assert item.story_detail.acceptance_criteria == 'Given valid creds, a session is created.'
+    assert WebhookFailure.objects.filter(work_item_id=item.id).count() == 0
+
+
+def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, monkeypatch):
+    _set_story_field_env(monkeypatch)
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+
+    handle_webhook_envelope(envelope_for('TP-6', 'jira:issue_created', _story_fields(complete=False)))
+    item = WorkItem.objects.get(external_key='TP-6')
+
+    still_incomplete = _story_fields(complete=False)
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-6', 'fields': still_incomplete},
+            'changelog': {'items': [_blocked_change('10001', None)]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    item.refresh_from_db()
+    assert item.status == 'proposed', 'must not dispatch while required fields are still missing'
+    failure = WebhookFailure.objects.get(work_item_id=item.id)
+    assert failure.reason  # REQ-09: a durable, operator-visible failure record.
+    side_effects = list(OutboxEvent.objects.filter(event_type='work_item.jira_side_effect', work_item_id=item.id))
+    reblock = [e for e in side_effects if e.payload['detail'].get('reblock')]
+    assert len(reblock) == 1
+    assert reblock[0].payload['detail']['missing'] == ['Behavior', 'Acceptance Criteria', 'Constraints', 'Edge Cases', 'Out of Scope']
+
+
+def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals_redispatch(clean_db, monkeypatch):
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Implement thing',
+                             'status': 'in-progress', 'assigneeAgentId': 'backend-agent', 'externalKey': 'TP-7'})
+
+    fields = {'summary': 'Implement thing', 'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-7', 'fields': fields},
+            'changelog': {'items': [_blocked_change('10001', None)]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    item = store.get_work_item(item_id)
+    assert item.status == 'in-progress', "clearing Blocked on a non-story must not itself change canonical status"
+    event = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item_id)
+    assert event.payload['kind'] == 'blocked_cleared'
+    assert event.payload['jiraIssueKey'] == 'TP-7'
+
+
+# ---------------------------------------------------------------------------
+# REQ-18 — comment webhooks (previously silently discarded)
+# ---------------------------------------------------------------------------
+
+def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(clean_db):
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-8'})
+
+    body = {
+        'webhookEvent': 'comment_created',
+        'issue': {'key': 'TP-8', 'fields': {}},
+        'comment': {'id': '999', 'author': {'displayName': 'Jane Doe'}, 'body': _adf('Please clarify the auth flow.')},
+    }
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'comment_created', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    comment = WorkItemComment.objects.get(work_item_id=item_id)
+    assert comment.author == 'Jane Doe'
+    assert comment.body == 'Please clarify the auth flow.'
+    assert OutboxEvent.objects.filter(event_type='work_item.comment_added', work_item_id=item_id).exists()
+
+    # Redelivery of the same Jira comment must not create a second row (REQ-18).
+    handle_webhook_envelope(env)
+    assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 1
+
+
+def test_comment_on_an_untracked_issue_is_recorded_generically_not_dropped(clean_db):
+    body = {'webhookEvent': 'comment_created', 'issue': {'key': 'TP-99', 'fields': {}},
+            'comment': {'id': '1', 'author': {'displayName': 'X'}, 'body': _adf('hi')}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'comment_created', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+    assert OutboxEvent.objects.filter(event_type='work_item.jira_event_received').exists()
+
+
+# ---------------------------------------------------------------------------
+# Handlers 5/6 — Release requested / abandoned (scope carve-out: Django
+# interprets and republishes; ScrumMaster's existing handleReleaseRequested/
+# handleReleaseAbandoned remain the executors — see webhook_consumer.py's
+# module docstring for why).
+# ---------------------------------------------------------------------------
+
+def test_release_ticket_created_is_recorded_and_republished(clean_db):
+    fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    handle_webhook_envelope(envelope_for('TP-10', 'jira:issue_created', fields))
+
+    event = OutboxEvent.objects.get(event_type='work_item.jira_release_event')
+    assert event.payload == {'kind': 'requested', 'jiraIssueKey': 'TP-10'}
+    assert WorkItem.objects.filter(external_key='TP-10').count() == 0, 'no canonical release type invented (scope carve-out)'
+
+
+def test_release_abandoned_is_recorded_and_republished(clean_db):
+    fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-11', 'fields': fields},
+            'changelog': {'items': [{'field': 'resolution', 'toString': 'Abandoned'}]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    event = OutboxEvent.objects.get(event_type='work_item.jira_release_event')
+    assert event.payload == {'kind': 'abandoned', 'jiraIssueKey': 'TP-11'}
+
+
+def test_release_done_is_recorded_and_republished(clean_db):
+    fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-12', 'fields': fields},
+            'changelog': {'items': [{'field': 'status', 'toString': 'Done'}]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    event = OutboxEvent.objects.get(event_type='work_item.jira_release_event')
+    assert event.payload == {'kind': 'done', 'jiraIssueKey': 'TP-12'}
+
+
+# ---------------------------------------------------------------------------
+# REQ-22 catch-all — an issue-link changelog entry, previously silently
+# discarded, must be durably recorded and republished.
+# ---------------------------------------------------------------------------
+
+def test_issue_link_changelog_entry_is_recorded_not_dropped(clean_db):
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-13'})
+
+    fields = {'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-13', 'fields': fields},
+            'changelog': {'items': [{'field': 'Link', 'toString': 'This issue blocks TP-14'}]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    event = OutboxEvent.objects.get(event_type='work_item.jira_event_received', work_item_id=item_id)
+    assert event.payload['detail']['field'] == 'Link'

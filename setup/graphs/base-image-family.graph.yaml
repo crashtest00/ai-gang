@@ -1,0 +1,72 @@
+# Base-image-family branch-point class (graph-process-engine.md REQ-12).
+#
+# A Dockerfile's base image determines which user-management command
+# family applies: Alpine/BusyBox (adduser/deluser) vs. Debian/Ubuntu
+# (useradd). Detection logic lives in
+# setup/graphs/engine/lib/checks/base-image-family.js and is exercised
+# against the checked-in fixtures in Docker Templates/:
+#   - Dockerfile-node.template   -> node:22-alpine        -> alpine-busybox
+#   - Dockerfile-python.template -> python:3.11-slim       -> debian-ubuntu
+#   - Dockerfile-tauri.template  -> node:22-bookworm       -> debian-ubuntu
+graph_id: base-image-family
+schema_version: 1
+entry: detect-base-image
+nodes:
+  - id: detect-base-image
+    kind: decision
+    check:
+      description: "Which user-management command family does this Dockerfile's base image belong to?"
+      probe: "Parse the Dockerfile's first FROM line and classify the base image"
+      error_when: probe-error
+    branches:
+      - when: alpine-busybox
+        to: base-image-alpine-busybox
+      - when: debian-ubuntu
+        to: base-image-debian-ubuntu
+      - when: unrecognized
+        to: remediate-unrecognized-base-image
+      - when: probe-error
+        to: remediate-base-image-probe-error
+
+  - id: base-image-alpine-busybox
+    kind: action
+    procedure: >-
+      Use Alpine/BusyBox user-management syntax when this Dockerfile needs
+      a non-root user step: `deluser node && adduser -D -u <uid> aigang`
+      (see Docker Templates/Dockerfile-node.template).
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: success
+
+  - id: base-image-debian-ubuntu
+    kind: action
+    procedure: >-
+      Use Debian/Ubuntu shadow-utils syntax when this Dockerfile needs a
+      non-root user step: `useradd -m -u <uid> aigang` (see
+      Docker Templates/Dockerfile-python.template and
+      Docker Templates/Dockerfile-tauri.template).
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: success
+
+  - id: remediate-unrecognized-base-image
+    kind: remediation
+    guidance: |
+      [HUMAN] This Dockerfile's base image doesn't match a known
+      Alpine/BusyBox or Debian/Ubuntu pattern (setup/graphs/engine/lib/checks/base-image-family.js).
+      Either switch to one of the two supported base-image families, or
+      extend that check's DEBIAN_UBUNTU_FAMILY/ALPINE_FAMILY patterns (or
+      add a new branch to this graph) to cover the new base image's
+      user-management command syntax explicitly, then re-run.
+    next: detect-base-image
+
+  - id: remediate-base-image-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] Reading or parsing the Dockerfile failed unexpectedly.
+      Confirm the file exists and is readable, then re-run.
+    next: detect-base-image

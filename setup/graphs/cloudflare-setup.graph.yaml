@@ -1,0 +1,204 @@
+# Cloudflare setup pilot graph (graph-process-engine.md REQ-10, REQ-11).
+#
+# Covers the four documented branch points:
+#   1. Cloudflare account/token presence          (cf-token-present)
+#   2. Whether the named tunnel already exists     (cf-tunnel-exists)
+#   3. PREVIEW_SUBDOMAIN/BETA_DOMAIN/BETA_VM_HOST   (cf-subdomain-vars-check)
+#   4. CF_ACCOUNT_ID presence, when Access is       (cf-account-id-check)
+#      required
+#
+# Tunnel creation (create-tunnel-api) uses Cloudflare's account-scoped
+# Tunnel REST API with config_src: "local", authenticated by CF_API_KEY —
+# no interactive `cloudflared tunnel login` browser step (REQ-11). See
+# scripts/setup-cloudflare-tunnel.sh for the implementation this node's
+# `procedure` describes.
+#
+# Detection logic for the decision nodes below lives in
+# setup/graphs/engine/lib/checks/cloudflare.js.
+graph_id: cloudflare-setup
+schema_version: 1
+entry: cf-token-present
+nodes:
+  # --- Branch point 1: account/token presence ---
+  - id: cf-token-present
+    kind: decision
+    check:
+      description: "Is a Cloudflare API token configured with the required scopes?"
+      probe: "CF_API_KEY set in ~/ai-gang/.env, validated via GET /user/tokens/verify"
+      error_when: probe-error
+    branches:
+      - when: present
+        to: cf-tunnel-exists
+      - when: absent
+        to: remediate-cf-token
+      - when: probe-error
+        to: remediate-cf-token-probe-error
+
+  - id: remediate-cf-token
+    kind: remediation
+    guidance: |
+      [HUMAN] Create a Cloudflare API token: dashboard -> My Profile ->
+      API Tokens -> Create Token -> "Edit zone DNS" template, scoped to
+      your zone. If PREVIEW_SUBDOMAIN or BETA_DOMAIN will be set (see the
+      cf-subdomain-vars-check branch below), also add Account -> Access:
+      Apps and Policies -> Edit to the same token. Add it to
+      ~/ai-gang/.env as CF_API_KEY.
+    next: cf-token-present
+
+  - id: remediate-cf-token-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] The token-verification API call itself failed to execute
+      (network error or Cloudflare API outage), rather than reporting the
+      token invalid. Check network connectivity to api.cloudflare.com and
+      re-run.
+    next: cf-token-present
+
+  # --- Branch point 2: named tunnel existence ---
+  - id: cf-tunnel-exists
+    kind: decision
+    check:
+      description: "Does a tunnel named 'ai-gang' already exist for this account?"
+      probe: "GET /accounts/{CF_ACCOUNT_ID}/cfd_tunnel?name=ai-gang&is_deleted=false"
+      error_when: probe-error
+    branches:
+      - when: exists
+        to: write-cloudflared-config
+      - when: absent
+        to: create-tunnel-api
+      - when: probe-error
+        to: remediate-cf-tunnel-probe-error
+
+  - id: remediate-cf-tunnel-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] The tunnel-list API call failed to execute. This branch
+      point also requires CF_ACCOUNT_ID (Cloudflare dashboard -> right
+      sidebar) — confirm it is set in ~/ai-gang/.env, then check network
+      connectivity and re-run.
+    next: cf-tunnel-exists
+
+  - id: create-tunnel-api
+    kind: action
+    procedure: >-
+      Create the tunnel via Cloudflare's account-scoped Tunnel API
+      (POST /accounts/{CF_ACCOUNT_ID}/cfd_tunnel), authenticated by
+      CF_API_KEY, with config_src: "local" and a locally-generated
+      tunnel_secret (REQ-11). Write the resulting credentials to
+      ~/.cloudflared/<tunnel_id>.json in cloudflared's own credentials-file
+      format. No cloudflared tunnel login browser step is required.
+    writes:
+      files: ["~/.cloudflared/*.json"]
+      services: []
+    next: write-cloudflared-config
+
+  - id: write-cloudflared-config
+    kind: action
+    procedure: >-
+      Write /etc/cloudflared/config.yml (HQ ingress always; Jenkins,
+      preview, and beta-app ingress entries when their subdomain vars are
+      set), then install and (re)start cloudflared as a systemd service.
+    writes:
+      files: ["/etc/cloudflared/config.yml"]
+      services: ["cloudflared"]
+    next: cf-subdomain-vars-check
+
+  # --- Branch point 3: PREVIEW_SUBDOMAIN / BETA_DOMAIN / BETA_VM_HOST ---
+  - id: cf-subdomain-vars-check
+    kind: decision
+    check:
+      description: >-
+        Are PREVIEW_SUBDOMAIN/BETA_DOMAIN requested, and if so, is
+        BETA_VM_HOST also set (required to reach Traefik on the Beta VM)?
+      probe: "Read PREVIEW_SUBDOMAIN, BETA_DOMAIN, BETA_VM_HOST from ~/ai-gang/.env"
+      error_when: probe-error
+    branches:
+      - when: none-requested
+        to: cf-setup-done-no-access
+      - when: complete
+        to: cf-account-id-check
+      - when: missing-beta-vm-host
+        to: remediate-missing-beta-vm-host
+      - when: probe-error
+        to: remediate-cf-subdomain-vars-probe-error
+
+  - id: remediate-missing-beta-vm-host
+    kind: remediation
+    guidance: |
+      [HUMAN] PREVIEW_SUBDOMAIN or BETA_DOMAIN is set, but BETA_VM_HOST is
+      not. This script normally runs on the Dev VM, so Traefik on the Beta
+      VM must be reached over the network, not localhost. Add
+      BETA_VM_HOST=<Beta VM's LAN/VPC IP or hostname> to ~/ai-gang/.env
+      (see docs/ClaudeInstructions.md Phase 2.5).
+    next: cf-subdomain-vars-check
+
+  - id: remediate-cf-subdomain-vars-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] Reading PREVIEW_SUBDOMAIN/BETA_DOMAIN/BETA_VM_HOST from
+      ~/ai-gang/.env failed unexpectedly. Confirm the file exists and is
+      readable, then re-run.
+    next: cf-subdomain-vars-check
+
+  - id: cf-setup-done-no-access
+    kind: action
+    procedure: "No-op — Cloudflare Access is not requested for this project."
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: skipped
+
+  # --- Branch point 4: CF_ACCOUNT_ID presence (only when Access is needed) ---
+  - id: cf-account-id-check
+    kind: decision
+    check:
+      description: "Is CF_ACCOUNT_ID set (required for Access application creation)?"
+      probe: "Read CF_ACCOUNT_ID from ~/ai-gang/.env"
+      error_when: probe-error
+    branches:
+      - when: present
+        to: configure-access-api
+      - when: absent
+        to: remediate-cf-account-id
+      - when: probe-error
+        to: remediate-cf-account-id-probe-error
+
+  - id: remediate-cf-account-id
+    kind: remediation
+    guidance: |
+      [HUMAN] PREVIEW_SUBDOMAIN or BETA_DOMAIN is set, so Cloudflare Access
+      needs to be configured, which requires CF_ACCOUNT_ID (Cloudflare
+      dashboard -> right sidebar). Add CF_ACCOUNT_ID=<account id> to
+      ~/ai-gang/.env. If you'd rather configure Access manually via the
+      Zero Trust dashboard instead, that remains available — see
+      scripts/setup-cloudflare-tunnel.sh's configure_access() fallback.
+    next: cf-account-id-check
+
+  - id: remediate-cf-account-id-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] Reading CF_ACCOUNT_ID from ~/ai-gang/.env failed
+      unexpectedly. Confirm the file exists and is readable, then re-run.
+    next: cf-account-id-check
+
+  - id: configure-access-api
+    kind: action
+    procedure: >-
+      Configure Cloudflare Access (email one-time-PIN) on the
+      preview/beta-app wildcard(s) via
+      POST /accounts/{CF_ACCOUNT_ID}/access/apps for each requested
+      domain.
+    writes:
+      files: []
+      services: ["cloudflare-access"]
+    next: cf-setup-done
+
+  - id: cf-setup-done
+    kind: action
+    procedure: "No-op — Cloudflare tunnel and Access setup complete."
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: success

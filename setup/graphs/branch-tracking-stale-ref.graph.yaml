@@ -1,0 +1,58 @@
+# Branch-tracking / stale-ref branch-point class (graph-process-engine.md
+# REQ-13). Compares a local branch's upstream tracking ref against the
+# remote's actual current default branch, catching the case a server-side
+# default-branch rename leaves stale: the local branch still tracks the old
+# name, and a naive push/PR silently targets the wrong ref.
+#
+# Detection logic lives in
+# setup/graphs/engine/lib/checks/branch-tracking.js.
+graph_id: branch-tracking-stale-ref
+schema_version: 1
+entry: check-tracking-ref
+nodes:
+  - id: check-tracking-ref
+    kind: decision
+    check:
+      description: "Does the local branch's upstream tracking ref match the remote's current default branch?"
+      probe: >-
+        `git rev-parse --abbrev-ref --symbolic-full-name @{u}` compared
+        against `git symbolic-ref refs/remotes/origin/HEAD`
+      error_when: probe-error
+    branches:
+      - when: matches
+        to: tracking-ref-ok
+      - when: stale
+        to: remediate-stale-tracking-ref
+      - when: probe-error
+        to: remediate-tracking-ref-probe-error
+
+  - id: tracking-ref-ok
+    kind: action
+    procedure: "No-op — tracking ref already matches the remote default branch."
+    writes:
+      files: []
+      services: []
+    terminal: true
+    outcome: success
+
+  - id: remediate-stale-tracking-ref
+    kind: remediation
+    guidance: |
+      [HUMAN or agent-executable] Resync stale refs and re-derive tracking:
+        git fetch --prune
+        git remote set-head origin -a
+      Then re-check. This is the same class of gap the V1 architecture
+      review found live: a server-side default-branch rename left a local
+      checkout's tracking ref pointing at a name that no longer exists,
+      producing a silent-wrong-target push instead of a clear error.
+    next: check-tracking-ref
+
+  - id: remediate-tracking-ref-probe-error
+    kind: remediation
+    guidance: |
+      [HUMAN] Either git command failed to execute (not a git repository,
+      no upstream configured, or no network access to resolve
+      origin/HEAD). Confirm this is a git checkout with a configured
+      `origin` remote and an upstream set for the current branch
+      (`git branch --set-upstream-to=origin/<branch>`), then re-run.
+    next: check-tracking-ref

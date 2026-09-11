@@ -1,0 +1,56 @@
+services:
+  jenkins:
+    build: .
+    container_name: ai-gang-jenkins
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:50000:50000"
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml:ro
+      # Same read-only mount every project container uses for its agent
+      # tooling (projects/*/docker-compose.yml) — gives the Jenkinsfile's
+      # pipeline_retry step access to setup/lib/gateway-publish.js so it
+      # publishes onto the gateway Streams transport the same way agents do,
+      # instead of a hand-rolled redis-cli call.
+      - ../setup:/agent-docs:ro
+    environment:
+      - CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs
+      # Credentials injected from the host .env at startup
+      - JENKINS_ADMIN_PASSWORD
+      - JIRA_URL
+      - JIRA_EMAIL
+      - JIRA_TOKEN
+      - GITHUB_TOKEN
+      - JENKINS_URL
+      # Release flow — see the release-workflow design
+      - JIRA_CANDIDATE_SHA_FIELD_ID
+      - JIRA_BUILD_IDENTIFIER_FIELD_ID
+      - JIRA_PREVIEW_URL_FIELD_ID
+      - PREVIEW_DOMAIN
+      - BETA_VM_HOST
+      - PROD_VM_HOST
+      - REDIS_HOST=ai-gang-redis
+      # canonical-release-workflow.md REQ-04 — local-mode release-candidate/
+      # production-promote writeback target. Container DNS name on the
+      # shared ai-gang network (services/work-item-service/docker-compose.yml's
+      # `api` service), not a configurable host — same convention as
+      # REDIS_HOST above, not JIRA_URL/BETA_VM_HOST below.
+      - WORKITEM_SERVICE_URL=http://work-item-service:9100
+      # Deploy credentials added once deployment targets are decided
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768M
+    networks:
+      - ai-gang
+
+volumes:
+  jenkins-data:
+
+networks:
+  ai-gang:
+    external: true

@@ -1,0 +1,9 @@
+{
+  "projects": [
+    {
+      "name": "test-project",
+      "jiraProjectKey": "TP",
+      "agents": ["refinement-agent", "backend-agent"]
+    }
+  ]
+}

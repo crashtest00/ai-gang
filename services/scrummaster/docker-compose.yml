@@ -1,0 +1,54 @@
+services:
+  scrummaster:
+    build: .
+    container_name: scrummaster
+    # internal-work-item-service.md REQ-08 / canonical-work-model.md REQ-09
+    # (both amended 2026-09-09): Django/work-item-service is AI Gang's sole
+    # external-facing surface; ScrumMaster MUST NOT expose any externally
+    # reachable port or route. No `ports:` mapping at all — the container
+    # still listens on 9000 for /health, reachable only from other
+    # containers on the `ai-gang` network (e.g. `docker exec ... curl
+    # localhost:9000/health`), never published to the host or beyond.
+    # Previously bound to 127.0.0.1:9000 for cloudflared's Jira-webhook
+    # forwarding; that forwarding target moves to work-item-service:9100
+    # (see that service's own docker-compose.yml) — updating
+    # scripts/setup-cloudflare-tunnel.sh's/init-project.sh's webhook-URL
+    # registration to match is flagged as a follow-up in the final report,
+    # out of scope for this change.
+    env_file: .env
+    environment:
+      - REDIS_HOST=ai-gang-redis
+      - REDIS_PORT=6379
+    volumes:
+      # Read-only access to project workspaces for BLOCKED marker search.
+      # Defaults to the documented clone location (~/ai-gang — see
+      # docs/ClaudeInstructions.md's "cd ~/ai-gang/services/scrummaster" instructions)
+      # rather than assuming host user `aigang`; override AI_GANG_HOME (e.g.
+      # in services/scrummaster/.env) if this repo was cloned somewhere else.
+      - ${AI_GANG_HOME:-$HOME/ai-gang}/projects:/projects:ro
+      # Read-only access to agent definitions (for path validation)
+      - ${AI_GANG_HOME:-$HOME/ai-gang}/setup:/agent-docs:ro
+      # Live-mounted, not baked in via COPY like the rest of the image —
+      # registering a project (init-project.sh writing config/projects.json)
+      # previously required a full image rebuild to take effect, since
+      # `COPY . .` only copies config/ at build time. Found live during the
+      # V2 E2E run (2026-09-08): ScrumMaster reported "Loaded 3 project(s)"
+      # after a new project was registered, until manually rebuilt.
+      - ./config:/app/config:ro
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      - redis-check
+
+  # One-shot service to verify Redis is reachable before starting
+  redis-check:
+    image: redis:7-alpine
+    networks:
+      - ai-gang
+    command: redis-cli -h ai-gang-redis ping
+    restart: "no"
+
+networks:
+  ai-gang:
+    external: true

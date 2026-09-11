@@ -1,0 +1,18 @@
+services:
+  workitem-test-postgres:
+    image: postgres:16-alpine
+    container_name: workitem-test-postgres-django
+    environment:
+      - POSTGRES_USER=workitem
+      - POSTGRES_PASSWORD=workitem
+      - POSTGRES_DB=workitem
+    ports:
+      - "15432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  workitem-test-redis:
+    image: redis:7-alpine
+    container_name: workitem-test-redis-django
+    ports:
+      - "16399:6379"

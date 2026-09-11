@@ -1,0 +1,11 @@
+generic-webhook-trigger:2.4.2
+docker-workflow:634.vedc7242b_eda_7
+github:1.46.0.1
+github-branch-source:1967.1969.v205fd594c821
+jira:3.21
+credentials-binding:720.v3f6decef43ea_
+configuration-as-code:2077.v41f1011a_5110
+job-dsl:3654.vdf58f53e2d15
+git:5.10.1
+pipeline-model-definition:2.2277.v00573e73ddf1
+workflow-aggregator:608.v67378e9d3db_1

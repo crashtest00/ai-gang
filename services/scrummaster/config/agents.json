@@ -1,0 +1,95 @@
+{
+  "agents": [
+    {
+      "id": "refinement-agent",
+      "displayName": "Refinement Agent",
+      "definitionPath": "/agent-docs/refinement-agent.md",
+      "routing": { "channelSuffix": "refinement" },
+      "agentCard": {
+        "name": "Refinement Agent",
+        "description": "Decomposes an implementation-ready Jira story into subtasks and assigns each to the agent role required to implement it.",
+        "version": "1.0.0",
+        "skills": [
+          {
+            "id": "decompose-story",
+            "name": "Decompose story",
+            "description": "Breaks a validated Jira story down into self-contained subtasks, one per required agent role, and assigns each an owner."
+          }
+        ]
+      }
+    },
+    {
+      "id": "backend-agent",
+      "displayName": "Backend Agent",
+      "definitionPath": "/agent-docs/backend-agent.md",
+      "routing": { "channelSuffix": "backend" },
+      "agentCard": {
+        "name": "Backend Agent",
+        "description": "Implements APIs, business logic, and data persistence.",
+        "version": "1.0.0",
+        "skills": [
+          {
+            "id": "implement-backend-change",
+            "name": "Implement backend change",
+            "description": "Implements, verifies, and opens a pull request for a backend subtask's described behavior."
+          }
+        ]
+      }
+    },
+    {
+      "id": "frontend-agent",
+      "displayName": "Frontend Agent",
+      "definitionPath": "/agent-docs/frontend-agent.md",
+      "routing": { "channelSuffix": "frontend" },
+      "agentCard": {
+        "name": "Frontend Agent",
+        "description": "Implements UI, components, styling, and client-side logic.",
+        "version": "1.0.0",
+        "skills": [
+          {
+            "id": "implement-frontend-change",
+            "name": "Implement frontend change",
+            "description": "Implements, verifies, and opens a pull request for a frontend subtask's described behavior."
+          }
+        ]
+      }
+    },
+    {
+      "id": "devops-agent",
+      "displayName": "DevOps Agent",
+      "definitionPath": "/agent-docs/devops-agent.md",
+      "routing": { "channelSuffix": "devops" },
+      "agentCard": {
+        "name": "DevOps Agent",
+        "description": "Owns pipelines, infrastructure, and deployment configuration.",
+        "version": "1.0.0",
+        "skills": [
+          {
+            "id": "operate-cicd-pipeline",
+            "name": "Operate CI/CD pipeline",
+            "description": "Maintains, triages, and troubleshoots the pipeline connecting GitHub, Jenkins, and Jira for a project."
+          }
+        ]
+      }
+    },
+    {
+      "id": "desktop-agent",
+      "displayName": "Desktop Agent",
+      "definitionPath": "/agent-docs/desktop-agent.md",
+      "routing": { "channelSuffix": "desktop" },
+      "agentCard": {
+        "name": "Desktop Agent",
+        "description": "Implements native desktop-app UI and platform integration (e.g. Tauri) — a first-class role so desktop projects no longer have to reuse the Frontend Agent's channel as a workaround.",
+        "version": "1.0.0",
+        "skills": [
+          {
+            "id": "implement-desktop-change",
+            "name": "Implement desktop change",
+            "description": "Implements, verifies, and opens a pull request for a desktop-app subtask's described behavior."
+          }
+        ]
+      }
+    }
+  ],
+  "retiredAgents": []
+}

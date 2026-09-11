@@ -1,0 +1,483 @@
+# Jenkins Configuration as Code (JCasC)
+# Applied automatically on container start.
+# Secrets are injected via environment variables — never hardcoded here.
+
+jenkins:
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  # numExecutors was 1. gitHubBranchDiscovery { strategyId(1) } (below, in the
+  # hello-world-pipeline job) is the semantically-correct "exclude branches
+  # already filed as PRs" value per the github-branch-source plugin's
+  # BranchDiscoveryTrait bitmask (1=exclude-PR-branches, 2=only-PR-branches,
+  # 3=all) — so the strategyId itself isn't wrong. But it was observed live
+  # (the release-testing design A9) to still let a plain branch job and
+  # its PR job get indexed as duplicates in a race (branch indexed before the
+  # PR-exclusion rescan catches up), which then deadlocked the single shared
+  # executor. Raised to 2 so a duplicate/competing build can't fully block
+  # every other job (including the manual release-candidate/production-promote
+  # jobs) even when the dedup race happens.
+  numExecutors: 2
+  # Quiet period 0 — pipelines start immediately on trigger
+  quietPeriod: 0
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: "jira-token"
+              description: "Jira API token (service account)"
+              secret: "${JIRA_TOKEN}"
+          - usernamePassword:
+              scope: GLOBAL
+              id: "github-token"
+              description: "GitHub PAT — repo access and auto-merge"
+              username: "x-access-token"
+              password: "${GITHUB_TOKEN}"
+          - string:
+              scope: GLOBAL
+              id: "github-api-token"
+              description: "GitHub PAT (Secret Text) — required by the classic github plugin's webhook/status-check management, which only accepts Secret Text credentials, not usernamePassword"
+              secret: "${GITHUB_TOKEN}"
+          # Deploy credentials added here once deployment targets are decided
+          # e.g. Railway, Render, Fly.io
+
+unclassified:
+  location:
+    url: "${JENKINS_URL}"
+  jiraGlobalConfiguration:
+    sites:
+      - url: "${JIRA_URL}"
+        credentialsId: "jira-token"
+  gitHubPluginConfig:
+    configs:
+      - name: "github.com"
+        apiUrl: "https://api.github.com"
+        credentialsId: "github-api-token"
+        manageHooks: true
+
+
+jobs:
+  # dev → beta promotion is no longer a separate job triggered off a Jira
+  # transition — it happens automatically inside each project's own
+  # per-project Jenkinsfile (see setup/Jenkinsfile.template) on every merge
+  # to `dev`. The three jobs below implement the batched, deliberate release
+  # flow instead: cutting a candidate, promoting it to production, and
+  # tearing down its preview if abandoned. See the release-workflow design.
+
+  - script: |
+      pipelineJob('release-candidate') {
+        description('Triggered by ScrumMaster when a Jira Release ticket is created and beta\'s queue is confirmed clean. Pins beta\'s HEAD as the candidate SHA, cuts release/<sha>, opens the release/<sha> → prod PR, and stands up a private SHA-pinned preview container on the Beta VM.')
+        triggers {
+          genericTrigger {
+            token('release-candidate')
+            genericVariables {
+              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
+              genericVariable { key('WORK_ITEM_ID'); value('$.workItemId') }
+              genericVariable { key('PROJECT_NAME'); value('$.projectName') }
+            }
+            causeString('Release $ISSUE_KEY requested for $PROJECT_NAME')
+            printContributedVariables(true)
+            printPostContent(false)
+          }
+        }
+        definition {
+          cps {
+            script('''
+              pipeline {
+                agent any
+                environment {
+                  PROJECT_DIR = "/home/aigang/ai-gang/projects/^${PROJECT_NAME}/src"
+                }
+                stages {
+                  stage('Pin candidate SHA') {
+                    steps {
+                      dir("^${PROJECT_DIR}") {
+                        sh 'git fetch origin beta'
+                        script {
+                          env.CANDIDATE_SHA = sh(script: 'git rev-parse origin/beta', returnStdout: true).trim()
+                          env.BUILD_IDENTIFIER = "^${PROJECT_NAME}-^${env.CANDIDATE_SHA.take(7)}-^${env.BUILD_NUMBER}"
+                        }
+                      }
+                    }
+                  }
+                  stage('Cut release/<sha> and open the frozen PR') {
+                    steps {
+                      dir("^${PROJECT_DIR}") {
+                        sh """
+                          git checkout -B release/^${CANDIDATE_SHA} ^${CANDIDATE_SHA}
+                          git push origin release/^${CANDIDATE_SHA}
+                          gh pr create --base prod --head release/^${CANDIDATE_SHA} \\
+                            --title "Release ^${ISSUE_KEY}: release/^${CANDIDATE_SHA}" \\
+                            --body "Frozen release candidate for ^${ISSUE_KEY}. Do not push further commits to this branch — it is pinned to ^${CANDIDATE_SHA}." \\
+                            || echo "PR already open for release/^${CANDIDATE_SHA}"
+                        """
+                      }
+                    }
+                  }
+                  stage('Deploy SHA-pinned preview to the Beta VM') {
+                    steps {
+                      // Reuses the image already built and tested on the Beta VM for this SHA —
+                      // no rebuild. Runs over the restricted deploy SSH key described in
+                      // release-workflow.md's Beta VM remote-deploy mechanism dependency.
+                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-deploy ^${PROJECT_NAME} ^${CANDIDATE_SHA} ^${ISSUE_KEY}"
+                      script {
+                        env.PREVIEW_URL = "https://rc-^${env.CANDIDATE_SHA}.^${env.PREVIEW_DOMAIN}"
+                      }
+                    }
+                  }
+                  stage('Trigger native validation build') {
+                    steps {
+                      // Supplementary to the web preview above, per desktop-app-support.md —
+                      // no-ops (STATUS=skipped) for a non-desktop project and never fails this
+                      // job on its own; a native build failure is reported, not fatal here.
+                      dir("^${PROJECT_DIR}") {
+                        script {
+                          def output = sh(
+                            script: '/home/aigang/ai-gang/jenkins/scripts/trigger-native-build.sh',
+                            returnStdout: true
+                          ).trim()
+                          def values = [:]
+                          output.readLines().each { line ->
+                            def parts = line.split('=', 2)
+                            if (parts.length == 2) { values[parts[0]] = parts[1] }
+                          }
+                          env.NATIVE_BUILD_STATUS = values.STATUS ?: 'skipped'
+                          env.NATIVE_BUILD_URL = values.URL ?: ''
+                        }
+                      }
+                    }
+                  }
+                  stage('Report candidate back to the release') {
+                    steps {
+                      script {
+                        // canonical-release-workflow.md REQ-04 — a local-mode-originated
+                        // release carries WORK_ITEM_ID (no Jira ticket to write onto);
+                        // a Jira-mode one carries ISSUE_KEY as before. Never both.
+                        if (env.WORK_ITEM_ID?.trim()) {
+                          sh """
+                            curl -sf -X POST \\
+                              -H 'Content-Type: application/json' \\
+                              "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/release-candidate" \\
+                              -d '{"candidateSha": "^${CANDIDATE_SHA}", "buildIdentifier": "^${BUILD_IDENTIFIER}", "previewUrl": "^${PREVIEW_URL}"}'
+                          """
+                          // Candidate SHA/Build Identifier/Preview URL recorded and a
+                          // comment posted in the same call (store.record_release_candidate)
+                          // — the work item is already `in-review` (REQ-04's Django-side
+                          // transition ran before this job was ever triggered), so unlike
+                          // Jira mode there is no separate status transition to make here.
+                        } else {
+                          sh """
+                            curl -s -u "\$JIRA_EMAIL:\$JIRA_TOKEN" -X PUT \\
+                              -H 'Content-Type: application/json' \\
+                              "\$JIRA_URL/rest/api/3/issue/^${ISSUE_KEY}" \\
+                              -d '{"fields": {
+                                "${JIRA_CANDIDATE_SHA_FIELD_ID}": "'"^${CANDIDATE_SHA}"'",
+                                "${JIRA_BUILD_IDENTIFIER_FIELD_ID}": "'"^${BUILD_IDENTIFIER}"'",
+                                "${JIRA_PREVIEW_URL_FIELD_ID}": "'"^${PREVIEW_URL}"'"
+                              }}'
+                          """
+                          jiraComment(
+                            site: 'ai-gang-jira',
+                            issueKey: "^${ISSUE_KEY}",
+                            body: "Release candidate ready for review.\\n\\nPreview: ^${PREVIEW_URL}\\nRelease PR: release/^${CANDIDATE_SHA} → prod\\nSHA: ^${CANDIDATE_SHA}\\nBuild: ^${BUILD_IDENTIFIER}" + (env.NATIVE_BUILD_URL ? "\\nNative build (^${env.NATIVE_BUILD_STATUS}): ^${env.NATIVE_BUILD_URL}" : "")
+                          )
+                          jiraTransition(site: 'ai-gang-jira', issueKey: "^${ISSUE_KEY}", transitionId: 'In Review')
+                        }
+                      }
+                    }
+                  }
+                }
+                post {
+                  failure {
+                    script {
+                      if (env.WORK_ITEM_ID?.trim()) {
+                        sh """
+                          curl -sf -X POST \\
+                            -H 'Content-Type: application/json' \\
+                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                            -d '{"body": "Failed to cut a release candidate. Build log: ^${env.BUILD_URL}"}' || true
+                        """
+                      } else {
+                        jiraComment(
+                          site: 'ai-gang-jira',
+                          issueKey: "^${ISSUE_KEY}",
+                          body: "Failed to cut a release candidate. Build log: ^${env.BUILD_URL}"
+                        )
+                      }
+                    }
+                  }
+                }
+              }
+            ''')
+            sandbox(true)
+          }
+        }
+      }
+
+  - script: |
+      pipelineJob('production-promote') {
+        description('Triggered by ScrumMaster when a Release ticket moves to Done — the single production-approval gate. Merges the frozen release/<sha> → prod PR and redeploys the exact previewed artifact, never rebuilding, then tears down the preview.')
+        triggers {
+          genericTrigger {
+            token('production-promote')
+            genericVariables {
+              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
+              genericVariable { key('WORK_ITEM_ID'); value('$.workItemId') }
+              genericVariable { key('PROJECT_NAME'); value('$.projectName') }
+              genericVariable { key('CANDIDATE_SHA'); value('$.candidateSha') }
+            }
+            causeString('Release $ISSUE_KEY approved for $PROJECT_NAME @ $CANDIDATE_SHA')
+            printContributedVariables(true)
+            printPostContent(false)
+          }
+        }
+        definition {
+          cps {
+            script('''
+              pipeline {
+                agent any
+                environment {
+                  PROJECT_DIR = "/home/aigang/ai-gang/projects/^${PROJECT_NAME}/src"
+                }
+                stages {
+                  stage('Merge the frozen release PR') {
+                    steps {
+                      dir("^${PROJECT_DIR}") {
+                        // Fast-forward or squash only — never a merge commit that pulls in
+                        // unrelated history. prod branch protection restricts Jenkins to
+                        // merging only this frozen release/<sha> PR (see infra ToDo).
+                        sh "gh pr merge release/^${CANDIDATE_SHA} --squash --delete-branch=false"
+                      }
+                    }
+                  }
+                  stage('Redeploy the already-built artifact to production') {
+                    steps {
+                      // Same already-built, SHA-pinned image the preview served — no rebuild.
+                      sh "ssh prod-deploy@\$PROD_VM_HOST deploy ^${PROJECT_NAME} ^${CANDIDATE_SHA}"
+                    }
+                  }
+                  stage('Tag and publish desktop release') {
+                    steps {
+                      // Required (not supplementary) for a desktop-lane project — see
+                      // desktop-app-support.md REQ-07. No-ops (TAG=) for a non-desktop
+                      // project. A real git/gh failure here fails this job and is reported
+                      // through the post/failure block below, since the tag IS the production
+                      // approval artifact for desktop, not just a validation signal.
+                      dir("^${PROJECT_DIR}") {
+                        script {
+                          def output = sh(
+                            script: '/home/aigang/ai-gang/jenkins/scripts/tag-desktop-release.sh',
+                            returnStdout: true
+                          ).trim()
+                          def values = [:]
+                          output.readLines().each { line ->
+                            def parts = line.split('=', 2)
+                            if (parts.length == 2) { values[parts[0]] = parts[1] }
+                          }
+                          env.RELEASE_TAG = values.TAG ?: ''
+                        }
+                      }
+                    }
+                  }
+                  stage('Tear down the preview container') {
+                    steps {
+                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-teardown ^${PROJECT_NAME} ^${CANDIDATE_SHA} || true"
+                    }
+                  }
+                  stage('Confirm on the release') {
+                    steps {
+                      script {
+                        // Plain Groovy string building only (sandbox-safe) — the JSON
+                        // encoding for the local-mode path happens in the shell step
+                        // below via jq, not here, since a static
+                        // groovy.json.JsonOutput.toJson() call would need one-time
+                        // manual Script Approval before this pipeline's sandbox
+                        // (sandbox(true) above) would allow it to run at all.
+                        env.CONFIRM_BODY = "Promoted to production: ^${PROJECT_NAME} @ ^${CANDIDATE_SHA}." + (env.RELEASE_TAG ? " Tagged ^${env.RELEASE_TAG} — GitHub Release publishing via release-desktop.yml." : "")
+                        if (env.WORK_ITEM_ID?.trim()) {
+                          sh """
+                            jq -n --arg body "\$CONFIRM_BODY" '{body: \$body}' | curl -sf -X POST \\
+                              -H 'Content-Type: application/json' \\
+                              "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                              -d @-
+                          """
+                        } else {
+                          jiraComment(site: 'ai-gang-jira', issueKey: "^${ISSUE_KEY}", body: env.CONFIRM_BODY)
+                        }
+                      }
+                    }
+                  }
+                }
+                post {
+                  failure {
+                    script {
+                      if (env.WORK_ITEM_ID?.trim()) {
+                        sh """
+                          curl -sf -X POST \\
+                            -H 'Content-Type: application/json' \\
+                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                            -d '{"body": "Production promotion failed. Build log: ^${env.BUILD_URL}\\n\\nThe release/^${CANDIDATE_SHA} → prod PR is still open — a human can inspect or merge it manually."}' || true
+                        """
+                      } else {
+                        jiraComment(
+                          site: 'ai-gang-jira',
+                          issueKey: "^${ISSUE_KEY}",
+                          body: "Production promotion failed. Build log: ^${env.BUILD_URL}\\n\\nThe release/^${CANDIDATE_SHA} → prod PR is still open — a human can inspect or merge it manually."
+                        )
+                      }
+                    }
+                  }
+                }
+              }
+            ''')
+            sandbox(true)
+          }
+        }
+      }
+
+  - script: |
+      pipelineJob('release-preview-teardown') {
+        description('Triggered by ScrumMaster when a Release ticket reaches a terminal state without shipping (resolution set to Abandoned). Tears down that release\'s preview container on the Beta VM.')
+        triggers {
+          genericTrigger {
+            token('release-preview-teardown')
+            genericVariables {
+              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
+              genericVariable { key('PROJECT_NAME'); value('$.projectName') }
+            }
+            causeString('Release $ISSUE_KEY abandoned for $PROJECT_NAME')
+            printContributedVariables(true)
+            printPostContent(false)
+          }
+        }
+        definition {
+          cps {
+            script('''
+              pipeline {
+                agent any
+                stages {
+                  stage('Tear down preview') {
+                    steps {
+                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-teardown-by-issue ^${PROJECT_NAME} ^${ISSUE_KEY} || true"
+                    }
+                  }
+                }
+              }
+            ''')
+            sandbox(true)
+          }
+        }
+      }
+
+  - script: |
+      multibranchPipelineJob('hello-world-pipeline') {
+        description('CI pipeline for the hello-world static frontend project.')
+        branchSources {
+          branchSource {
+            source {
+              github {
+                id('hello-world-source')
+                credentialsId('github-token')
+                repositoryUrl('https://github.com/The-Suitest-Thing/hello-world')
+                configuredByUrl(true)
+                repoOwner('The-Suitest-Thing')
+                repository('hello-world')
+                traits {
+                  // exclude branches already filed as PRs (independent enum — 1 is not the same as PR discovery's 1)
+                  gitHubBranchDiscovery { strategyId(1) }
+                  // merge PR head with current target branch revision before testing
+                  gitHubPullRequestDiscovery { strategyId(1) }
+                }
+              }
+            }
+          }
+        }
+        orphanedItemStrategy {
+          discardOldItems { numToKeep(10) }
+        }
+      }
+
+  # ---- Jenkins workspace / Docker-cache retention ----------------------
+  # the jenkins-cache-retention design. Two triggers sharing
+  # one policy (REQ-01/REQ-02 nightly cadence, REQ-03 threshold safety net)
+  # against the two disk-growth surfaces logRotator doesn't touch: the
+  # jenkins-data workspace volume, and the host Docker daemon's image/layer
+  # cache reached through the bind-mounted socket. Decision logic lives in
+  # jenkins/scripts/lib/retention-policy.js (unit tested in jenkins/test/);
+  # these jobs just invoke it on a schedule. System-level jobs, not
+  # per-project Jenkinsfile stages, per the spec's "shared infrastructure,
+  # not any one project's concern" rationale (§4).
+
+  - script: |
+      pipelineJob('jenkins-cache-retention-nightly') {
+        description('Nightly scheduled pruning of the jenkins-data workspace volume (REQ-01: 14-day age / 5-superseded-per-job bound) and the host Docker image/layer cache (REQ-02: docker system prune --filter until=72h). Independent of and in addition to buildDiscarder(logRotator(...)) in setup/Jenkinsfile.template, which only governs Jenkins\' own build-record retention, not workspace/cache disk usage. Never removes a workspace or image an in-progress build is using (REQ-04). See the jenkins-cache-retention design and jenkins/CACHE_RETENTION.md.')
+        triggers {
+          cron('H 2 * * *')
+        }
+        definition {
+          cps {
+            script('''
+              pipeline {
+                agent any
+                options {
+                  buildDiscarder(logRotator(numToKeepStr: \'20\'))
+                  disableConcurrentBuilds()
+                }
+                stages {
+                  stage(\'Prune stale workspaces\') {
+                    steps {
+                      sh \'node /home/aigang/ai-gang/jenkins/scripts/prune-workspaces.js --trigger=scheduled-workspace\'
+                    }
+                  }
+                  stage(\'Prune Docker image/layer cache\') {
+                    steps {
+                      sh \'node /home/aigang/ai-gang/jenkins/scripts/prune-docker-cache.js --trigger=scheduled-docker\'
+                    }
+                  }
+                }
+              }
+            ''')
+            sandbox(true)
+          }
+        }
+      }
+
+  - script: |
+      pipelineJob('jenkins-disk-usage-sweep') {
+        description('Disk-usage-triggered safety sweep (REQ-03), checked every 30 minutes. Re-runs the same workspace/Docker-cache pruning jenkins-cache-retention-nightly does, out of band, whenever usage is at/above 85%, repeatedly until it drops back below 70% -- the mechanism that actually closes the gap from the original disk-exhaustion failure (the hwd2-pipeline-audit design #13), since the nightly cadence alone can still lose that race if enough builds land between runs. A build of this job going red means the sweep could not get usage back under the target after its iteration cap -- operator attention needed.')
+        triggers {
+          cron('H/30 * * * *')
+        }
+        definition {
+          cps {
+            script('''
+              pipeline {
+                agent any
+                options {
+                  buildDiscarder(logRotator(numToKeepStr: \'20\'))
+                  disableConcurrentBuilds()
+                }
+                stages {
+                  stage(\'Check disk usage, sweep if over threshold\') {
+                    steps {
+                      sh \'node /home/aigang/ai-gang/jenkins/scripts/disk-usage-sweep.js\'
+                    }
+                  }
+                }
+              }
+            ''')
+            sandbox(true)
+          }
+        }
+      }

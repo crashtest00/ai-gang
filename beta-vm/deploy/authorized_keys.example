@@ -1,0 +1,8 @@
+# Add to ~beta-deploy/.ssh/authorized_keys on the Beta VM.
+# The command= prefix means this key can NEVER open an interactive shell —
+# every connection runs forced-command.sh, which validates $SSH_ORIGINAL_COMMAND
+# against a fixed allowlist (see forced-command.sh) before doing anything.
+#
+# Generate a dedicated keypair for this — do not reuse Jenkins' github-token
+# credential or any other key.
+command="/opt/beta-deploy/forced-command.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...replace-with-jenkins-beta-deploy-public-key... jenkins-beta-deploy

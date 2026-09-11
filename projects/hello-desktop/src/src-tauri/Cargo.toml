@@ -1,0 +1,16 @@
+[package]
+name = "hello-desktop"
+version = "0.1.0"
+description = "AI Gang Tauri desktop template"
+authors = ["AI Gang"]
+edition = "2021"
+
+[lib]
+name = "hello_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
