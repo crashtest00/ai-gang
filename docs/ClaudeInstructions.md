@@ -330,20 +330,40 @@ existing repo, it never creates one.
 
 ### 3.1 Project Initialisation
 
+The supported way to initialize a project whose name, deployment target,
+and stack are already decided is `--config`, pointing at a JSON file:
+
+```bash
+cd ~/ai-gang && ./scripts/init-project.sh --config <file>
+```
+
+Those three decisions come from that file's `project.name`, `project.type`,
+and `project.stack` fields. They are validated up front and then bound —
+not prompted for, and the agent must not re-ask them or change them once
+the file has validated. A runnable example is
+`scripts/init-project.example.json`; the currently supported `type`/`stack`
+values are published in `setup/graphs/engine/lib/config/catalog.js`.
+`GitHub HTTPS URL` and `GH_TOKEN` are still prompted for either way.
+
+Without `--config`, the alternative is the fully interactive flow:
+
 ```bash
 cd ~/ai-gang && ./scripts/init-project.sh
 ```
 
-Prompts for: project name, GitHub HTTPS URL, `GH_TOKEN`, and deployment
-target. Initializes in **local mode by default** (`canonical-work-model.md`
-REQ-14: local mode is the unconditional default, Jira mode cannot be chosen
-at init) — no Jira project key is asked for and no Jira API call is made.
-Deployment-target boilerplate selection (currently `web` or `desktop`) is
-also represented as a graph node —
+This prompts for: project name, GitHub HTTPS URL, `GH_TOKEN`, and
+deployment target. Initializes in **local mode by default**
+(`canonical-work-model.md` REQ-14: local mode is the unconditional default,
+Jira mode cannot be chosen at init) — no Jira project key is asked for and
+no Jira API call is made. Deployment-target boilerplate selection
+(currently `web` or `desktop`) is also represented as a graph node —
 Deployment-Target Boilerplate
-REQ-02/REQ-03, `setup/graphs/deployment-target-boilerplate.graph.yaml` — an
-unsupported target reaches that graph's remediation node (or this script's
-own equivalent guidance) rather than an empty, unexplained repository.
+REQ-02/REQ-03, `setup/graphs/deployment-target-boilerplate.graph.yaml` —
+which resolves the target from the project's `.aigang-config-identity.json`
+file's `type` field when the project was initialized with `--config`,
+rather than asking again; an unsupported target reaches that graph's
+remediation node (or this script's own equivalent guidance) rather than an
+empty, unexplained repository.
 
 Creates:
 - `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
