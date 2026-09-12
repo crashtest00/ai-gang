@@ -278,6 +278,36 @@ def test_admin_add_work_item_with_duplicate_external_key_is_rejected(clean_db):
     assert WorkItem.objects.filter(external_key='DUP-1').count() == 1
 
 
+def test_admin_rejected_status_transition_redisplays_form_instead_of_500(clean_db):
+    """Regression test: a gated write store.py rejects (here, a status
+    transition to an unrecognized status) used to escape save_model as an
+    uncaught exception and reach the operator as a bare 500. It must
+    instead redirect back to the change form with the rejection reason
+    flashed as a message, and must not apply the rejected change."""
+    client = _admin_client(clean_db)
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item_id}/change/', data={
+        'id': str(item_id), 'project': PROJECT, 'type': 'task', 'display_name': 'X',
+        'description': '', 'status': 'not-a-real-status', 'assignee_agent_id': '', 'priority': '0',
+        'writes_files': '', 'writes_services': '', 'parent': '', 'external_key': '',
+        'story_detail-TOTAL_FORMS': '0', 'story_detail-INITIAL_FORMS': '0',
+        'story_detail-MIN_NUM_FORMS': '0', 'story_detail-MAX_NUM_FORMS': '1',
+        'release_detail-TOTAL_FORMS': '0', 'release_detail-INITIAL_FORMS': '0',
+        'release_detail-MIN_NUM_FORMS': '0', 'release_detail-MAX_NUM_FORMS': '1',
+        **_EMPTY_FORMSETS,
+    })
+    assert resp.status_code == 302, f'a rejected gated write must redirect, not 500 — got {resp.status_code}'
+
+    item = WorkItem.objects.get(id=item_id)
+    assert item.status == 'proposed', 'the rejected transition must not have been applied'
+
+    followed = client.get(resp.headers['Location'])
+    assert followed.status_code == 200
+    assert b'is not one of the minimum canonical statuses' in followed.content
+
+
 def test_admin_status_transition_on_jira_mode_project_is_rejected(clean_db):
     client = _admin_client(clean_db)
     item_id = uuid.uuid4()

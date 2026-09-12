@@ -31,6 +31,7 @@ import uuid
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import HttpResponseRedirect
 from django.utils import timezone
 
 from . import project_config, store, write_gate
@@ -48,9 +49,13 @@ def _actor(request) -> str:
 def _raise_as_form_error(err: Exception):
     """store.py's own exceptions (ValidationError, AssignmentRejectedError,
     DependencyGateError, write_gate.WriteGateRejectedError) all carry a
-    `.code`. Re-raised as Django's ValidationError so
-    ModelAdmin._changeform_view's own `except ValidationError` handling
-    redisplays the form with a non-field error instead of a 500."""
+    `.code`. Re-raised as Django's ValidationError so it carries a type
+    WorkItemAdmin.changeform_view (below) specifically catches — Django's
+    admin machinery has no handling of its own for an exception raised out
+    of save_model(): ModelAdmin._changeform_view calls it with no
+    surrounding try/except, so whatever it raises otherwise propagates all
+    the way out as an unhandled exception (a bare 500, and one with no
+    traceback to go on once DEBUG is off)."""
     raise DjangoValidationError(str(err)) from err
 
 
@@ -170,6 +175,24 @@ class WorkItemAdmin(admin.ModelAdmin):
                WorkItemArtifactInline, WorkItemCommentInline, WorkItemHistoryInline]
     fields = ('id', 'project', 'type', 'display_name', 'description', 'status', 'assignee_agent_id',
                'priority', 'writes_files', 'writes_services', 'parent', 'external_key', 'created_at', 'updated_at')
+
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        """Catches the DjangoValidationError save_model (below) raises for
+        a rejected gated write. Nothing upstream in Django's admin does:
+        ModelAdmin._changeform_view calls self.save_model(...) with no
+        surrounding try/except of its own, so left uncaught this would
+        propagate all the way out as an unhandled exception. Converts it
+        into a flashed error message and a redirect back to the same page
+        instead — the transaction save_model ran inside has already been
+        rolled back by this point (changeform_view's own
+        transaction.atomic(), which wraps the call this method's super()
+        makes), so nothing was actually written."""
+        try:
+            return super().changeform_view(request, object_id, form_url, extra_context)
+        except DjangoValidationError as err:
+            for message in err.messages:
+                messages.error(request, message)
+            return HttpResponseRedirect(request.path)
 
     def get_inlines(self, request, obj):
         """WorkItemStoryDetail/WorkItemReleaseDetail are 1:1 child tables
