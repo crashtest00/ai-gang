@@ -155,9 +155,11 @@ Open <http://127.0.0.1:9100/django-admin/> and sign in with the
 
 Under **Workitems → Work items**, add a work item with your project's
 name, **Type** `story`, an **Assignee agent id** of `refinement-agent`,
-and **Status** `proposed`. Save it, re-open it to fill in the story fields
-(Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope),
-then set **Status** to `ready`.
+and **Status** `proposed`, leaving **External key** empty. It takes three
+saves: save the work item, re-open it and fill in the story fields
+(Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) and
+save, then re-open it once more and set **Status** to `ready`. The story
+fields have to be saved before the status moves, not with it.
 
 That is the whole loop. The story is routed to the Refinement Agent, which
 breaks it into subtasks for the agents your project has; each of those

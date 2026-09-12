@@ -77,10 +77,17 @@ cmd_phase() {
 
 cmd_step_start() {
   local id="${1:?status.sh step-start <id>}"
+  # Starting a step clears an earlier failure. A step that failed and was
+  # then put right and re-run leaves the run in progress again — without
+  # this, the record would keep reporting the recovered failure as the
+  # reason for whatever happened afterwards, which is how a live run came
+  # to blame a Redis problem it had already fixed.
   edit --arg id "$id" --arg at "$(now)" '
-    .phase = "initializing"
+    .state = "in-progress"
+    | .phase = "initializing"
+    | .error = null
     | .step = ($id)
-    | .steps = (.steps | map(if .id == $id then (.state = "in-progress" | .startedAt = $at) else . end))
+    | .steps = (.steps | map(if .id == $id then (.state = "in-progress" | .startedAt = $at | .finishedAt = null) else . end))
     | .updatedAt = $at'
 }
 

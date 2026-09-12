@@ -183,3 +183,36 @@ test('a step logs only to the file when the container is tailing it, so nothing 
   assert.match(logged, /\[startup\] a message/);
   assert.match(logged, /\[startup\] a warning/);
 });
+
+test('a step that failed and is re-run clears the failure, so the record blames the right thing', () => {
+  // The agent is allowed to put a failed step right and re-run it. The
+  // record has to follow: a live run recovered a Redis failure, failed
+  // later for an unrelated reason, and reported the Redis failure as the
+  // cause because nothing had cleared it.
+  const dir = makeStateDir();
+  status(dir, 'init');
+  status(dir, 'step-start', 'start-redis');
+  status(dir, 'fail', 'Redis did not start');
+  assert.equal(record(dir).state, 'failed');
+
+  status(dir, 'step-start', 'start-redis');
+  let doc = record(dir);
+  assert.equal(doc.state, 'in-progress');
+  assert.equal(doc.error, null);
+  assert.equal(doc.steps.find((s) => s.id === 'start-redis').state, 'in-progress');
+
+  status(dir, 'step-done', 'start-redis');
+  status(dir, 'step-start', 'start-work-item-service');
+  status(dir, 'fail', 'the work-item service did not answer /health');
+  doc = record(dir);
+  assert.equal(doc.error, 'the work-item service did not answer /health');
+});
+
+test('a re-run step does not keep a finish time from the attempt that failed', () => {
+  const dir = makeStateDir();
+  status(dir, 'init');
+  status(dir, 'step-start', 'start-redis');
+  status(dir, 'step-done', 'start-redis');
+  status(dir, 'step-start', 'start-redis');
+  assert.equal(record(dir).steps.find((s) => s.id === 'start-redis').finishedAt, null);
+});

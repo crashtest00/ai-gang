@@ -663,12 +663,22 @@ Under **Workitems → Work items**, add a work item:
 - **Display name**: `[TEST] Hello World endpoint`
 - **Status**: `proposed`
 - **Assignee agent id**: `refinement-agent`
+- **External key**: leave it empty. It is the Jira issue key a work item
+  mirrors, and setting it routes dispatch through Jira, which this flow
+  does not set up.
 
-Save it. The **Work item story detail** section only appears once the work
-item exists, so re-open it and fill in the story schema fields there
-(Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope),
-then change **Status** to `ready` and save again. A story cannot leave
-`proposed` without them, and the form will say so.
+It takes three saves, in this order, and the order matters:
+
+1. **Save the work item.** The **Work item story detail** section is not on
+   the add form at all — it belongs to the saved object.
+2. **Re-open it, fill in the story schema fields** (Behavior, Acceptance
+   Criteria, Constraints, Edge Cases, Out of Scope) and save again,
+   leaving the status at `proposed`.
+3. **Re-open it once more, change Status to `ready`, and save.**
+
+Filling in the story fields and moving to `ready` in the same save does
+not work: the admin saves the work item before its story detail, so the
+status change is rejected for the fields it cannot see yet.
 
 `ready` with an assignee is what makes a work item eligible for dispatch;
 nothing is dispatched before that.

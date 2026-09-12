@@ -176,8 +176,21 @@ test('the end-to-end leg uses the work-item type and status the service actually
   // store.py requires story detail before a story may leave 'proposed'.
   const store = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'store.py'));
   assert.match(store, /if item\.type == 'story' and validity\['baseline'\] != 'proposed'/);
-  assert.match(leg.replace(/\s+/g, ' '), /cannot leave `proposed` without them/,
-    'the leg should say the story fields are required first');
+  assert.match(leg.replace(/\s+/g, ' '), /story fields .{0,40}(before|and moving)/i,
+    'the leg should say the story fields have to be saved before the status moves');
+
+  // The admin's story-detail inline is hidden on the add form, which is
+  // why the sequence takes three saves rather than one.
+  const admin = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'admin.py'));
+  assert.match(admin, /def get_inlines\(self, request, obj\)/);
+  assert.match(admin, /WorkItemStoryDetailInline/);
+  assert.match(leg.replace(/\s+/g, ' '), /three saves/);
+
+  // external_key routes dispatch through Jira, which this flow does not
+  // set up, so the leg has to say to leave it empty.
+  const dispatchSource = read(path.join(REPO_ROOT, 'services', 'scrummaster', 'src', 'dispatchConsumer.js'));
+  assert.match(dispatchSource, /if \(full\.external_key\) \{\n\s+return jira\.getIssue/);
+  assert.match(leg.replace(/\s+/g, ' '), /External key.{0,40}leave it empty/i);
 });
 
 // ---- the work-item service's own environment example ----
