@@ -129,6 +129,55 @@ test('a missing or empty repository.url is rejected by name', () => {
   }
 });
 
+test('repository.url must be an https:// URL of a repository, not a place on this machine', () => {
+  // It is the remote the project is created against and pushed to. The
+  // one thing it must not be is a path on whatever machine happens to be
+  // running the flow — a run against one of those reaches "complete"
+  // without the configured repository ever being contacted.
+  const refused = [
+    ['file:///home/somebody/remote', /must be an https:\/\/ URL, not "file"/],
+    ['ssh://git@github.com/an-org/a-repo.git', /must be an https:\/\/ URL, not "ssh"/],
+    ['http://github.com/an-org/a-repo.git', /must be an https:\/\/ URL, not "http"/],
+    ['git@github.com:an-org/a-repo.git', /must be an https:\/\/ URL/],
+    ['/srv/git/a-repo.git', /must be an https:\/\/ URL/],
+    ['not-a-url-at-all', /must be an https:\/\/ URL/],
+    ['https://github.com', /must name a repository, not just a host/],
+    ['https://github.com/an-org/a-repo.git?token=x', /must not carry a query string/],
+    ['https://github.com/an-org/a-repo.git#somewhere', /must not carry a fragment/],
+  ];
+  for (const [url, expected] of refused) {
+    const result = validatePlatformConfigText(JSON.stringify(valid({ repository: { url } })));
+    assert.equal(result.valid, false, `${url} should not validate`);
+    assert.ok(result.errors.some((e) => expected.test(e)), `${url}: ${result.errors.join(' | ')}`);
+  }
+});
+
+test('repository.url must not carry the credential that belongs in .env', () => {
+  const result = validatePlatformConfigText(
+    JSON.stringify(valid({ repository: { url: 'https://user:a-token@github.com/an-org/a-repo.git' } }))
+  );
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => /must not carry credentials/.test(e)));
+});
+
+test('an ordinary GitHub HTTPS URL, with or without the .git suffix, is accepted', () => {
+  for (const url of ['https://github.com/an-org/a-repo.git', 'https://github.com/an-org/a-repo',
+    'https://git.example.com/an-org/a-repo.git']) {
+    const result = validatePlatformConfigText(JSON.stringify(valid({ repository: { url } })));
+    assert.equal(result.valid, true, `${url}: ${result.errors.join(' | ')}`);
+    assert.equal(result.decisions.repositoryUrl, url);
+  }
+});
+
+test('a project configuration is not held to the https rule, only the platform one is', () => {
+  // scripts/init-project.sh --config serves callers who legitimately
+  // point at a local remote, and never starts a platform. This is the
+  // same exemption the template-placeholder check takes.
+  const local = 'file:///srv/git/a-repo.git';
+  assert.equal(validateConfigText(JSON.stringify(valid({ repository: { url: local } }))).valid, true);
+  assert.equal(validatePlatformConfigText(JSON.stringify(valid({ repository: { url: local } }))).valid, false);
+});
+
 test('a repository.url carrying whitespace or a newline is rejected', () => {
   // The URL leaves the validator as a KEY=value line a shell reads back,
   // so a value that could break that framing must never validate.

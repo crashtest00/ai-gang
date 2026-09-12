@@ -30,6 +30,50 @@ const REPOSITORY_FIELDS = new Set(['url']);
 // to strip.
 const URL_SAFE_PATTERN = /^[\x21-\x7e]+$/;
 
+/**
+ * The platform configuration's `repository.url` is the remote the project
+ * is created against and pushed to, so it has to be a repository someone
+ * can reach over the network — not a path on the machine that happens to
+ * be running the flow, and not a credential. `file://`, `ssh://`,
+ * `git@host:org/repo`, a bare path and a URL carrying `user:password` are
+ * all refused here.
+ *
+ * A project configuration through `scripts/init-project.sh --config` is
+ * not subject to this, the same exemption the template-placeholder check
+ * takes: that path serves callers who legitimately point at a local
+ * remote, and it never starts a platform.
+ *
+ * Returns a diagnostic, or null when the value is acceptable.
+ */
+function repositoryUrlError(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return '"repository.url" must be an https:// URL of the project\'s repository '
+      + `(got ${JSON.stringify(url)})`;
+  }
+  if (parsed.protocol !== 'https:') {
+    return `"repository.url" must be an https:// URL, not ${JSON.stringify(parsed.protocol.replace(':', ''))}`;
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    return '"repository.url" must not carry credentials — the fine-grained PAT belongs in .env, as GH_TOKEN';
+  }
+  if (parsed.hostname === '') {
+    return '"repository.url" must name a host';
+  }
+  if (parsed.pathname === '' || parsed.pathname === '/') {
+    return '"repository.url" must name a repository, not just a host';
+  }
+  if (parsed.search !== '') {
+    return '"repository.url" must not carry a query string';
+  }
+  if (parsed.hash !== '') {
+    return '"repository.url" must not carry a fragment';
+  }
+  return null;
+}
+
 // The platform configuration template every operator copies to
 // ai-gang.config.json. Its own field values ARE the placeholder set: a
 // value still equal to one of them means that field was never filled in.
@@ -274,6 +318,9 @@ function validateText(text, { platform } = { platform: false }) {
     errors.push(
       '"repository.url" must contain only printable, non-space ASCII characters'
     );
+  } else if (platform && doc.repository !== undefined) {
+    const urlError = repositoryUrlError(doc.repository.url);
+    if (urlError) errors.push(urlError);
   }
 
   if (!PROJECT_NAME_PATTERN.test(name)) {

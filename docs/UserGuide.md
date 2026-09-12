@@ -122,7 +122,8 @@ lives:
 `name` is lowercase letters, numbers and hyphens. `type` and `stack` come
 from a fixed list of supported profiles — today that is `web` with
 `node-express`, and startup tells you the current list if you get it
-wrong.
+wrong. `repository.url` is that repository's plain HTTPS URL, with no
+username or token in it — the PAT goes in `.env`, as `GH_TOKEN`.
 
 `.env` is where every secret goes, and the only place any of them goes.
 The first section of `.env.template` is what startup needs: your Anthropic
