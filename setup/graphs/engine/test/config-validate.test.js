@@ -15,6 +15,16 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { validateConfigFile } = require('../lib/config/validate');
 
+// The validator has exactly two entry points, one per configuration kind, for
+// callers and for tests alike. A text-level function was exported twice before
+// and used by tests only; this guards against that coming back.
+test('the validator exports only its two file-level entry points', () => {
+  assert.deepEqual(
+    Object.keys(require('../lib/config/validate')).sort(),
+    ['validateConfigFile', 'validatePlatformConfigFile']
+  );
+});
+
 const INIT_PROJECT_SCRIPT = path.join(__dirname, '..', '..', '..', '..', 'scripts', 'init-project.sh');
 
 // The project rules have one entry point, `validateConfigFile` — the one

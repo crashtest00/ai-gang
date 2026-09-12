@@ -125,7 +125,9 @@ from a fixed list of supported profiles — today that is `web` with
 wrong. `repository.url` is that repository's plain HTTPS URL, with no
 username or token in it — the PAT goes in `.env`, as `GH_TOKEN`.
 
-`.env` is where every secret goes, and the only place any of them goes.
+`.env` is where you put every secret. Startup copies the ones a service needs
+into that service's own `.env` (and the project's), each written
+owner-readable only; nothing else holds a copy.
 The first section of `.env.template` is what startup needs: your Anthropic
 key, the project's `GH_TOKEN`, the Django admin account you will sign in
 with, and a PostgreSQL password and Django secret key you invent

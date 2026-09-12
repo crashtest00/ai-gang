@@ -147,7 +147,7 @@ test('the PAT never appears on a git command line — checked from the process t
   // `git -c credential.helper=...password=<token>...` puts the token in
   // an argument, which sits in the host's process table, readable by any
   // local user, for as long as that git call runs — the same exposure
-  // row 40's create-admin.sh fix closed for the admin password. This
+  // create-admin.sh's `--env-file` fix closed for the admin password. This
   // drives the real script with a stand-in `git` that records exactly
   // what a `ps` on the host would have shown for every git call it makes,
   // then actually performs the push so the flow's behaviour is unchanged.
