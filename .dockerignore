@@ -1,0 +1,5 @@
+# The AI Gang container's image copies exactly one file — its entrypoint.
+# Everything else it runs comes from the checkout mounted at run time, so
+# nothing else belongs in the build context.
+*
+!scripts/startup/entrypoint.sh

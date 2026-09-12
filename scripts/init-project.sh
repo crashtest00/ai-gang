@@ -35,6 +35,24 @@
 # resumes idempotently; retrying with a changed name/type/stack against an
 # already-initialised project folder is refused before any further change.
 #
+# --config also replaces the three questions this script would otherwise
+# ask, so an unattended run has nothing to type:
+#   - The GitHub repository URL comes from the same file's optional
+#     "repository" object ("url"), not from the prompt. With no
+#     "repository" object and no terminal, the remote is skipped rather
+#     than asked for.
+#   - The fine-grained PAT comes from GH_TOKEN in the environment file
+#     ($HQ_ENV, read as data — never executed) or from the environment
+#     itself, not from the prompt. Without --config an exported GH_TOKEN
+#     is deliberately ignored and the prompt is unchanged. With no
+#     GH_TOKEN and no terminal, the remote is configured and nothing is
+#     pushed.
+#   - The final "Continue? [y/N]" confirmation is suppressed when there is
+#     no terminal, so an EOF on stdin cannot be read as a refusal. Every
+#     decision it covers came from the file and was validated first.
+# The "next steps" list printed at the end likewise leaves out the steps
+# --config's caller performs itself.
+#
 # A runnable example lives at scripts/init-project.example.json — copy it
 # and edit "name" to try --config directly:
 #   ./scripts/init-project.sh --config scripts/init-project.example.json
@@ -89,6 +107,16 @@ done
 CONFIG_PROJECT_NAME=""
 CONFIG_PROJECT_TYPE=""
 CONFIG_PROJECT_STACK=""
+CONFIG_REPOSITORY_URL=""
+
+# Whether this run has a terminal to ask questions of. A --config run with
+# no terminal (platform startup, a pipeline) must never block on a prompt,
+# and must never read an EOF on stdin as an answer.
+if [[ -t 0 ]]; then
+  INTERACTIVE=true
+else
+  INTERACTIVE=false
+fi
 
 if [[ -n "$CONFIG_FILE" ]]; then
   # Validate before anything below can create the project folder or mutate
@@ -124,6 +152,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
       PROJECT_NAME) CONFIG_PROJECT_NAME="$config_val" ;;
       PROJECT_TYPE) CONFIG_PROJECT_TYPE="$config_val" ;;
       PROJECT_STACK) CONFIG_PROJECT_STACK="$config_val" ;;
+      REPOSITORY_URL) CONFIG_REPOSITORY_URL="$config_val" ;;
     esac
   done <<< "$CONFIG_OUTPUT"
 
@@ -166,10 +195,34 @@ if [[ "$DEPLOYMENT" == "desktop" && "$DESKTOP_FRAMEWORK" != "tauri" && "$DESKTOP
 fi
 
 # --- Load credentials ---
-if [[ -f "$HQ_ENV" ]]; then
-  # shellcheck source=/dev/null
-  source "$HQ_ENV"
-fi
+# An environment file is data, not a script. Executing one expands a $, a
+# backtick or a $(...) in any value — and one of these values is a
+# password somebody invented. So each variable this script uses is read
+# out of the file literally, and a value already in the environment wins,
+# which is how a caller that has read the file itself hands them over.
+#
+# This is the whole list: adding a use of a new variable from $HQ_ENV
+# means adding it here.
+read_env_value() {
+  local file="$1" name="$2" line value
+  [[ -f "$file" ]] || return 1
+  line="$(grep -E "^[[:space:]]*${name}=" "$file" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 1
+  value="${line#*=}"
+  if [[ ${#value} -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ ${#value} -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+for env_var in ANTHROPIC_API_KEY GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
+  if [[ -z "${!env_var:-}" ]]; then
+    printf -v "$env_var" '%s' "$(read_env_value "$HQ_ENV" "$env_var" || true)"
+  fi
+done
+unset env_var
 
 if [[ "$CONNECT_JIRA" == "true" ]]; then
   : "${JIRA_URL:?JIRA_URL is not set. Check $HQ_ENV}"
@@ -534,22 +587,54 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
   fi
 fi
 
-# GitHub remote — must be created by the human before running this script
-echo ""
-echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
-echo "  Leave blank to skip (you can add the remote manually later)."
-read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+# GitHub remote — must be created by the human before running this script.
+# A config carrying a "repository" object supplies it instead of the
+# prompt; a --config run with no terminal and no configured URL leaves it
+# blank (the same as answering the prompt blank) rather than blocking or
+# reading an EOF as an answer.
+GITHUB_URL=""
+if [[ -n "$CONFIG_FILE" && -n "$CONFIG_REPOSITORY_URL" ]]; then
+  GITHUB_URL="$CONFIG_REPOSITORY_URL"
+  echo ""
+  echo "  GitHub repository (from $CONFIG_FILE): $GITHUB_URL"
+elif [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  echo ""
+  echo "  GitHub: no \"repository\" object in $CONFIG_FILE and no terminal to ask — skipping the remote."
+  echo "  Add it manually later with: git -C <project>/src remote add origin <url>"
+else
+  echo ""
+  echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
+  echo "  Leave blank to skip (you can add the remote manually later)."
+  read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+fi
 
-# Fine-grained PAT for container git operations
-GH_TOKEN=""
-if [[ -n "$GITHUB_URL" ]]; then
-  echo ""
-  echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
-  echo "  Generate one at: https://github.com/settings/tokens?type=beta"
-  echo "  Repository access: this repo only"
-  echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
-  read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
-  echo ""
+# Fine-grained PAT for container git operations. Under --config it comes
+# from the environment — GH_TOKEN, read out of $HQ_ENV above — so an
+# unattended run has nothing to type. Without --config the prompt below is
+# unchanged, and an exported GH_TOKEN is deliberately ignored there.
+if [[ -n "$CONFIG_FILE" ]]; then
+  GH_TOKEN="${GH_TOKEN:-}"
+  if [[ -n "$GH_TOKEN" ]]; then
+    echo "  GitHub PAT: read from $HQ_ENV."
+  fi
+else
+  GH_TOKEN=""
+fi
+
+if [[ -n "$GITHUB_URL" && -z "$GH_TOKEN" ]]; then
+  if [[ "$INTERACTIVE" == "true" ]]; then
+    echo ""
+    echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
+    echo "  Generate one at: https://github.com/settings/tokens?type=beta"
+    echo "  Repository access: this repo only"
+    echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
+    read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
+    echo ""
+  else
+    echo ""
+    echo "  GitHub PAT: GH_TOKEN is not set in $HQ_ENV and there is no terminal to ask —"
+    echo "  the remote will be configured but nothing will be pushed."
+  fi
 fi
 
 PROJECT_DIR="$PROJECTS_DIR/$PROJECT_NAME"
@@ -560,10 +645,18 @@ echo "  Mode         : $([[ "$CONNECT_JIRA" == "true" ]] && echo "Jira ($PROJECT
 echo "  Local path   : $PROJECT_DIR"
 [[ -n "$GITHUB_URL" ]] && echo "  GitHub       : $GITHUB_URL"
 echo ""
-read -rp "Continue? [y/N] " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 0
+if [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  # Every decision this confirmation covers came from the configuration
+  # and has already been validated, and there is no terminal to answer
+  # from. Prompting here would read the EOF on stdin as "N" and abort a
+  # run nobody declined.
+  echo "Continue? [y/N] y   (no terminal — proceeding from $CONFIG_FILE)"
+else
+  read -rp "Continue? [y/N] " CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+  fi
 fi
 
 echo ""
@@ -639,13 +732,20 @@ COMPOSE
 fi
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  cat > "$PROJECT_DIR/.env" <<ENVFILE
+  # This file holds the Anthropic key and the GitHub PAT, so it is
+  # readable only by its owner — the same rule the platform's own derived
+  # environment files follow. Created 0600 rather than chmod-ed
+  # afterwards, so it is never briefly world-readable.
+  ( umask 077
+    cat > "$PROJECT_DIR/.env" <<ENVFILE
 PROJECT_NAME=${PROJECT_NAME}
 REDIS_HOST=ai-gang-redis
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 GITHUB_URL=${GITHUB_URL:-}
 GH_TOKEN=${GH_TOKEN:-}
 ENVFILE
+  )
+  chmod 600 "$PROJECT_DIR/.env"
   echo "Created: $PROJECT_DIR/.env"
   if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "  ** ANTHROPIC_API_KEY not found in $HQ_ENV — fill it in before building."
@@ -721,13 +821,24 @@ if [[ -n "$GITHUB_URL" ]]; then
   fi
 
   if [[ -n "$GH_TOKEN" ]]; then
+    # Pushes with the fine-grained PAT authenticating over HTTPS, without
+    # ever putting the token on git's own command line — an argument there
+    # sits in the host's process table, readable by any local user for as
+    # long as the call lasts, the same exposure create-admin.sh's
+    # --env-file fix closes for the admin password. The credential.helper
+    # value is single-quoted, so this command line expands nothing; the
+    # helper subshell reads GH_TOKEN from its own inherited environment
+    # when git actually invokes it, and GH_TOKEN is exported only to that
+    # one command.
+    git_push_with_token() {
+      GH_TOKEN="$GH_TOKEN" git -C "$SRC_DIR" \
+        -c 'credential.helper=!f() { echo username=oauth2; echo "password=$GH_TOKEN"; }; f' \
+        push "$@"
+    }
+
     echo "  Pushing to GitHub..."
-    git -C "$SRC_DIR" \
-      -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-      push --set-upstream origin main 2>/dev/null || \
-      git -C "$SRC_DIR" \
-        -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-        push --set-upstream origin master
+    git_push_with_token --set-upstream origin main 2>/dev/null || \
+      git_push_with_token --set-upstream origin master
     echo "  Pushed to GitHub."
 
     # --- Create dev/beta/prod branches + branch protection ---
@@ -753,9 +864,7 @@ if [[ -n "$GITHUB_URL" ]]; then
         if git -C "$SRC_DIR" ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
           echo "  Branch '$branch' already exists on origin — skipping creation."
         else
-          git -C "$SRC_DIR" \
-            -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-            push origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
+          git_push_with_token origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
             && echo "  Created branch '$branch'." \
             || echo "  Warning: could not create branch '$branch' — create it manually from $DEFAULT_BRANCH."
         fi
@@ -926,9 +1035,18 @@ if [[ "$CONNECT_JIRA" != "true" ]]; then
 fi
 echo "Next steps:"
 echo "  1. Fill in $SRC_DIR/CLAUDE.md (framework, key directories, entry points, conventions)"
-echo "  2. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
-echo "  3. docker compose build && docker compose up -d"
-echo "  4. docker compose exec dev node /agent-docs/subscriber.js &"
+next_step=2
+# Adding the Dockerfile by hand is the interactive path's step. A
+# --config caller installs it from the stack's template itself, straight
+# after this script returns, so telling it to write one here would be
+# telling it to do the very thing it must not do.
+if [[ -z "$CONFIG_FILE" ]]; then
+  echo "  $next_step. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
+  next_step=$((next_step + 1))
+fi
+echo "  $next_step. docker compose build && docker compose up -d"
+next_step=$((next_step + 1))
+echo "  $next_step. docker compose exec dev node /agent-docs/subscriber.js &"
 echo ""
 if [[ -z "${GITHUB_URL:-}" ]]; then
   echo "  Git: repository initialised locally. When you've created the GitHub repo:"

@@ -10,11 +10,33 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { validateConfigText } = require('../lib/config/validate');
+const { validateConfigFile } = require('../lib/config/validate');
+
+// The validator has exactly two entry points, one per configuration kind, for
+// callers and for tests alike. A text-level function was exported twice before
+// and used by tests only; this guards against that coming back.
+test('the validator exports only its two file-level entry points', () => {
+  assert.deepEqual(
+    Object.keys(require('../lib/config/validate')).sort(),
+    ['validateConfigFile', 'validatePlatformConfigFile']
+  );
+});
 
 const INIT_PROJECT_SCRIPT = path.join(__dirname, '..', '..', '..', '..', 'scripts', 'init-project.sh');
+
+// The project rules have one entry point, `validateConfigFile` — the one
+// cli.js calls without --platform. These cases are about the text, so they
+// write it where a project config file would be and go in through that
+// same door (the same technique config-validate-platform.test.js uses for
+// the platform rules).
+function validateConfigText(text) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-project-config-')), 'config.json');
+  fs.writeFileSync(file, text);
+  return validateConfigFile(file);
+}
 
 function validExample(overrides = {}) {
   return {

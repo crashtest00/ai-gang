@@ -8,7 +8,13 @@
 
 AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with Jira and GitHub on your behalf.
 
-Three shared services run alongside the project containers: **Redis** (message broker), **ScrumMaster** (webhook receiver and work router), and **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes to `beta` when a ticket moves to Done).
+Three shared services run alongside the project containers, and platform
+startup brings up all three: **Redis** (message broker), the **work-item
+service** (the datastore and the Django admin panel you write stories in,
+at `http://127.0.0.1:9100/django-admin/`), and **ScrumMaster** (work
+router). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes
+to `beta` when a ticket moves to Done) is a later addition an operator
+sets up separately; so are Jira, Cloudflare and the Beta VM.
 
 Each project gets:
 
@@ -21,9 +27,10 @@ Each project gets:
 
 ## Prerequisites
 
-- AI Gang HQ VM is running
-- You have SSH access: `ssh ai-gang-cloud`
-- One-time system setup is complete (see `ClaudeInstructions.md`)
+- AI Gang is running. If it is not, see "Starting AI Gang" below — one
+  command brings the whole platform up.
+- You can reach the machine it runs on (if that is a server rather than
+  your own machine, e.g. `ssh ai-gang-cloud`).
 
 ---
 
@@ -69,7 +76,129 @@ The same token is used by FE/BE agents (push branches + open PRs) and by Jenkins
 
 ---
 
+## Starting AI Gang
+
+If AI Gang is not running yet, this is how you start it — on your own
+machine or on a server you have Docker on. One command does all of it.
+
+### What you need first
+
+- **Docker**, with the Compose plugin. `./scripts/install-docker.sh`
+  installs both if you do not have them.
+- **An Anthropic API key** — <https://console.anthropic.com/settings/keys>.
+- **An empty GitHub repository** for the project you want built, and a
+  fine-grained PAT for it (see "GitHub Fine-Grained PAT" above). AI Gang
+  does not create the repository; it pushes into the one you made.
+
+### The six steps
+
+```bash
+git clone https://github.com/crashtest00/ai-gang.git ~/ai-gang
+cd ~/ai-gang
+
+cp ai-gang.config.template.json ai-gang.config.json   # then edit it
+cp .env.template .env                                 # then edit it
+
+docker compose up
+```
+
+`ai-gang.config.json` is four values — what to build, and where its code
+lives:
+
+```json
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "hello-world",
+    "type": "web",
+    "stack": "node-express"
+  },
+  "repository": {
+    "url": "https://github.com/your-org/hello-world.git"
+  }
+}
+```
+
+`name` is lowercase letters, numbers and hyphens. `type` and `stack` come
+from a fixed list of supported profiles — today that is `web` with
+`node-express`, and startup tells you the current list if you get it
+wrong. `repository.url` is that repository's plain HTTPS URL, with no
+username or token in it — the PAT goes in `.env`, as `GH_TOKEN`.
+
+`.env` is where you put every secret. Startup copies the ones a service needs
+into that service's own `.env` (and the project's), each written
+owner-readable only; nothing else holds a copy.
+The first section of `.env.template` is what startup needs: your Anthropic
+key, the project's `GH_TOKEN`, the Django admin account you will sign in
+with, and a PostgreSQL password and Django secret key you invent
+(`openssl rand -hex 24` twice). Everything below that first section
+belongs to Jira, Cloudflare, Jenkins and the Beta VM, which you add later
+if you want them — leave them blank.
+
+### What happens then
+
+`docker compose up` builds and starts one container, and streams what it
+is doing. That container brings up the rest — Redis, the work-item
+service, ScrumMaster, and your project's own container — and then exits.
+When it exits, AI Gang is up. Nothing to run in between.
+
+A first run builds four images and takes a while. Run it in the
+foreground and watch; if you would rather watch from elsewhere,
+`.ai-gang/status.json` in the checkout says which step is in progress and
+how each service is doing, and `.ai-gang/startup.log` holds the same
+step-by-step lines, tailed live into your terminal.
+
+If something goes wrong, the run stops and says what failed. Fix it and
+run `docker compose up` again — re-running is safe, and picks up where it
+left off rather than starting a second copy of anything.
+
+Both files stay in the checkout after the run ends, whether it succeeded
+or failed, and nothing deletes them. `.ai-gang/startup.log` is not the
+whole of what scrolled past in your terminal, though: it holds each
+step's own progress lines, not the two lines printed before that tail
+starts, and not the platform's own setup output while it works through
+those steps — that prints straight to your terminal and is not saved
+anywhere. Running again moves the previous run's log and status record to
+`.ai-gang/previous/` rather than overwriting them, so you still have the
+failed run to look at.
+
+### Writing your first story
+
+Open <http://127.0.0.1:9100/django-admin/> and sign in with the
+`AIGANG_ADMIN_USER` and `AIGANG_ADMIN_PASSWORD` you put in `.env`.
+
+Under **Workitems → Work items**, add a work item with your project's
+name, **Type** `story`, an **Assignee agent id** of `refinement-agent`,
+and **Status** `proposed`, leaving **External key** empty. It takes three
+saves: save the work item, re-open it and fill in the story fields
+(Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) and
+save, then re-open it once more and set **Status** to `ready`. The story
+fields have to be saved before the status moves, not with it.
+
+That is the whole loop. The story is routed to the Refinement Agent, which
+breaks it into subtasks for the agents your project has; each of those
+runs in your project's container and opens a pull request on the
+repository you named.
+
+### Changing your mind later
+
+The configuration is recorded the first time it succeeds, in
+`.ai-gang/config-identity.json`. Changing `project.name` or
+`repository.url` afterwards and re-running is refused, with nothing
+touched — otherwise you would quietly get a second project rather than a
+renamed one. To build something else, start from a fresh checkout.
+
+Adding a second repository to a project you already have is a different
+thing, and is the "Adding a repo to an existing project" path in
+`ClaudeInstructions.md`.
+
+---
+
 ## Creating a New Project
+
+*Platform startup already creates the project your `ai-gang.config.json`
+names — you do not need this section for that one. This is how to add
+another project by hand to an AI Gang that is already running.*
 
 ### Before you run the script
 

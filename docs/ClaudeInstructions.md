@@ -36,6 +36,144 @@ Read through Phase 0 first — it determines the project topology, which shapes 
 
 ---
 
+## Platform Startup
+
+*This is how AI Gang itself is brought up on a machine. Everything after
+it — Phases 0 to 4 — is how a customer project is set up on a running AI
+Gang. Platform startup performs that project setup once, unattended, for
+the one project its configuration names.*
+
+An operator with Docker installed, an Anthropic API key, and an empty
+GitHub repository already created for the project reaches a running AI
+Gang in six steps and one command:
+
+1. Clone AI Gang.
+2. `cp ai-gang.config.template.json ai-gang.config.json` and fill it in.
+3. `cp .env.template .env` and fill it in.
+4. `docker compose up` at the repository root, in the foreground.
+5. Wait. Initialization streams to the terminal until it finishes.
+6. Open Django admin at `http://127.0.0.1:9100/django-admin/` and write
+   stories.
+
+There is no command to run between steps 4 and 6.
+
+### What step 4 starts
+
+`docker compose up` builds and starts exactly one container, the AI Gang
+container. It is a client of the operator's own Docker daemon, not a host
+for a second one: the root `docker-compose.yml` gives it the daemon's
+socket and mounts the checkout at the checkout's own host path, with the
+working directory to match, so that the per-service compose files'
+relative bind mounts resolve on the host. Every other container AI Gang
+runs is created by this container's initialization, as a sibling on that
+same daemon.
+
+Its entrypoint (`scripts/startup/entrypoint.sh`) validates the
+configuration and the environment file before anything else exists, then
+runs the Initialization Agent — Claude Code, unsupervised, with
+permission prompts bypassed — against the ordered steps below. The
+container exits when initialization finishes, and does not restart.
+
+### The ordered steps
+
+Each of these is a script. The agent invokes them in this order; it does
+not decide what they do. `scripts/startup/steps.sh` is the list, and is
+what the container builds the agent's own instructions from.
+
+| # | Script | What it does |
+| --- | --- | --- |
+| 1 | `scripts/startup/create-network.sh` | Create the ai-gang Docker network if it does not already exist |
+| 2 | `scripts/startup/start-redis.sh` | Start Redis |
+| 3 | `scripts/startup/start-work-item-service.sh` | Build and start the work-item service and apply its database migrations |
+| 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
+| 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
+| 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
+| 7 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
+| 8 | `scripts/startup/start-project.sh` | Build and start the project container |
+| 9 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
+
+Before the first of them, the entrypoint has already run
+`scripts/startup/validate-config.sh`, `scripts/startup/validate-env.sh`,
+`scripts/startup/config-identity.sh` and `scripts/startup/derive-env.sh`
+— validation, the checkout's recorded configuration, and each service's
+own environment file derived from the platform `.env`.
+
+### Where judgment belongs
+
+The agent's judgment is for a step that fails, and for nothing else. A
+routine step is the script's job.
+
+- Do not re-ask or change the project name, deployment target, stack
+  profile or repository URL. They were validated before the run started.
+- When a step fails, diagnose it from its own output and from
+  `docker logs` / `docker ps`. If the cause is something that can genuinely
+  be put right — a transient pull failure, a container that needs another
+  moment, a stale container from an earlier run — put it right and re-run
+  that same script. Every script is safe to re-run.
+- Never build a service by hand. Never write a compose file, a Dockerfile
+  or an environment file yourself, and never substitute a different image,
+  name or port for the one a script uses. A service that cannot be started
+  by its script is a failure to report.
+- When it cannot be put right, run
+  `./scripts/startup/status.sh fail "<one-line reason>"` and stop. The run
+  ends nonzero. That is the correct outcome; a hand-built substitute is
+  not.
+
+### Reading a run
+
+Two things in the checkout, outside every container, and readable from a
+second shell while the run is in progress:
+
+- `.ai-gang/status.json` — the step in progress, every step's state, each
+  service's health, and, on completion, the Django admin address. No
+  credential is ever written here.
+- `.ai-gang/startup.log` — each step's own progress lines, tailed live to
+  the container's stdout. It is not the whole of what the container
+  prints there: two banner lines print before that tail starts and are
+  gone by the time it does, and the Initialization Agent's own output —
+  its `claude --print` transcript — streams straight to the container's
+  stdout and is never written to this file.
+
+`.ai-gang/config-identity.json` records the configuration this checkout
+was initialized with. Running `docker compose up` again against an
+already-initialized checkout verifies the existing services and
+reconnects, creating no second project, network, account or container. A
+run whose configuration differs from that record is refused before
+anything changes.
+
+All three stay in the checkout after the container exits, and nothing in
+the flow deletes them — a failed run's record and log are still there
+afterwards, and are what a later reader diagnoses it from. Starting
+again does not overwrite them either: a new run moves the previous run's
+record and log to `.ai-gang/previous/` first. `.ai-gang/startup.log` is
+the step log that survives the container, not a full copy of everything
+the container printed — see above for what it leaves out.
+
+### Which phases below this flow covers
+
+Included, performed by the steps above: **2.1** (Redis), **2.2**
+(ScrumMaster), **3.1** (project initialisation), **3.2** (container
+setup), **3.3** (the project map stub `init-project.sh` writes — filling
+it in is still the operator's), **3.4** (Claude Code and git access in the
+project container, exercised by the end-to-end test below) and **3.5**
+(the Redis subscriber, which the project container's own entrypoint
+starts on every start).
+
+Not included, and left exactly as they are for an operator to add
+afterwards: **Phase 1** (Jira), **2.0** (Cloudflare Tunnel), **2.3**
+(Jenkins), **2.4** (security), **2.5** (the Beta VM), **3.6** (the Jenkins
+pipeline) and **3.7** (release promotion).
+
+**Phase 3.0 is the operator's prerequisite, not a step of this flow.** The
+project's GitHub repository must already exist, empty, before step 2: its
+URL is what `repository.url` in `ai-gang.config.json` names.
+
+**Phase 4 is replaced, for this flow, by the Django-admin end-to-end test**
+at the end of this document. Phase 4 as written is a Jira scenario, and
+Jira is outside this flow.
+
+---
+
 ## Phase 0: Project Type Discovery
 
 Before any setup begins, gather enough information to determine the container topology and deployment strategy.
@@ -512,6 +650,100 @@ Adapt the story to match what the project's actual agents can implement.
 - Verify Jenkins detects the PR
 - Verify tests run and pass
 - Verify Jenkins auto-merges to `dev`
+
+---
+
+## End-to-End Test: Platform Startup
+
+*The end-to-end test for an installation brought up by Platform Startup.
+Phase 4 above is a Jira scenario and Jira is outside that flow, so this is
+a separate test, not a variation of it. Run it once, after `docker compose up`
+reports the platform is up.*
+
+The leg this proves is the one that matters: a story written by hand in
+Django admin reaches the project container's agent.
+
+### Write the story
+
+Open `http://127.0.0.1:9100/django-admin/` and sign in as the
+`AIGANG_ADMIN_USER` account from `.env`.
+
+Under **Workitems → Work items**, add a work item:
+
+- **Project**: the `project.name` from `ai-gang.config.json`
+- **Type**: `story`
+- **Display name**: `[TEST] Hello World endpoint`
+- **Status**: `proposed`
+- **Assignee agent id**: `refinement-agent`
+- **External key**: leave it empty. It is the Jira issue key a work item
+  mirrors, and setting it routes dispatch through Jira, which this flow
+  does not set up.
+
+It takes three saves, in this order, and the order matters:
+
+1. **Save the work item.** The **Work item story detail** section is not on
+   the add form at all — it belongs to the saved object.
+2. **Re-open it, fill in the story schema fields** (Behavior, Acceptance
+   Criteria, Constraints, Edge Cases, Out of Scope) and save again,
+   leaving the status at `proposed`.
+3. **Re-open it once more, change Status to `ready`, and save.**
+
+Filling in the story fields and moving to `ready` in the same save does
+not work: the admin saves the work item before its story detail, so the
+status change is rejected for the fields it cannot see yet.
+
+`ready` with an assignee is what makes a work item eligible for dispatch;
+nothing is dispatched before that.
+
+### Validation legs
+
+**Work-item service leg** — the write was recorded and published:
+
+```bash
+docker logs workitem-relay --tail 50     # the outbox row was published
+docker exec ai-gang-redis redis-cli XLEN aigang:workitems:<project>:events
+```
+
+The stream length increases by at least one when the story reaches
+`ready`.
+
+**ScrumMaster leg** — the event was consumed and dispatched:
+
+```bash
+docker logs scrummaster --tail 50
+docker exec ai-gang-redis redis-cli XLEN aigang:agent:<project>:refinement
+```
+
+ScrumMaster's log names the work item and the agent it dispatched to. If
+the event stream grew but nothing was dispatched, check that the project
+is listed in `services/scrummaster/config/projects.json` and that
+ScrumMaster has been restarted since it was added — it reads that file
+once, at startup.
+
+**Project container leg** — the agent ran:
+
+```bash
+docker exec <project>-dev pm2 list             # subscriber: online
+docker exec <project>-dev pm2 logs subscriber --lines 50 --nostream
+```
+
+The subscriber's log shows the task being received and Claude Code being
+invoked. This is also the first proof that the container's Claude Code and
+its `gh` credentials work — Phase 3.4's verification, done for real rather
+than as a separate hello-world call.
+
+**Deliverable leg** — the work reached GitHub:
+
+The agent's branch and pull request appear on the repository named by
+`repository.url` in `ai-gang.config.json`. A pull request there is the
+deliverable of a story.
+
+### If a leg fails
+
+Each leg names the container whose log explains it. `.ai-gang/status.json`
+records what initialization believed about every service's health at the
+moment it finished; a service healthy there but silent here has stopped
+since, and `docker ps` will say so.
 
 ---
 
