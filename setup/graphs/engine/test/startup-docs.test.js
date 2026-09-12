@@ -12,6 +12,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -135,8 +136,12 @@ test("the UserGuide's example configuration is one the validator accepts", () =>
   const guide = read(USER_GUIDE);
   const block = guide.match(/```json\n([\s\S]*?)```/);
   assert.ok(block, 'the UserGuide should show an example configuration');
-  const { validatePlatformConfigText } = require('../lib/config/validate');
-  const result = validatePlatformConfigText(block[1]);
+  // Through the entry point the flow itself uses, on a file where the
+  // operator's own ai-gang.config.json would be.
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-guide-config-')), 'ai-gang.config.json');
+  fs.writeFileSync(file, block[1]);
+  const { validatePlatformConfigFile } = require('../lib/config/validate');
+  const result = validatePlatformConfigFile(file);
   assert.equal(result.valid, true, `the documented example is not valid: ${result.errors.join(' | ')}`);
 });
 

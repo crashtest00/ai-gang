@@ -17,7 +17,6 @@
 #   status.sh phase <phase>            — preflight | initializing
 #   status.sh complete                 — mark the run complete, name the admin address
 #   status.sh fail <message>           — mark the run failed, with a reason
-#   status.sh show                     — print the record
 #   status.sh state                    — print just the run state
 #   status.sh admin-url                — print the Django admin address
 
@@ -104,7 +103,20 @@ cmd_service() {
     '.services[$name] = $state | .updatedAt = $at'
 }
 
+# Completion is not a claim anybody may make: it follows from the record.
+# The Initialization Agent can run this script, and the entrypoint exits
+# on what the record says rather than on the agent's exit code — so an
+# agent that stopped early could otherwise mark the run complete itself
+# and make the container exit 0. Every step has to have finished first,
+# and every step's own script is what marks it finished.
 cmd_complete() {
+  require_record
+  local unfinished
+  unfinished="$(jq -r '[.steps[] | select(.state != "complete") | .id] | join(", ")' "$STATUS_FILE")"
+  if [[ -n "$unfinished" ]]; then
+    echo "status.sh: refusing to mark the run complete — these steps have not completed: $unfinished" >&2
+    exit 1
+  fi
   edit --arg url "$ADMIN_URL" --arg at "$(now)" \
     '.state = "complete" | .phase = "complete" | .step = null | .adminUrl = $url | .error = null | .updatedAt = $at'
 }
@@ -115,7 +127,7 @@ cmd_fail() {
     '.state = "failed" | .phase = "failed" | .error = $message | .updatedAt = $at'
 }
 
-case "${1:-show}" in
+case "${1:-state}" in
   init) cmd_init ;;
   phase) shift; cmd_phase "$@" ;;
   step-start) shift; cmd_step_start "$@" ;;
@@ -124,7 +136,6 @@ case "${1:-show}" in
   complete) cmd_complete ;;
   fail) shift; cmd_fail "$@" ;;
   admin-url) printf '%s\n' "$ADMIN_URL" ;;
-  show) require_record; cat "$STATUS_FILE" ;;
   state) require_record; jq -r '.state' "$STATUS_FILE" ;;
-  *) echo "usage: status.sh init|phase|step-start|step-done|service|complete|fail|show|state|admin-url" >&2; exit 2 ;;
+  *) echo "usage: status.sh init|phase|step-start|step-done|service|complete|fail|state|admin-url" >&2; exit 2 ;;
 esac

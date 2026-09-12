@@ -17,7 +17,6 @@
 # Usage:
 #   config-identity.sh check   — compare, refusing a differing configuration
 #   config-identity.sh record  — write the record (no-op if it matches)
-#   config-identity.sh show    — print the record
 
 set -euo pipefail
 
@@ -77,12 +76,8 @@ case "${1:-check}" in
       log "recorded this checkout's configuration in $AIGANG_IDENTITY_FILE"
     fi
     ;;
-  show)
-    [[ -f "$AIGANG_IDENTITY_FILE" ]] || die "no configuration recorded at $AIGANG_IDENTITY_FILE"
-    cat "$AIGANG_IDENTITY_FILE"
-    ;;
   *)
-    warn "usage: config-identity.sh check|record|show"
+    warn "usage: config-identity.sh check|record"
     exit 2
     ;;
 esac

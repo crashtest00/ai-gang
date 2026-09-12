@@ -115,14 +115,49 @@ test("each service's health is recorded by name", () => {
   assert.deepEqual(record(dir).services, { redis: 'healthy', 'hello-web': 'unhealthy' });
 });
 
+function completeEveryStep(dir) {
+  for (const line of steps('list').trim().split('\n')) {
+    const id = line.split('|')[1];
+    status(dir, 'step-start', id);
+    status(dir, 'step-done', id);
+  }
+}
+
 test('completion names the Django admin address', () => {
   const dir = makeStateDir();
   status(dir, 'init');
-  status(dir, 'complete');
+  completeEveryStep(dir);
+  assert.equal(status(dir, 'complete').status, 0);
   const doc = record(dir);
   assert.equal(doc.state, 'complete');
   assert.equal(doc.adminUrl, status(dir, 'admin-url').stdout.trim());
   assert.match(doc.adminUrl, /^http:\/\/127\.0\.0\.1:9100\/django-admin\/$/);
+});
+
+test('the run cannot be marked complete while a step has not completed', () => {
+  // The Initialization Agent can run this script, and the entrypoint
+  // exits on the record rather than on the agent's exit code. If
+  // `complete` took anyone's word for it, an agent that stopped early
+  // could still make the container exit 0.
+  const dir = makeStateDir();
+  status(dir, 'init');
+  const result = status(dir, 'complete');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refusing to mark the run complete/);
+  assert.match(result.stderr, /create-network/);
+  assert.equal(record(dir).state, 'in-progress');
+  assert.equal(record(dir).adminUrl, null);
+});
+
+test('one step short of the end is still short of the end', () => {
+  const dir = makeStateDir();
+  status(dir, 'init');
+  completeEveryStep(dir);
+  status(dir, 'step-start', 'confirm-health');   // re-opened, so not complete
+  const result = status(dir, 'complete');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /confirm-health/);
+  assert.notEqual(record(dir).state, 'complete');
 });
 
 test('failure records the reason and leaves the run non-complete', () => {
@@ -147,8 +182,10 @@ test('the record is plain JSON a second shell can read at any point', () => {
   const dir = makeStateDir();
   status(dir, 'init');
   status(dir, 'step-start', 'create-network');
-  // Mid-run, from outside: parses, and says where the run has got to.
-  const doc = JSON.parse(status(dir, 'show').stdout);
+  // Mid-run, from outside, straight off the file — which is what both
+  // operator documents tell a reader to do. There is no reader
+  // subcommand, and nothing needs one.
+  const doc = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
   assert.equal(doc.step, 'create-network');
 });
 

@@ -140,10 +140,10 @@ function validateConfigText(text) {
   return validateText(text, { platform: false });
 }
 
-/**
- * Validate already-read platform configuration text. Reads
- * `ai-gang.config.template.json` for the placeholder set, and nothing else.
- */
+// Validate already-read platform configuration text. Reads
+// `ai-gang.config.template.json` for the placeholder set, and nothing
+// else. Not exported: `validatePlatformConfigFile` is the only way in,
+// so there is one entry point for callers and for the tests.
 function validatePlatformConfigText(text) {
   return validateText(text, { platform: true });
 }
@@ -308,5 +308,4 @@ module.exports = {
   validateConfigFile,
   validateConfigText,
   validatePlatformConfigFile,
-  validatePlatformConfigText,
 };

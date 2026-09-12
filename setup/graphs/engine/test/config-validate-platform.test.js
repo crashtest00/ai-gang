@@ -13,15 +13,25 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const {
   validateConfigText,
-  validatePlatformConfigText,
   validatePlatformConfigFile,
 } = require('../lib/config/validate');
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const PLATFORM_TEMPLATE_PATH = path.join(REPO_ROOT, 'ai-gang.config.template.json');
+
+// The platform rules have one entry point, `validatePlatformConfigFile` —
+// the one cli.js --platform calls. These cases are about the text, so
+// they write it where an operator's ai-gang.config.json would be and go
+// in through that same door.
+function validatePlatformConfigText(text) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-platform-config-')), 'ai-gang.config.json');
+  fs.writeFileSync(file, text);
+  return validatePlatformConfigFile(file);
+}
 
 function valid(overrides = {}) {
   return {
