@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import uuid
 
+from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -51,6 +52,25 @@ def _raise_as_form_error(err: Exception):
     ModelAdmin._changeform_view's own `except ValidationError` handling
     redisplays the form with a non-field error instead of a 500."""
     raise DjangoValidationError(str(err)) from err
+
+
+class WorkItemAdminForm(forms.ModelForm):
+    """A blank External key must be normalized to NULL before Django's own
+    model-level uniqueness check runs (ModelForm._post_clean, during
+    form.is_valid(), before save_model is ever reached) — otherwise a
+    second work item saved with the field left blank is rejected as a
+    duplicate of the first: the browser submits a left-blank TextField as
+    '', and '' is a value like any other for a unique constraint, where
+    only NULL is guaranteed never to collide with another row. See also
+    WorkItem.save(), which applies the same normalization for a write that
+    does not go through this form."""
+
+    class Meta:
+        model = WorkItem
+        fields = '__all__'
+
+    def clean_external_key(self):
+        return self.cleaned_data.get('external_key') or None
 
 
 NON_GATED_FIELDS = ('display_name', 'description', 'priority', 'writes_files', 'writes_services', 'external_key')
@@ -145,6 +165,7 @@ class WorkItemAdmin(admin.ModelAdmin):
     list_filter = ('project', 'type', 'status')
     search_fields = ('=id', 'external_key', 'display_name', 'description')
     readonly_fields = ('created_at', 'updated_at')
+    form = WorkItemAdminForm
     inlines = [WorkItemStoryDetailInline, WorkItemReleaseDetailInline, WorkItemLinkFromInline, WorkItemLinkToInline,
                WorkItemArtifactInline, WorkItemCommentInline, WorkItemHistoryInline]
     fields = ('id', 'project', 'type', 'display_name', 'description', 'status', 'assignee_agent_id',
