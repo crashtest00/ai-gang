@@ -76,6 +76,20 @@ class WorkItem(models.Model):
     def __str__(self) -> str:
         return f'{self.display_name} ({self.id})'
 
+    def save(self, *args, **kwargs):
+        # A blank External key must be stored as NULL, never as ''. The
+        # unique constraint on this column treats '' as a value like any
+        # other, so two work items both left without an external key would
+        # collide on the second one — NULL is the only value a unique
+        # constraint never matches against another row, including another
+        # NULL. Normalized here (not only on the admin form, see
+        # WorkItemAdminForm.clean_external_key) so every writer that builds
+        # a WorkItem directly, not through that form, gets the same
+        # guarantee.
+        if self.external_key == '':
+            self.external_key = None
+        super().save(*args, **kwargs)
+
 
 class WorkItemStoryDetail(models.Model):
     """Story schema field contract. 1:1 optional child table
