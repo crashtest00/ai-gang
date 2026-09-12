@@ -99,7 +99,7 @@ cd ~/ai-gang
 cp ai-gang.config.template.json ai-gang.config.json   # then edit it
 cp .env.template .env                                 # then edit it
 
-docker compose up
+docker compose up --exit-code-from ai-gang
 ```
 
 `ai-gang.config.json` is four values — what to build, and where its code
@@ -137,10 +137,13 @@ if you want them — leave them blank.
 
 ### What happens then
 
-`docker compose up` builds and starts one container, and streams what it
-is doing. That container brings up the rest — Redis, the work-item
-service, ScrumMaster, and your project's own container — and then exits.
-When it exits, AI Gang is up. Nothing to run in between.
+`docker compose up --exit-code-from ai-gang` builds and starts one
+container, and streams what it is doing. That container brings up the rest
+— Redis, the work-item service, ScrumMaster, and your project's own
+container — and then exits, and the command exits with the same status.
+Status 0 means AI Gang is up. Nothing to run in between. (The
+`--exit-code-from` flag is what carries the container's status out to your
+shell; plain `docker compose up` would return 0 even after a failed run.)
 
 A first run builds four images and takes a while. Run it in the
 foreground and watch; if you would rather watch from elsewhere,
@@ -148,9 +151,9 @@ foreground and watch; if you would rather watch from elsewhere,
 how each service is doing, and `.ai-gang/startup.log` holds the same
 step-by-step lines, tailed live into your terminal.
 
-If something goes wrong, the run stops and says what failed. Fix it and
-run `docker compose up` again — re-running is safe, and picks up where it
-left off rather than starting a second copy of anything.
+If something goes wrong, the run stops with a nonzero status and says what
+failed. Fix it and run the same command again — re-running is safe, and
+picks up where it left off rather than starting a second copy of anything.
 
 Both files stay in the checkout after the run ends, whether it succeeded
 or failed, and nothing deletes them. `.ai-gang/startup.log` is not the

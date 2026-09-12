@@ -50,8 +50,11 @@ Gang in six steps and one command:
 1. Clone AI Gang.
 2. `cp ai-gang.config.template.json ai-gang.config.json` and fill it in.
 3. `cp .env.template .env` and fill it in.
-4. `docker compose up` at the repository root, in the foreground.
-5. Wait. Initialization streams to the terminal until it finishes.
+4. `docker compose up --exit-code-from ai-gang` at the repository root, in
+   the foreground.
+5. Wait. Initialization streams to the terminal until it finishes, and the
+   command's exit status is the AI Gang container's: 0 means AI Gang is up,
+   anything else means a step failed and the log says which.
 6. Open Django admin at `http://127.0.0.1:9100/django-admin/` and write
    stories.
 
@@ -59,8 +62,10 @@ There is no command to run between steps 4 and 6.
 
 ### What step 4 starts
 
-`docker compose up` builds and starts exactly one container, the AI Gang
-container. It is a client of the operator's own Docker daemon, not a host
+`docker compose up --exit-code-from ai-gang` builds and starts exactly one
+container, the AI Gang container, and returns that container's exit status
+as its own (`--exit-code-from` is what makes Compose do that; without it
+Compose returns 0 whatever the container did). It is a client of the operator's own Docker daemon, not a host
 for a second one: the root `docker-compose.yml` gives it the daemon's
 socket and mounts the checkout at the checkout's own host path, with the
 working directory to match, so that the per-service compose files'
@@ -135,7 +140,7 @@ second shell while the run is in progress:
   stdout and is never written to this file.
 
 `.ai-gang/config-identity.json` records the configuration this checkout
-was initialized with. Running `docker compose up` again against an
+was initialized with. Running the same command again against an
 already-initialized checkout verifies the existing services and
 reconnects, creating no second project, network, account or container. A
 run whose configuration differs from that record is refused before
