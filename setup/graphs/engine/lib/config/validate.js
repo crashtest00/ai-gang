@@ -176,10 +176,10 @@ function validateFile(filePath, options) {
   return options && options.platform ? validatePlatformConfigText(text) : validateConfigText(text);
 }
 
-/**
- * Validate already-read project configuration text. Pure function, no file
- * I/O — used directly by validateConfigFile and independently unit-testable.
- */
+// Validate already-read project configuration text. Not exported:
+// `validateConfigFile` is the only way in, so there is one entry point for
+// callers and for the tests — the same standard `validatePlatformConfigText`
+// below is held to.
 function validateConfigText(text) {
   return validateText(text, { platform: false });
 }
@@ -353,6 +353,5 @@ function validateText(text, { platform } = { platform: false }) {
 
 module.exports = {
   validateConfigFile,
-  validateConfigText,
   validatePlatformConfigFile,
 };

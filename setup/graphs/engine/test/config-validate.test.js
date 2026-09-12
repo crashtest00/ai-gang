@@ -10,11 +10,23 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { validateConfigText } = require('../lib/config/validate');
+const { validateConfigFile } = require('../lib/config/validate');
 
 const INIT_PROJECT_SCRIPT = path.join(__dirname, '..', '..', '..', '..', 'scripts', 'init-project.sh');
+
+// The project rules have one entry point, `validateConfigFile` — the one
+// cli.js calls without --platform. These cases are about the text, so they
+// write it where a project config file would be and go in through that
+// same door (the same technique config-validate-platform.test.js uses for
+// the platform rules).
+function validateConfigText(text) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-project-config-')), 'config.json');
+  fs.writeFileSync(file, text);
+  return validateConfigFile(file);
+}
 
 function validExample(overrides = {}) {
   return {

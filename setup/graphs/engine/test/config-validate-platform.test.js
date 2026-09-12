@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
-  validateConfigText,
+  validateConfigFile,
   validatePlatformConfigFile,
 } = require('../lib/config/validate');
 
@@ -31,6 +31,14 @@ function validatePlatformConfigText(text) {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-platform-config-')), 'ai-gang.config.json');
   fs.writeFileSync(file, text);
   return validatePlatformConfigFile(file);
+}
+
+// Same reasoning for the project rules' one entry point,
+// `validateConfigFile` — the one cli.js calls without --platform.
+function validateConfigText(text) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-project-config-')), 'config.json');
+  fs.writeFileSync(file, text);
+  return validateConfigFile(file);
 }
 
 function valid(overrides = {}) {
