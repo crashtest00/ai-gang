@@ -35,6 +35,24 @@
 # resumes idempotently; retrying with a changed name/type/stack against an
 # already-initialised project folder is refused before any further change.
 #
+# --config also replaces the three questions this script would otherwise
+# ask, so an unattended run has nothing to type:
+#   - The GitHub repository URL comes from the same file's optional
+#     "repository" object ("url"), not from the prompt. With no
+#     "repository" object and no terminal, the remote is skipped rather
+#     than asked for.
+#   - The fine-grained PAT comes from GH_TOKEN in the environment file
+#     ($HQ_ENV, read as data — never executed) or from the environment
+#     itself, not from the prompt. Without --config an exported GH_TOKEN
+#     is deliberately ignored and the prompt is unchanged. With no
+#     GH_TOKEN and no terminal, the remote is configured and nothing is
+#     pushed.
+#   - The final "Continue? [y/N]" confirmation is suppressed when there is
+#     no terminal, so an EOF on stdin cannot be read as a refusal. Every
+#     decision it covers came from the file and was validated first.
+# The "next steps" list printed at the end likewise leaves out the steps
+# --config's caller performs itself.
+#
 # A runnable example lives at scripts/init-project.example.json — copy it
 # and edit "name" to try --config directly:
 #   ./scripts/init-project.sh --config scripts/init-project.example.json
@@ -177,10 +195,34 @@ if [[ "$DEPLOYMENT" == "desktop" && "$DESKTOP_FRAMEWORK" != "tauri" && "$DESKTOP
 fi
 
 # --- Load credentials ---
-if [[ -f "$HQ_ENV" ]]; then
-  # shellcheck source=/dev/null
-  source "$HQ_ENV"
-fi
+# An environment file is data, not a script. Executing one expands a $, a
+# backtick or a $(...) in any value — and one of these values is a
+# password somebody invented. So each variable this script uses is read
+# out of the file literally, and a value already in the environment wins,
+# which is how a caller that has read the file itself hands them over.
+#
+# This is the whole list: adding a use of a new variable from $HQ_ENV
+# means adding it here.
+read_env_value() {
+  local file="$1" name="$2" line value
+  [[ -f "$file" ]] || return 1
+  line="$(grep -E "^[[:space:]]*${name}=" "$file" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 1
+  value="${line#*=}"
+  if [[ ${#value} -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ ${#value} -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+for env_var in ANTHROPIC_API_KEY GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
+  if [[ -z "${!env_var:-}" ]]; then
+    printf -v "$env_var" '%s' "$(read_env_value "$HQ_ENV" "$env_var" || true)"
+  fi
+done
+unset env_var
 
 if [[ "$CONNECT_JIRA" == "true" ]]; then
   : "${JIRA_URL:?JIRA_URL is not set. Check $HQ_ENV}"
@@ -690,13 +732,20 @@ COMPOSE
 fi
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  cat > "$PROJECT_DIR/.env" <<ENVFILE
+  # This file holds the Anthropic key and the GitHub PAT, so it is
+  # readable only by its owner — the same rule the platform's own derived
+  # environment files follow. Created 0600 rather than chmod-ed
+  # afterwards, so it is never briefly world-readable.
+  ( umask 077
+    cat > "$PROJECT_DIR/.env" <<ENVFILE
 PROJECT_NAME=${PROJECT_NAME}
 REDIS_HOST=ai-gang-redis
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 GITHUB_URL=${GITHUB_URL:-}
 GH_TOKEN=${GH_TOKEN:-}
 ENVFILE
+  )
+  chmod 600 "$PROJECT_DIR/.env"
   echo "Created: $PROJECT_DIR/.env"
   if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "  ** ANTHROPIC_API_KEY not found in $HQ_ENV — fill it in before building."
@@ -977,9 +1026,18 @@ if [[ "$CONNECT_JIRA" != "true" ]]; then
 fi
 echo "Next steps:"
 echo "  1. Fill in $SRC_DIR/CLAUDE.md (framework, key directories, entry points, conventions)"
-echo "  2. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
-echo "  3. docker compose build && docker compose up -d"
-echo "  4. docker compose exec dev node /agent-docs/subscriber.js &"
+next_step=2
+# Adding the Dockerfile by hand is the interactive path's step. A
+# --config caller installs it from the stack's template itself, straight
+# after this script returns, so telling it to write one here would be
+# telling it to do the very thing it must not do.
+if [[ -z "$CONFIG_FILE" ]]; then
+  echo "  $next_step. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
+  next_step=$((next_step + 1))
+fi
+echo "  $next_step. docker compose build && docker compose up -d"
+next_step=$((next_step + 1))
+echo "  $next_step. docker compose exec dev node /agent-docs/subscriber.js &"
 echo ""
 if [[ -z "${GITHUB_URL:-}" ]]; then
   echo "  Git: repository initialised locally. When you've created the GitHub repo:"

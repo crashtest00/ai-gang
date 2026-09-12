@@ -213,3 +213,100 @@ test('without --config the confirmation still has to be answered', () => {
   assert.match(result.stdout, /Aborted\./);
   assert.deepEqual(fs.readdirSync(projectsDir), []);
 });
+
+// ---- the environment file is data, not a script ----
+
+test('a value in the environment file that looks like a command is a value', () => {
+  // The platform .env holds a password somebody invented. Executing the
+  // file — which is what sourcing it does — would expand a $, a backtick
+  // or a $(...) in any of these values, and run it.
+  const { root, projectsDir, env } = makeIsolatedEnv({ hqEnvLines: '' });
+  const canary = path.join(root, 'executed');
+  const backtickCanary = path.join(root, 'also-executed');
+  const key = `sk-$(touch ${canary})-\`touch ${backtickCanary}\`-not-a-real-key`;
+  fs.writeFileSync(env.HQ_ENV, [
+    'GH_TOKEN=github_pat_test_not_a_real_token',
+    `ANTHROPIC_API_KEY=${key}`,
+    `AIGANG_ADMIN_PASSWORD=$(touch ${canary})`,
+    '',
+  ].join('\n'));
+
+  const remote = makeBareRepo(root);
+  const configFile = writeConfig(root, { ...BASE_CONFIG, repository: { url: remote } });
+  const result = runWithNoTerminal(['--config', configFile], env);
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(fs.existsSync(canary), false, 'a $(...) in an environment value must not run');
+  assert.equal(fs.existsSync(backtickCanary), false, 'a backtick in an environment value must not run');
+
+  // ...and the value still arrived, byte for byte.
+  const projectEnv = fs.readFileSync(path.join(projectsDir, 'acceptance-project', '.env'), 'utf8');
+  assert.ok(projectEnv.includes(`ANTHROPIC_API_KEY=${key}`), `the key was not carried over literally:\n${projectEnv}`);
+});
+
+// ---- the project's own environment file holds two secrets ----
+
+test("the project's .env is readable only by its owner", () => {
+  const { root, projectsDir, env } = makeIsolatedEnv({ hqEnvLines: 'GH_TOKEN=github_pat_test_not_a_real_token\nANTHROPIC_API_KEY=sk-not-a-real-key\n' });
+  const remote = makeBareRepo(root);
+  const configFile = writeConfig(root, { ...BASE_CONFIG, repository: { url: remote } });
+  assert.equal(runWithNoTerminal(['--config', configFile], env).status, 0);
+
+  const projectEnv = path.join(projectsDir, 'acceptance-project', '.env');
+  const mode = fs.statSync(projectEnv).mode & 0o777;
+  assert.equal(mode.toString(8), '600', 'the file holds the PAT and the Anthropic key');
+});
+
+// ---- what the run tells its caller to do next ----
+
+test('a --config run is not told to add the Dockerfile its caller installs', () => {
+  // Under --config the caller installs the project container's
+  // Dockerfile from the stack's template, straight after this returns.
+  const { root, env } = makeIsolatedEnv();
+  const configFile = writeConfig(root, BASE_CONFIG);
+  const result = runWithNoTerminal(['--config', configFile], env);
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.includes('Add a Dockerfile'), false, result.stdout);
+  assert.match(result.stdout, /Next steps:/);
+  assert.match(result.stdout, /2\. docker compose build/);
+});
+
+test('the interactive path still says to add the Dockerfile, because nothing else does', () => {
+  const { root, env } = makeIsolatedEnv();
+  const result = spawnSync('bash', [SCRIPT_PATH], {
+    cwd: REPO_ROOT,
+    env,
+    input: 'web\ninteractive-project\n\ny\n',
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /2\. Add a Dockerfile/);
+  assert.match(result.stdout, /3\. docker compose build/);
+});
+
+// ---- the flag's own documentation against the flag ----
+
+test('the --config usage comment describes every prompt --config replaces', () => {
+  // Gate: the block that documents the flag is where an operator reads
+  // what it does, and it went out of date as soon as the flag grew.
+  const source = fs.readFileSync(SCRIPT_PATH, 'utf8');
+  const start = source.indexOf('# --config <file>:');
+  assert.ok(start > 0, 'the --config usage comment must exist');
+  // Flattened, so a claim that wraps across two comment lines still reads as one.
+  const comment = source.slice(start, source.indexOf('set -euo pipefail')).replace(/\n#\s*/g, ' ');
+
+  // Each documented behaviour, and the code path that performs it.
+  const claims = [
+    [/"repository" object/, /GITHUB_URL="\$CONFIG_REPOSITORY_URL"/, 'the repository URL from the configuration'],
+    [/GH_TOKEN in the environment file/, /GH_TOKEN="\$\{GH_TOKEN:-\}"/, 'the PAT from the environment'],
+    [/\$HQ_ENV, read as data — never executed/, /read_env_value/, 'the environment file read without executing it'],
+    [/"Continue\? \[y\/N\]" confirmation is suppressed/, /no terminal — proceeding from/, 'the suppressed confirmation'],
+    [/leaves out the steps --config's caller performs itself/, /if \[\[ -z "\$CONFIG_FILE" \]\]; then\n\s+echo "  \$next_step\. Add a Dockerfile/, 'the conditional next-steps list'],
+  ];
+  for (const [documented, implemented, what] of claims) {
+    assert.match(comment, documented, `the usage comment does not describe ${what}`);
+    assert.match(source, implemented, `the usage comment describes ${what}, which the script does not do`);
+  }
+});
