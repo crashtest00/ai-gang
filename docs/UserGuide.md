@@ -143,16 +143,20 @@ When it exits, AI Gang is up. Nothing to run in between.
 A first run builds four images and takes a while. Run it in the
 foreground and watch; if you would rather watch from elsewhere,
 `.ai-gang/status.json` in the checkout says which step is in progress and
-how each service is doing, and `.ai-gang/startup.log` is the same log.
+how each service is doing, and `.ai-gang/startup.log` holds the same
+step-by-step lines, tailed live into your terminal.
 
 If something goes wrong, the run stops and says what failed. Fix it and
 run `docker compose up` again — re-running is safe, and picks up where it
 left off rather than starting a second copy of anything.
 
 Both files stay in the checkout after the run ends, whether it succeeded
-or failed, and nothing deletes them — `.ai-gang/startup.log` is the same
-output you watched `docker compose up` print, kept after the container
-is gone. Running again moves the previous run's log and status record to
+or failed, and nothing deletes them. `.ai-gang/startup.log` is not the
+whole of what scrolled past in your terminal, though: it holds each
+step's own progress lines, not the two lines printed before that tail
+starts, and not the platform's own setup output while it works through
+those steps — that prints straight to your terminal and is not saved
+anywhere. Running again moves the previous run's log and status record to
 `.ai-gang/previous/` rather than overwriting them, so you still have the
 failed run to look at.
 

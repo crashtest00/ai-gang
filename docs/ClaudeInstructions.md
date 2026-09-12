@@ -127,8 +127,12 @@ second shell while the run is in progress:
 - `.ai-gang/status.json` — the step in progress, every step's state, each
   service's health, and, on completion, the Django admin address. No
   credential is ever written here.
-- `.ai-gang/startup.log` — the same log the container streams to its own
-  stdout.
+- `.ai-gang/startup.log` — each step's own progress lines, tailed live to
+  the container's stdout. It is not the whole of what the container
+  prints there: two banner lines print before that tail starts and are
+  gone by the time it does, and the Initialization Agent's own output —
+  its `claude --print` transcript — streams straight to the container's
+  stdout and is never written to this file.
 
 `.ai-gang/config-identity.json` records the configuration this checkout
 was initialized with. Running `docker compose up` again against an
@@ -141,9 +145,9 @@ All three stay in the checkout after the container exits, and nothing in
 the flow deletes them — a failed run's record and log are still there
 afterwards, and are what a later reader diagnoses it from. Starting
 again does not overwrite them either: a new run moves the previous run's
-record and log to `.ai-gang/previous/` first. The container's own
-`docker compose up` output is that same log, streamed to its stdout, so
-`.ai-gang/startup.log` is the copy that survives the container.
+record and log to `.ai-gang/previous/` first. `.ai-gang/startup.log` is
+the step log that survives the container, not a full copy of everything
+the container printed — see above for what it leaves out.
 
 ### Which phases below this flow covers
 

@@ -310,3 +310,15 @@ test('the --config usage comment describes every prompt --config replaces', () =
     assert.match(source, implemented, `the usage comment describes ${what}, which the script does not do`);
   }
 });
+
+test('init-project.sh never sources $HQ_ENV — the whole script, not just the usage comment', () => {
+  // An environment file is data: executing it would expand a $, a
+  // backtick or a $(...) in any value, and one of those values is a
+  // password somebody invented (read_env_value above). The usage comment
+  // test only covers the block above `set -euo pipefail`; this guards the
+  // property everywhere else in the script too, including a comment that
+  // could describe the file as sourced without the code actually doing it.
+  const source = fs.readFileSync(SCRIPT_PATH, 'utf8');
+  assert.doesNotMatch(source, /\bsource\s+"?\$HQ_ENV"?/, 'an environment file must be read as data, never executed');
+  assert.doesNotMatch(source, /sourced above/, 'nothing in this script sources $HQ_ENV, so nothing should claim it does');
+});

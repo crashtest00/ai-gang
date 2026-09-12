@@ -609,7 +609,7 @@ else
 fi
 
 # Fine-grained PAT for container git operations. Under --config it comes
-# from the environment — GH_TOKEN in $HQ_ENV, sourced above — so an
+# from the environment — GH_TOKEN, read out of $HQ_ENV above — so an
 # unattended run has nothing to type. Without --config the prompt below is
 # unchanged, and an exported GH_TOKEN is deliberately ignored there.
 if [[ -n "$CONFIG_FILE" ]]; then

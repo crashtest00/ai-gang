@@ -112,6 +112,36 @@ test('the record filenames the documents name are the ones the scripts write', (
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_PREVIOUS_DIR="\$AIGANG_STATE_DIR\/previous"/);
 });
 
+test('both documents say startup.log is not a full copy of what the container printed', () => {
+  // entrypoint.sh logs two banner lines, then truncates the log file
+  // before the tail that feeds it ever starts — those two lines never
+  // reach the file — and the Initialization Agent's own `claude --print`
+  // output goes straight to the container's stdout, never through
+  // log()/log_line(). A document that calls startup.log "the same
+  // output" the container printed would send an operator hunting a
+  // container that is already gone for lines the file never held.
+  const entrypoint = read(path.join(STARTUP_DIR, 'entrypoint.sh'));
+  const truncateIndex = entrypoint.indexOf(': > "$AIGANG_LOG_FILE"');
+  const tailIndex = entrypoint.indexOf('tail -n +1 -F');
+  assert.ok(truncateIndex > 0, 'expected entrypoint.sh to truncate the log file before tailing it');
+  assert.ok(tailIndex > truncateIndex, 'expected the tail to start after the log file is truncated');
+  const bannerLines = entrypoint.slice(0, truncateIndex).match(/^log "/gm) || [];
+  assert.ok(
+    bannerLines.length >= 2,
+    'expected at least two log lines before the truncation, which both documents must account for'
+  );
+  assert.match(entrypoint, /^claude --print --dangerously-skip-permissions/m,
+    "expected the agent's own invocation not to be wrapped in log()/log_line()");
+
+  for (const [label, file] of [['ClaudeInstructions.md', CLAUDE_DOC], ['UserGuide.md', USER_GUIDE]]) {
+    const text = read(file).replace(/\s+/g, ' ');
+    assert.ok(
+      text.includes('is not the whole of') || text.includes('not a full copy'),
+      `${label} does not say startup.log is a subset of what the container printed`
+    );
+  }
+});
+
 test("both documents tell the operator where a finished run's records are", () => {
   // The records outlive the container, and a re-run keeps the run before
   // it. An operator who is told neither has nothing to read after a
