@@ -75,6 +75,28 @@ function makeBareRepo(root) {
   return `file://${bare}`;
 }
 
+// A `git` that records its own command line the way the host's process
+// table would show it — literally /proc/$$/cmdline, the same technique
+// startup-admin-account.test.js uses for the admin password — then
+// delegates to the real git so the push actually happens. Every
+// invocation is appended to AIGANG_TEST_GIT_ARGV, one argument per line
+// with a "---" separator between calls.
+function stubGit(dir) {
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const stub = path.join(bin, 'git');
+  fs.writeFileSync(stub, [
+    '#!/usr/bin/env bash',
+    'tr "\\0" "\\n" < /proc/$$/cmdline >> "$AIGANG_TEST_GIT_ARGV"',
+    'echo "---" >> "$AIGANG_TEST_GIT_ARGV"',
+    `exec "${realGit}" "$@"`,
+    '',
+  ].join('\n'));
+  fs.chmodSync(stub, 0o755);
+  return bin;
+}
+
 test('with no terminal, a --config run completes instead of aborting at the confirmation', () => {
   const { root, projectsDir, projectsConfigPath, env } = makeIsolatedEnv();
   const configFile = writeConfig(root, BASE_CONFIG);
@@ -118,6 +140,37 @@ test('the PAT comes from the environment file, with no prompt, and is never echo
   // With a PAT and a remote, the first commit is pushed.
   const branches = execFileSync('git', ['-C', root, 'ls-remote', '--heads', remote], { encoding: 'utf8' });
   assert.match(branches, /refs\/heads\/(main|master)/);
+});
+
+test('the PAT never appears on a git command line — checked from the process table\'s own view', () => {
+  // The prompt's own output is not the only place a secret can leak.
+  // `git -c credential.helper=...password=<token>...` puts the token in
+  // an argument, which sits in the host's process table, readable by any
+  // local user, for as long as that git call runs — the same exposure
+  // row 40's create-admin.sh fix closed for the admin password. This
+  // drives the real script with a stand-in `git` that records exactly
+  // what a `ps` on the host would have shown for every git call it makes,
+  // then actually performs the push so the flow's behaviour is unchanged.
+  const secret = 'github_pat_test_not_a_real_token';
+  const { root, env } = makeIsolatedEnv({ hqEnvLines: `GH_TOKEN=${secret}\n` });
+  const remote = makeBareRepo(root);
+  const configFile = writeConfig(root, { ...BASE_CONFIG, repository: { url: remote } });
+
+  const argvLog = path.join(root, 'git-argv.log');
+  fs.writeFileSync(argvLog, '');
+  const stubBin = stubGit(root);
+  const testEnv = { ...env, PATH: `${stubBin}:${env.PATH}`, AIGANG_TEST_GIT_ARGV: argvLog };
+
+  const result = runWithNoTerminal(['--config', configFile], testEnv);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+  // The push still happened — the fix must not change what the flow does.
+  const branches = execFileSync('git', ['-C', root, 'ls-remote', '--heads', remote], { encoding: 'utf8' });
+  assert.match(branches, /refs\/heads\/(main|master)/);
+
+  const argvText = fs.readFileSync(argvLog, 'utf8');
+  assert.ok(argvText.includes('push'), `expected at least one push invocation to be recorded:\n${argvText}`);
+  assert.equal(argvText.includes(secret), false, `the PAT appeared on a git command line:\n${argvText}`);
 });
 
 test('no configured URL and no terminal skips the remote rather than blocking', () => {

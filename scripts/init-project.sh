@@ -821,13 +821,24 @@ if [[ -n "$GITHUB_URL" ]]; then
   fi
 
   if [[ -n "$GH_TOKEN" ]]; then
+    # Pushes with the fine-grained PAT authenticating over HTTPS, without
+    # ever putting the token on git's own command line — an argument there
+    # sits in the host's process table, readable by any local user for as
+    # long as the call lasts, the same exposure create-admin.sh's
+    # --env-file fix closes for the admin password. The credential.helper
+    # value is single-quoted, so this command line expands nothing; the
+    # helper subshell reads GH_TOKEN from its own inherited environment
+    # when git actually invokes it, and GH_TOKEN is exported only to that
+    # one command.
+    git_push_with_token() {
+      GH_TOKEN="$GH_TOKEN" git -C "$SRC_DIR" \
+        -c 'credential.helper=!f() { echo username=oauth2; echo "password=$GH_TOKEN"; }; f' \
+        push "$@"
+    }
+
     echo "  Pushing to GitHub..."
-    git -C "$SRC_DIR" \
-      -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-      push --set-upstream origin main 2>/dev/null || \
-      git -C "$SRC_DIR" \
-        -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-        push --set-upstream origin master
+    git_push_with_token --set-upstream origin main 2>/dev/null || \
+      git_push_with_token --set-upstream origin master
     echo "  Pushed to GitHub."
 
     # --- Create dev/beta/prod branches + branch protection ---
@@ -853,9 +864,7 @@ if [[ -n "$GITHUB_URL" ]]; then
         if git -C "$SRC_DIR" ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
           echo "  Branch '$branch' already exists on origin — skipping creation."
         else
-          git -C "$SRC_DIR" \
-            -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-            push origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
+          git_push_with_token origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
             && echo "  Created branch '$branch'." \
             || echo "  Warning: could not create branch '$branch' — create it manually from $DEFAULT_BRANCH."
         fi
