@@ -1,0 +1,36 @@
+# `docker compose up` here builds and starts exactly one container: the AI
+# Gang container. Everything else AI Gang runs — Redis, the work-item
+# service, ScrumMaster, the configured project's container — is created by
+# that container's own initialization, as a sibling on this same daemon,
+# through each service's existing compose file. This file does not include
+# or replace any of them.
+#
+# Two mounts make that work:
+#
+#   - the daemon's socket, so the AI Gang container is an ordinary client
+#     of the operator's daemon rather than a host for a nested one;
+#
+#   - this checkout at its own host path, ${PWD}:${PWD}, with the working
+#     directory set to match. A service compose file's `../scrummaster/config`
+#     or `../../setup` is resolved by the daemon, on the host — so the
+#     checkout has to be at the same absolute path inside the container as
+#     outside it, or every relative bind mount would resolve to a path the
+#     daemon cannot find and would silently create as an empty directory.
+#
+# Run this in the foreground. It streams initialization until the
+# container exits, which is the signal that AI Gang is up.
+
+services:
+  ai-gang:
+    build: .
+    image: ai-gang
+    container_name: ai-gang-startup
+    # Initialization runs once and is done. A restart policy here would
+    # re-run it every time the daemon came back.
+    restart: "no"
+    init: true
+    env_file: .env
+    working_dir: ${PWD:?docker compose must be run from the AI Gang checkout root}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}

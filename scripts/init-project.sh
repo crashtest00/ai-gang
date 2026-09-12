@@ -89,6 +89,16 @@ done
 CONFIG_PROJECT_NAME=""
 CONFIG_PROJECT_TYPE=""
 CONFIG_PROJECT_STACK=""
+CONFIG_REPOSITORY_URL=""
+
+# Whether this run has a terminal to ask questions of. A --config run with
+# no terminal (platform startup, a pipeline) must never block on a prompt,
+# and must never read an EOF on stdin as an answer.
+if [[ -t 0 ]]; then
+  INTERACTIVE=true
+else
+  INTERACTIVE=false
+fi
 
 if [[ -n "$CONFIG_FILE" ]]; then
   # Validate before anything below can create the project folder or mutate
@@ -124,6 +134,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
       PROJECT_NAME) CONFIG_PROJECT_NAME="$config_val" ;;
       PROJECT_TYPE) CONFIG_PROJECT_TYPE="$config_val" ;;
       PROJECT_STACK) CONFIG_PROJECT_STACK="$config_val" ;;
+      REPOSITORY_URL) CONFIG_REPOSITORY_URL="$config_val" ;;
     esac
   done <<< "$CONFIG_OUTPUT"
 
@@ -534,22 +545,54 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
   fi
 fi
 
-# GitHub remote — must be created by the human before running this script
-echo ""
-echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
-echo "  Leave blank to skip (you can add the remote manually later)."
-read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+# GitHub remote — must be created by the human before running this script.
+# A config carrying a "repository" object supplies it instead of the
+# prompt; a --config run with no terminal and no configured URL leaves it
+# blank (the same as answering the prompt blank) rather than blocking or
+# reading an EOF as an answer.
+GITHUB_URL=""
+if [[ -n "$CONFIG_FILE" && -n "$CONFIG_REPOSITORY_URL" ]]; then
+  GITHUB_URL="$CONFIG_REPOSITORY_URL"
+  echo ""
+  echo "  GitHub repository (from $CONFIG_FILE): $GITHUB_URL"
+elif [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  echo ""
+  echo "  GitHub: no \"repository\" object in $CONFIG_FILE and no terminal to ask — skipping the remote."
+  echo "  Add it manually later with: git -C <project>/src remote add origin <url>"
+else
+  echo ""
+  echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
+  echo "  Leave blank to skip (you can add the remote manually later)."
+  read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+fi
 
-# Fine-grained PAT for container git operations
-GH_TOKEN=""
-if [[ -n "$GITHUB_URL" ]]; then
-  echo ""
-  echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
-  echo "  Generate one at: https://github.com/settings/tokens?type=beta"
-  echo "  Repository access: this repo only"
-  echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
-  read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
-  echo ""
+# Fine-grained PAT for container git operations. Under --config it comes
+# from the environment — GH_TOKEN in $HQ_ENV, sourced above — so an
+# unattended run has nothing to type. Without --config the prompt below is
+# unchanged, and an exported GH_TOKEN is deliberately ignored there.
+if [[ -n "$CONFIG_FILE" ]]; then
+  GH_TOKEN="${GH_TOKEN:-}"
+  if [[ -n "$GH_TOKEN" ]]; then
+    echo "  GitHub PAT: read from $HQ_ENV."
+  fi
+else
+  GH_TOKEN=""
+fi
+
+if [[ -n "$GITHUB_URL" && -z "$GH_TOKEN" ]]; then
+  if [[ "$INTERACTIVE" == "true" ]]; then
+    echo ""
+    echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
+    echo "  Generate one at: https://github.com/settings/tokens?type=beta"
+    echo "  Repository access: this repo only"
+    echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
+    read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
+    echo ""
+  else
+    echo ""
+    echo "  GitHub PAT: GH_TOKEN is not set in $HQ_ENV and there is no terminal to ask —"
+    echo "  the remote will be configured but nothing will be pushed."
+  fi
 fi
 
 PROJECT_DIR="$PROJECTS_DIR/$PROJECT_NAME"
@@ -560,10 +603,18 @@ echo "  Mode         : $([[ "$CONNECT_JIRA" == "true" ]] && echo "Jira ($PROJECT
 echo "  Local path   : $PROJECT_DIR"
 [[ -n "$GITHUB_URL" ]] && echo "  GitHub       : $GITHUB_URL"
 echo ""
-read -rp "Continue? [y/N] " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 0
+if [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  # Every decision this confirmation covers came from the configuration
+  # and has already been validated, and there is no terminal to answer
+  # from. Prompting here would read the EOF on stdin as "N" and abort a
+  # run nobody declined.
+  echo "Continue? [y/N] y   (no terminal — proceeding from $CONFIG_FILE)"
+else
+  read -rp "Continue? [y/N] " CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+  fi
 fi
 
 echo ""

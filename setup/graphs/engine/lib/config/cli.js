@@ -13,19 +13,37 @@
 // pattern, or a fixed catalog identifier) before it ever reaches here.
 // On failure: exits 1, prints one "config error: ..." diagnostic per
 // validation failure to stderr, and prints nothing to stdout.
+//
+// `--platform` selects the platform configuration rules instead: the
+// `repository` object becomes required and every field is checked against
+// ai-gang.config.template.json's own placeholder values. That mode also
+// prints REPOSITORY_URL. It is what the platform startup steps under
+// scripts/startup/ validate ai-gang.config.json with, before any service
+// container exists.
 
 const path = require('path');
-const { validateConfigFile } = require('./validate');
+const { validateConfigFile, validatePlatformConfigFile } = require('./validate');
 
 function main(argv) {
-  const filePath = argv[2];
-  if (!filePath) {
-    process.stderr.write('usage: cli.js <config-file>\n');
+  const args = argv.slice(2);
+  let platform = false;
+  const positional = [];
+  for (const arg of args) {
+    if (arg === '--platform') {
+      platform = true;
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  const filePath = positional[0];
+  if (!filePath || positional.length > 1) {
+    process.stderr.write('usage: cli.js [--platform] <config-file>\n');
     return 2;
   }
 
   const resolved = path.resolve(filePath);
-  const result = validateConfigFile(resolved);
+  const result = platform ? validatePlatformConfigFile(resolved) : validateConfigFile(resolved);
 
   if (!result.valid) {
     for (const err of result.errors) {
@@ -34,10 +52,13 @@ function main(argv) {
     return 1;
   }
 
-  const { name, type, stack } = result.decisions;
+  const { name, type, stack, repositoryUrl } = result.decisions;
   process.stdout.write(`PROJECT_NAME=${name}\n`);
   process.stdout.write(`PROJECT_TYPE=${type}\n`);
   process.stdout.write(`PROJECT_STACK=${stack}\n`);
+  if (repositoryUrl !== undefined) {
+    process.stdout.write(`REPOSITORY_URL=${repositoryUrl}\n`);
+  }
   return 0;
 }
 
