@@ -24,7 +24,18 @@
 
 set -euo pipefail
 
-STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This file is the only thing baked into the image; every step it runs
+# comes from the checkout mounted at the working directory, so that an
+# operator's own checkout is what executes. That is why the step scripts
+# are found relative to $PWD and not relative to this file.
+AIGANG_ROOT="${AIGANG_ROOT:-$PWD}"
+STARTUP_DIR="$AIGANG_ROOT/scripts/startup"
+
+if [[ ! -f "$STARTUP_DIR/lib.sh" ]]; then
+  echo "[startup] ERROR: $STARTUP_DIR does not look like an AI Gang checkout." >&2
+  echo "[startup] Run 'docker compose up' from the root of the AI Gang repository." >&2
+  exit 1
+fi
 
 # --- 1. run as the checkout's owner ------------------------------------
 # Re-execs itself once, so everything below this block runs unprivileged.
