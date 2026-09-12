@@ -36,7 +36,13 @@ function run(entrypoint, cwd) {
     encoding: 'utf8',
     timeout: 30000,
     input: '',
-    env: { ...process.env, HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-home-')) },
+    env: {
+      ...process.env,
+      HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-home-')),
+      // The run is real, so its records go to a temp directory rather
+      // than into the checkout it is pointed at.
+      AIGANG_STATE_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-state-')),
+    },
   });
 }
 
