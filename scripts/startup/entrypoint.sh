@@ -81,8 +81,6 @@ source "$STARTUP_DIR/lib.sh"
 
 export HOME="${HOME:-/home/aigang}"
 
-mkdir -p "$AIGANG_STATE_DIR"
-
 # Keep the previous run's record and log before this run writes a line of
 # its own. Nothing in this flow deletes a run's records: a failed run's
 # evidence has to still be there after the re-run that follows it.
@@ -97,6 +95,7 @@ require_command jq
 require_command git
 require_command claude
 
+mkdir -p "$AIGANG_STATE_DIR"
 status init
 : > "$AIGANG_LOG_FILE"
 
