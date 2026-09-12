@@ -23,7 +23,15 @@
 services:
   ai-gang:
     build: .
-    image: ai-gang
+    # No `image:` tag, and build on every run. The entrypoint is the one
+    # file baked into this image (every step script comes from the mounted
+    # checkout), so an operator who pulls a fix to it and runs the
+    # documented `docker compose up` again has to get a rebuilt image or
+    # the fix never reaches them. A fixed `image:` tag made Compose reuse
+    # whatever already carried that name — including an image built from
+    # a different checkout. The rebuild is cached and costs a second or
+    # two when nothing changed, and the operator's command is unchanged.
+    pull_policy: build
     container_name: ai-gang-startup
     # Initialization runs once and is done. A restart policy here would
     # re-run it every time the daemon came back.

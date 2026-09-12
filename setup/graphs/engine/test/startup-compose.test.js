@@ -92,6 +92,16 @@ test('the image installs no Docker daemon', () => {
   assert.equal(/dind/.test(text), false);
 });
 
+test('a second `docker compose up` rebuilds the image, so a fix to the entrypoint reaches it', () => {
+  // The entrypoint is the only file baked in; every step script comes
+  // from the mounted checkout and is therefore always current. An
+  // operator who pulls a fix to the entrypoint and runs the documented
+  // command again would otherwise silently run the old one.
+  const service = compose().services['ai-gang'];
+  assert.equal(service.image, undefined, 'a fixed image tag lets Compose reuse an image built elsewhere');
+  assert.equal(service.pull_policy, 'build');
+});
+
 test('the entrypoint baked into the image is the startup entrypoint', () => {
   const text = dockerfile();
   assert.match(text, /COPY scripts\/startup\/entrypoint\.sh/);
