@@ -148,6 +148,13 @@ If something goes wrong, the run stops and says what failed. Fix it and
 run `docker compose up` again — re-running is safe, and picks up where it
 left off rather than starting a second copy of anything.
 
+Both files stay in the checkout after the run ends, whether it succeeded
+or failed, and nothing deletes them — `.ai-gang/startup.log` is the same
+output you watched `docker compose up` print, kept after the container
+is gone. Running again moves the previous run's log and status record to
+`.ai-gang/previous/` rather than overwriting them, so you still have the
+failed run to look at.
+
 ### Writing your first story
 
 Open <http://127.0.0.1:9100/django-admin/> and sign in with the

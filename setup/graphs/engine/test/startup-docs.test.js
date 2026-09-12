@@ -101,12 +101,24 @@ test('the admin address matches where the service is actually published and moun
 
 test('the record filenames the documents name are the ones the scripts write', () => {
   const doc = read(CLAUDE_DOC);
-  for (const name of ['.ai-gang/status.json', '.ai-gang/config-identity.json', '.ai-gang/startup.log']) {
+  for (const name of ['.ai-gang/status.json', '.ai-gang/config-identity.json', '.ai-gang/startup.log',
+    '.ai-gang/previous/']) {
     assert.ok(doc.includes(name), `${name} is not documented`);
   }
   assert.match(read(path.join(STARTUP_DIR, 'status.sh')), /STATUS_FILE="\$AIGANG_STATE_DIR\/status\.json"/);
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_IDENTITY_FILE="\$AIGANG_STATE_DIR\/config-identity\.json"/);
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_LOG_FILE="\$AIGANG_STATE_DIR\/startup\.log"/);
+  assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_PREVIOUS_DIR="\$AIGANG_STATE_DIR\/previous"/);
+});
+
+test("both documents tell the operator where a finished run's records are", () => {
+  // The records outlive the container, and a re-run keeps the run before
+  // it. An operator who is told neither has nothing to read after a
+  // failed run.
+  for (const [label, file] of [['ClaudeInstructions.md', CLAUDE_DOC], ['UserGuide.md', USER_GUIDE]]) {
+    const text = read(file).replace(/\s+/g, ' ');
+    assert.ok(text.includes('.ai-gang/previous/'), `${label} does not say where the previous run is kept`);
+  }
 });
 
 // ---- the configuration and environment files an operator fills in ----

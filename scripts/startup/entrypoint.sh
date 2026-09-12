@@ -75,6 +75,13 @@ source "$STARTUP_DIR/lib.sh"
 
 export HOME="${HOME:-/home/aigang}"
 
+mkdir -p "$AIGANG_STATE_DIR"
+
+# Keep the previous run's record and log before this run writes a line of
+# its own. Nothing in this flow deletes a run's records: a failed run's
+# evidence has to still be there after the re-run that follows it.
+keep_previous_run
+
 log "AI Gang platform startup"
 log "checkout: $AIGANG_ROOT"
 
@@ -84,7 +91,6 @@ require_command jq
 require_command git
 require_command claude
 
-mkdir -p "$AIGANG_STATE_DIR"
 status init
 : > "$AIGANG_LOG_FILE"
 
@@ -93,17 +99,32 @@ status init
 # steps' own log does.
 tail -n +1 -F "$AIGANG_LOG_FILE" &
 TAIL_PID=$!
-trap 'kill "$TAIL_PID" 2>/dev/null || true' EXIT
 export AIGANG_LOG_TAILED=1
 
-# Stops the tail and hands stdout back, so the last few lines of the run
-# are printed once and are not lost to a killed tail.
+# Stops the tail and hands stdout back, so the last lines of the run are
+# printed once and are not lost to a killed tail. `tail -F` has to notice
+# a write and read it before it can print it, so killing it the instant a
+# step fails loses that step's diagnostic — measured on the validation
+# failures below, the named field reached the terminal in only half of
+# twenty runs. Every exit goes through here, not just the successful one:
+# that is what the EXIT trap is for, and why it calls this rather than
+# killing the tail itself.
 stop_log_tail() {
-  kill "$TAIL_PID" 2>/dev/null || true
-  wait "$TAIL_PID" 2>/dev/null || true
+  local pid="${TAIL_PID:-}"
+  [[ -n "$pid" ]] || return 0
+  TAIL_PID=""
   trap - EXIT
+  sleep 1
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   export AIGANG_LOG_TAILED=0
+  return 0
 }
+trap stop_log_tail EXIT
+
+if [[ -d "$AIGANG_PREVIOUS_DIR" ]]; then
+  log "the previous run's record and log are kept in $AIGANG_PREVIOUS_DIR"
+fi
 
 # --- 2. validate -------------------------------------------------------
 status phase preflight
@@ -184,7 +205,6 @@ rm -f "$PROMPT_FILE"
 log "Initialization Agent exited with status $AGENT_EXIT"
 
 # --- 6. exit on the record, not on the agent's word --------------------
-sleep 1
 stop_log_tail
 RUN_STATE="$(status state 2>/dev/null || echo unknown)"
 if [[ "$RUN_STATE" == "complete" ]]; then

@@ -38,6 +38,31 @@ AIGANG_ADMIN_URL="$("$STARTUP_DIR/status.sh" admin-url)"
 # the agent's own tool output never reaches the container's stdout.
 AIGANG_LOG_FILE="$AIGANG_STATE_DIR/startup.log"
 
+# Where the run before this one is kept. A run's records are the only
+# account of what it did, and they outlive the container that wrote them:
+# they are in the operator's checkout, outside every container, and
+# nothing in this flow deletes them. Starting a new run would overwrite
+# them, so the previous run's status record and log are moved here first
+# — which is what makes the evidence of a failed run survive the re-run
+# that follows it.
+AIGANG_PREVIOUS_DIR="$AIGANG_STATE_DIR/previous"
+
+# Moves the previous run's records aside, if there are any. Called once,
+# by the entrypoint, before a new run's record is created.
+keep_previous_run() {
+  if [[ ! -f "$AIGANG_STATUS_FILE" && ! -f "$AIGANG_LOG_FILE" ]]; then
+    return 0
+  fi
+  mkdir -p "$AIGANG_PREVIOUS_DIR"
+  if [[ -f "$AIGANG_STATUS_FILE" ]]; then
+    mv -f "$AIGANG_STATUS_FILE" "$AIGANG_PREVIOUS_DIR/status.json"
+  fi
+  if [[ -f "$AIGANG_LOG_FILE" ]]; then
+    mv -f "$AIGANG_LOG_FILE" "$AIGANG_PREVIOUS_DIR/startup.log"
+  fi
+  return 0
+}
+
 log_line() {
   local line="$1"
   if [[ -d "$AIGANG_STATE_DIR" ]]; then

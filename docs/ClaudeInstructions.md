@@ -137,6 +137,14 @@ reconnects, creating no second project, network, account or container. A
 run whose configuration differs from that record is refused before
 anything changes.
 
+All three stay in the checkout after the container exits, and nothing in
+the flow deletes them — a failed run's record and log are still there
+afterwards, and are what a later reader diagnoses it from. Starting
+again does not overwrite them either: a new run moves the previous run's
+record and log to `.ai-gang/previous/` first. The container's own
+`docker compose up` output is that same log, streamed to its stdout, so
+`.ai-gang/startup.log` is the copy that survives the container.
+
 ### Which phases below this flow covers
 
 Included, performed by the steps above: **2.1** (Redis), **2.2**
