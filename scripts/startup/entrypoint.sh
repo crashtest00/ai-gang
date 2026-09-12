@@ -67,6 +67,12 @@ if [[ "${AIGANG_STARTUP_UNPRIVILEGED:-0}" != "1" && "$(id -u)" == "0" ]]; then
     export HOME=/home/aigang
     exec setpriv --reuid "$target_uid" --regid "$target_gid" --groups "$groups_arg" \
       --inh-caps=-all "${BASH_SOURCE[0]}" "$@"
+  else
+    # The checkout is owned by root, so there is nobody to drop to and
+    # everything below runs as root: Claude Code, docker, git, and every
+    # step. That is a real difference in what the run creates, so it is
+    # said out loud in the run's own log rather than left to be inferred.
+    AIGANG_ROOT_CHECKOUT=1
   fi
 fi
 
@@ -124,6 +130,12 @@ trap stop_log_tail EXIT
 
 if [[ -d "$AIGANG_PREVIOUS_DIR" ]]; then
   log "the previous run's record and log are kept in $AIGANG_PREVIOUS_DIR"
+fi
+
+if [[ "${AIGANG_ROOT_CHECKOUT:-0}" == "1" ]]; then
+  warn "this checkout is owned by root, so there is no unprivileged user to drop to:"
+  warn "  the whole run, including the Initialization Agent, runs as root, and every"
+  warn "  file it creates in $AIGANG_ROOT will be owned by root."
 fi
 
 # --- 2. validate -------------------------------------------------------

@@ -219,3 +219,21 @@ test("a second run keeps the previous run's record and log rather than deleting 
   assert.match(fs.readFileSync(path.join(stateDir, 'startup.log'), 'utf8'), /not a supported deployment target/);
   assert.match(second.stdout, /the previous run's record and log are kept in/);
 });
+
+test('a root-owned checkout is reported in the run log rather than passing silently', async () => {
+  // The privilege drop only happens when the checkout belongs to
+  // somebody other than root. When it does not, the whole run — the
+  // Initialization Agent included — is root, and every file it creates
+  // in the operator's checkout comes back owned by root. The suite does
+  // not run as root, so the branch itself is checked in the source and
+  // its absence is checked by running: an unprivileged run must not
+  // print the warning.
+  const text = fs.readFileSync(ENTRYPOINT, 'utf8');
+  assert.match(text, /AIGANG_ROOT_CHECKOUT=1/);
+  assert.match(text, /if \[\[ "\$\{AIGANG_ROOT_CHECKOUT:-0\}" == "1" \]\]; then\n\s+warn /);
+  assert.match(text, /warn "this checkout is owned by root/);
+
+  const result = await runPreflight(invalidConfig(), freshStateDir());
+  assert.equal(result.stdout.includes('owned by root'), false,
+    'an unprivileged run must not claim it is running as root');
+});

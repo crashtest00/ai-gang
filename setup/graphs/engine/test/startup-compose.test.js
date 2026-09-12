@@ -124,6 +124,24 @@ test("the operator's configuration copy and the startup records are not committe
   assert.ok(fs.existsSync(path.join(REPO_ROOT, 'ai-gang.config.template.json')), 'the template itself is committed');
 });
 
+test('the image ships no world-writable home', () => {
+  // The entrypoint chowns this directory to the checkout's owner at run
+  // time, while it is still root, so the image only has to ship it owned
+  // by somebody — not writable by everybody in every container built
+  // from it.
+  const text = dockerfile();
+  assert.equal(/chmod\s+0?777\s+\/home\/aigang/.test(text), false, 'the home must not be world-writable');
+  assert.match(text, /chmod 0755 \/home\/aigang/);
+  assert.match(text, /chown \d+:\d+ \/home\/aigang/);
+});
+
+test("the image names the project's first branch, so it is not `master`", () => {
+  // init-project.sh runs `git init` in the new project and cuts
+  // dev/beta/prod from whatever it produced. Unset, git's built-in
+  // default makes that `master`.
+  assert.match(dockerfile(), /git config --system init\.defaultBranch main/);
+});
+
 test('the image carries a git identity, without which the first project commit fails', () => {
   // scripts/init-project.sh makes the project's initial commit before it
   // pushes, and git refuses to commit with no identity configured. A

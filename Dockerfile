@@ -47,21 +47,31 @@ RUN apt-get update \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-# A git identity for the container. Initialization makes the project's
-# first commit before it pushes, and git refuses to commit without one —
-# so without this, project initialization fails on every fresh container,
-# before the remote is ever contacted. System-level, so an operator's own
-# global or per-repository identity still wins where they set one.
+# A git identity for the container, and the name of the branch `git init`
+# creates. Initialization makes the project's first commit before it
+# pushes, and git refuses to commit without an identity — so without one,
+# project initialization fails on every fresh container, before the
+# remote is ever contacted. Unset, git's built-in default would also make
+# the project's first branch `master`, with dev/beta/prod cut from it.
+# System-level, so an operator's own global or per-repository settings
+# still win where they set them.
 RUN git config --system user.name "AI Gang" \
-    && git config --system user.email "ai-gang@localhost"
+    && git config --system user.email "ai-gang@localhost" \
+    && git config --system init.defaultBranch main
 
 # The entrypoint is baked in; every step it runs comes from the mounted
 # checkout, so an operator's own checkout is what executes.
 COPY scripts/startup/entrypoint.sh /opt/ai-gang/entrypoint.sh
 RUN chmod +x /opt/ai-gang/entrypoint.sh
 
-# A writable home for the unprivileged user the entrypoint switches to.
-RUN mkdir -p /home/aigang && chmod 0777 /home/aigang
+# A home for the unprivileged user the entrypoint switches to. The
+# entrypoint chowns it to the checkout's own owner at run time, while it
+# is still root, so this only has to be somebody's: a placeholder uid and
+# the ordinary 0755, rather than a world-writable directory shipped in
+# the image.
+RUN mkdir -p /home/aigang \
+    && chown 1000:1000 /home/aigang \
+    && chmod 0755 /home/aigang
 ENV HOME=/home/aigang
 
 ENTRYPOINT ["/opt/ai-gang/entrypoint.sh"]
