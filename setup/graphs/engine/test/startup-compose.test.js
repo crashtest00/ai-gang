@@ -113,3 +113,14 @@ test("the operator's configuration copy and the startup records are not committe
   assert.match(ignore, /^\.ai-gang\/$/m);
   assert.ok(fs.existsSync(path.join(REPO_ROOT, 'ai-gang.config.template.json')), 'the template itself is committed');
 });
+
+test('the image carries a git identity, without which the first project commit fails', () => {
+  // scripts/init-project.sh makes the project's initial commit before it
+  // pushes, and git refuses to commit with no identity configured. A
+  // fresh container has none unless the image sets one. Found on a live
+  // run, where initialization failed here before the remote was even
+  // contacted.
+  const text = dockerfile();
+  assert.match(text, /git config --system user\.name/);
+  assert.match(text, /git config --system user\.email/);
+});

@@ -47,6 +47,14 @@ RUN apt-get update \
 
 RUN npm install -g @anthropic-ai/claude-code
 
+# A git identity for the container. Initialization makes the project's
+# first commit before it pushes, and git refuses to commit without one —
+# so without this, project initialization fails on every fresh container,
+# before the remote is ever contacted. System-level, so an operator's own
+# global or per-repository identity still wins where they set one.
+RUN git config --system user.name "AI Gang" \
+    && git config --system user.email "ai-gang@localhost"
+
 # The entrypoint is baked in; every step it runs comes from the mounted
 # checkout, so an operator's own checkout is what executes.
 COPY scripts/startup/entrypoint.sh /opt/ai-gang/entrypoint.sh
