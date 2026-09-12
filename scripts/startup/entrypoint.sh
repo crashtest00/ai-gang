@@ -94,6 +94,16 @@ status init
 tail -n +1 -F "$AIGANG_LOG_FILE" &
 TAIL_PID=$!
 trap 'kill "$TAIL_PID" 2>/dev/null || true' EXIT
+export AIGANG_LOG_TAILED=1
+
+# Stops the tail and hands stdout back, so the last few lines of the run
+# are printed once and are not lost to a killed tail.
+stop_log_tail() {
+  kill "$TAIL_PID" 2>/dev/null || true
+  wait "$TAIL_PID" 2>/dev/null || true
+  trap - EXIT
+  export AIGANG_LOG_TAILED=0
+}
 
 # --- 2. validate -------------------------------------------------------
 status phase preflight
@@ -175,6 +185,7 @@ log "Initialization Agent exited with status $AGENT_EXIT"
 
 # --- 6. exit on the record, not on the agent's word --------------------
 sleep 1
+stop_log_tail
 RUN_STATE="$(status state 2>/dev/null || echo unknown)"
 if [[ "$RUN_STATE" == "complete" ]]; then
   log "initialization complete. Django admin: $AIGANG_ADMIN_URL"

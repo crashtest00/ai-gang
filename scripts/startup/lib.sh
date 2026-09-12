@@ -45,17 +45,22 @@ log_line() {
   fi
 }
 
+# While the AI Gang container is tailing the log file to its own stdout,
+# that tail is the only path to it: printing here as well would show the
+# operator every line twice. Run anywhere else — by hand, by the agent as
+# a tool call, by a test — the log file is not being tailed and these
+# print directly.
 log() {
   local line
   line="$(printf '[startup] %s' "$*")"
-  printf '%s\n' "$line"
+  [[ "${AIGANG_LOG_TAILED:-0}" == "1" ]] || printf '%s\n' "$line"
   log_line "$line"
 }
 
 warn() {
   local line
   line="$(printf '[startup] %s' "$*")"
-  printf '%s\n' "$line" >&2
+  [[ "${AIGANG_LOG_TAILED:-0}" == "1" ]] || printf '%s\n' "$line" >&2
   log_line "$line"
 }
 

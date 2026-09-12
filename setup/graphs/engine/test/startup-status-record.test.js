@@ -151,3 +151,35 @@ test('the record is plain JSON a second shell can read at any point', () => {
   const doc = JSON.parse(status(dir, 'show').stdout);
   assert.equal(doc.step, 'create-network');
 });
+
+// ---- the log the container streams ----
+
+test('a step logs to stdout when nothing is tailing the log file', () => {
+  const dir = makeStateDir();
+  const result = spawnSync('bash', ['-c',
+    `source "${path.join(STARTUP_DIR, 'lib.sh')}"; log "a message"`], {
+    encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, AIGANG_STATE_DIR: dir },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), '[startup] a message');
+});
+
+test('a step logs only to the file when the container is tailing it, so nothing prints twice', () => {
+  // The AI Gang container tails .ai-gang/startup.log to its own stdout,
+  // because the agent's tool output never reaches it. Printing directly
+  // as well would show the operator every line of the run twice.
+  const dir = makeStateDir();
+  fs.writeFileSync(path.join(dir, 'startup.log'), '');
+  const result = spawnSync('bash', ['-c',
+    `source "${path.join(STARTUP_DIR, 'lib.sh')}"; log "a message"; warn "a warning"`], {
+    encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, AIGANG_STATE_DIR: dir, AIGANG_LOG_TAILED: '1' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+  const logged = fs.readFileSync(path.join(dir, 'startup.log'), 'utf8');
+  assert.match(logged, /\[startup\] a message/);
+  assert.match(logged, /\[startup\] a warning/);
+});
