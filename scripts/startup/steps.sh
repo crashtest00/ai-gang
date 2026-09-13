@@ -22,7 +22,7 @@ STEPS=(
   "start-scrummaster|Build and start ScrumMaster"
   "initialize-project|Initialize the configured project from the configuration"
   "install-project-dockerfile|Install the project container's Dockerfile from its stack's template"
-  "start-project|Build and start the project container"
+  "start-project|Build and start the project container, then reload the services that read the project list at startup"
   "confirm-health|Confirm every service is healthy and record the admin address"
 )
 

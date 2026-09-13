@@ -191,3 +191,50 @@ compose_in() {
   local dir="$1"; shift
   ( cd "$AIGANG_ROOT/$dir" && docker compose "$@" )
 }
+
+# The Django API of the work-item service, answering its own health
+# endpoint from inside its container. Both the step that restarts it and
+# the step that confirms health ask the same question the same way.
+workitem_api_healthy() {
+  docker exec work-item-service curl -fsS http://localhost:9100/health
+}
+
+# One project's command channel in the work-item service: the stream its
+# commands are written to, and the consumer group its consumers read them
+# through (services/work-item-service/workitems/stream_topology.py —
+# command_stream_name and COMMAND_GROUP).
+WORKITEM_COMMAND_GROUP="workitemservice"
+
+workitem_command_stream() {
+  printf 'aigang:workitems:%s' "$1"
+}
+
+# True when the work-item service is actually consuming a project's
+# commands. Its consumers process creates that project's consumer group
+# as it starts (workitems/streams.py, XGROUP CREATE with MKSTREAM), so
+# the group's presence is the one observable fact that says the project
+# is being served. Without it, every command written for that project
+# waits on the stream undelivered and nothing anywhere reports an error.
+workitem_commands_consumed() {
+  local project="$1"
+  docker exec ai-gang-redis redis-cli XINFO GROUPS "$(workitem_command_stream "$project")" 2>/dev/null \
+    | grep -qx "$WORKITEM_COMMAND_GROUP"
+}
+
+# Retries a condition until it holds, or gives up. The attempt count is
+# the caller's; both it and the pause between attempts are overridable
+# through the environment, so a test can drive a wait that never succeeds
+# without sitting out the real timeout — the same reason AIGANG_ROOT and
+# AIGANG_STATE_DIR are overridable.
+wait_until() {
+  local attempts="${AIGANG_WAIT_ATTEMPTS:-$1}"; shift
+  local interval="${AIGANG_WAIT_INTERVAL:-2}"
+  local attempt
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    if "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$interval"
+  done
+  return 1
+}

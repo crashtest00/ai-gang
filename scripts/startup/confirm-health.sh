@@ -6,6 +6,12 @@
 # ScrumMaster and the configured project's container. Jira, Cloudflare,
 # Jenkins and the Beta VM are later phases an operator adds, and are not
 # checked here because this flow never started them.
+#
+# Running is not the same as serving this project. The work-item service
+# answers /health whatever its project list holds, so a service that came
+# up before the configured project was registered looks perfectly healthy
+# while every command written for that project waits unread. That is
+# checked here on its own, by name.
 
 set -euo pipefail
 STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +38,14 @@ check() {
 }
 
 redis_ok() { docker exec ai-gang-redis redis-cli ping 2>/dev/null | grep -q PONG; }
-wis_ok() { docker exec work-item-service curl -fsS http://localhost:9100/health; }
+wis_ok() { workitem_api_healthy; }
+# The work-item service's consumers create a project's consumer group as
+# they start, from the project list they read then. A consumers process
+# older than the project's registration has no group for it, and the
+# commands a dispatched story produces sit on the stream with nothing
+# reading them — no subtask, no agent, and no error. The group is the
+# proof that this project is served, not merely that a container runs.
+consumers_ok() { workitem_commands_consumed "$PROJECT_NAME"; }
 scrummaster_ok() {
   docker exec scrummaster node -e \
     "fetch('http://localhost:9000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
@@ -50,9 +63,14 @@ check redis redis_ok
 check work-item-service wis_ok
 check scrummaster scrummaster_ok
 check "$PROJECT_NAME" project_ok
+check workitem-consumers consumers_ok
 
 if (( ${#unhealthy[@]} > 0 )); then
-  die "these services are not healthy: ${unhealthy[*]}"
+  detail=""
+  if [[ " ${unhealthy[*]} " == *" workitem-consumers "* ]]; then
+    detail=" — the work-item service is not consuming '$PROJECT_NAME': there is no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME"), so commands written for '$PROJECT_NAME' would wait there unread"
+  fi
+  die "these services are not healthy: ${unhealthy[*]}$detail"
 fi
 
 end_step confirm-health
