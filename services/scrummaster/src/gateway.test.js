@@ -471,6 +471,197 @@ test('create_subtask with an invalid agent reports a visible assignment failure 
   assert.deepEqual(blocked, { k: ISSUE_KEY, v: true });
 });
 
+test('create_subtask without agentFieldValue derives the agent from the summary role prefix', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  t.mock.method(jira, 'getIssue', async (key) => ({
+    key,
+    project: 'GANG',
+    projectName: PROJECT_NAME,
+    parent: key === 'GANG-43' ? ISSUE_KEY : null,
+    summary: 'Backend: /health endpoint',
+    comments: [],
+  }));
+  let createdSubtask = null;
+  t.mock.method(jira, 'createSubtask', async (parentKey, projectKey, summary, description, agentFieldValue) => {
+    createdSubtask = { parentKey, projectKey, summary, description, agentFieldValue };
+    return 'GANG-43';
+  });
+  t.mock.method(jira, 'transitionIssue', async () => {});
+  t.mock.method(jira, 'postComment', async () => { throw new Error('a derivable request must not be reported as rejected'); });
+  t.mock.method(redis, 'getClient', () => ({}));
+  let published = null;
+  t.mock.method(streams, 'publish', async (_client, stream, streamEnvelope) => {
+    published = { stream, envelope: streamEnvelope };
+    return { deduped: false, entryId: '0-1', messageId: streamEnvelope.messageId };
+  });
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask: Backend: /health endpoint'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Backend: /health endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(createdSubtask.agentFieldValue, 'backend-agent', 'the omitted agent id is derived from the "Backend:" prefix');
+  assert.equal(createdSubtask.summary, 'Backend: /health endpoint');
+  assert.ok(published, 'the derived subtask is dispatched like any other');
+  assert.equal(published.envelope.taskId, 'GANG-43');
+});
+
+test('create_subtask with no derivable agent comments the rejection on the parent and creates nothing', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+  let createSubtaskCalled = false;
+  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
+  const posted = [];
+  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.equal(createSubtaskCalled, false);
+  assert.equal(posted.length, 1, 'the parent ticket must carry a visible record of the rejection');
+  assert.equal(posted[0].key, ISSUE_KEY);
+  assert.match(posted[0].body, /agentFieldValue/);
+  assert.match(posted[0].body, /Add a \/health endpoint/);
+  assert.match(posted[0].body, /backend-agent/, 'the permitted agent ids are named for recovery');
+});
+
+test('local mode: create_subtask with no derivable agent appends the rejection comment and materializes nothing', async (t) => {
+  const calls = mockLocalMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.ok(!calls.some(c => c.payload.command === 'materializeDecomposition'));
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  assert.ok(comment, 'the parent work item must carry a visible record of the rejection');
+  assert.match(comment.payload.body, /agentFieldValue/);
+  assert.match(comment.payload.body, /Add a \/health endpoint/);
+});
+
+test('a task whose submission was rejected is reported failed, not completed', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+  t.mock.method(jira, 'createSubtask', async () => { throw new Error('must not create anything'); });
+  t.mock.method(jira, 'postComment', async () => {});
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+
+  // The agent's own container exits cleanly and reports success — it cannot
+  // see that the gateway rejected what it sent.
+  const result = await handleTaskStatus({
+    kind: 'task_status',
+    messageId: newMessageId(),
+    taskId: ISSUE_KEY,
+    contextId,
+    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+  }, PROJECT_NAME);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'failed');
+  assert.ok(!logs.some(line => /completed/.test(line)), 'the task must never be logged as completed');
+});
+
+test('a task whose chain permanently failed is reported failed, not completed', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+  t.mock.method(jira, 'postComment', async () => {});
+
+  // The rejected create_subtask poisons the rest of the chain: the agent's
+  // own completion message references it and is permanently failed.
+  const rejected = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [
+      buildTextPart('Creating subtask'),
+      buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
+    ],
+  });
+  await handleA2ASubmission(rejected, PROJECT_NAME);
+
+  await assert.rejects(
+    handleA2ASubmission(
+      envelope({
+        contextId, referenceMessageId: rejected.payload.message.messageId, state: 'completed',
+        parts: [buildTextPart('Decomposed into 1 subtask')],
+      }),
+      PROJECT_NAME
+    ),
+    taskStore.A2ACausalDependencyFailedError
+  );
+
+  const result = await handleTaskStatus({
+    kind: 'task_status',
+    messageId: newMessageId(),
+    taskId: ISSUE_KEY,
+    contextId,
+    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+  }, PROJECT_NAME);
+
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.failedMessageIds, [rejected.payload.message.messageId]);
+});
+
+test('a task with no failed submission is still reported completed', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask();
+  t.mock.method(jira, 'postComment', async () => {});
+
+  await handleA2ASubmission(
+    envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })] }),
+    PROJECT_NAME
+  );
+
+  const result = await handleTaskStatus({
+    kind: 'task_status',
+    messageId: newMessageId(),
+    taskId: ISSUE_KEY,
+    contextId,
+    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'backend-agent' },
+  }, PROJECT_NAME);
+
+  assert.deepEqual(result, { taskId: ISSUE_KEY, status: 'completed' });
+  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'completed');
+});
+
 test('create_subtask rejection names every missing required field and blocks causal completion', async (t) => {
   mockJiraMode(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });

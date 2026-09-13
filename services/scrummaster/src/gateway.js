@@ -148,9 +148,19 @@ async function handleTaskStatus(envelope, projectName) {
     return null;
   }
 
-  if (status === 'completed' || status === 'failed') {
+  // A container's subscriber reports only whether the agent process exited
+  // cleanly. It cannot see that one of the submissions that process sent was
+  // rejected here, or that a later one was dead-lettered for depending on a
+  // rejected predecessor. Believing such a report is what let a story whose
+  // subtask was never created still log as completed, so a Task carrying a
+  // failed submission is recorded and logged as failed regardless of what
+  // the container reports.
+  const failedMessages = status === 'completed' ? taskStore.failedMessageIds(taskId) : [];
+  const effectiveStatus = failedMessages.length > 0 ? 'failed' : status;
+
+  if (effectiveStatus === 'completed' || effectiveStatus === 'failed') {
     try {
-      taskStore.applyTransition(taskId, { state: status });
+      taskStore.applyTransition(taskId, { state: effectiveStatus });
     } catch (err) {
       // Unknown task (restart) or already terminal (race with the agent's
       // own report) — the canonical-projection behavior below still applies.
@@ -158,6 +168,13 @@ async function handleTaskStatus(envelope, projectName) {
   }
 
   if (status === 'completed') {
+    if (failedMessages.length > 0) {
+      console.error(
+        `[gateway] Task ${taskId} reported completed by its container (agent=${agent_name || 'unknown'}) ` +
+        `but ${failedMessages.length} of its gateway submission(s) failed (${failedMessages.join(', ')}) — recording it as failed`
+      );
+      return { taskId, status: 'failed', failedMessageIds: failedMessages };
+    }
     console.log(`[gateway] Task ${taskId} completed (agent=${agent_name || 'unknown'})`);
     return { taskId, status };
   }
@@ -542,6 +559,37 @@ async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
   console.error(`[gateway] ${ticketKey} assignment rejected — requested "${requestedAgent}" (${result.code})`);
 }
 
+// Report a create_subtask request that cannot be acted on, mode-aware. A
+// dropped request used to leave the parent work item with no subtask, no
+// comment and no status change — nothing a human or the requesting agent
+// could see — so the parent always gets a comment naming the missing field
+// and the summary that was requested. The parent's own status is left alone:
+// the requesting agent's Task carries the failure (see handleTaskStatus),
+// and its subsequent submissions are already refused by lineage validation.
+async function reportSubtaskRejection(parentTicketKey, summary, missingFields, ctx) {
+  const project = registry.getProject(ctx.projectName);
+  const permitted = project && project.agents.length > 0
+    ? project.agents.join(', ')
+    : '(none configured for this project)';
+
+  let comment =
+    `[system] Cannot create the requested subtask — the create_subtask request is missing ` +
+    `${missingFields.join(' and ')}.\n\n` +
+    `Requested summary: ${summary ? `"${summary}"` : '(none supplied)'}\n`;
+  if (missingFields.includes('agentFieldValue')) {
+    comment += `Permitted agents for this project: ${permitted}\n`;
+    if (summary) {
+      comment += `The summary's "<Role>: ..." prefix named no single one of them, so no agent could be derived from it.\n`;
+    }
+  }
+  comment +=
+    `\nRecovery: resend the create_subtask operation with every required field set.\n` +
+    `Ticket: ${parentTicketKey}`;
+
+  await postComment(parentTicketKey, ctx, 'system', comment, null);
+  console.error(`[gateway] create_subtask rejected on ${parentTicketKey} — missing ${missingFields.join(', ')}`);
+}
+
 // Change a ticket's recorded implementation owner. Every path that creates
 // or changes agent responsibility must go through the same catalog-backed
 // validator.
@@ -599,15 +647,35 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
 // so a from-scratch retry reuses the same id instead of materializing a
 // second work item.
 async function handleCreateSubtask(record, data, ctx) {
-  const { summary, description, agentFieldValue } = data;
+  const { summary, description } = data;
   const parentTicketKey = record.jiraIssueKey;
 
+  if (!parentTicketKey) {
+    // Nothing to create the subtask under, and nowhere to report it either.
+    console.warn('[gateway] create_subtask missing required fields (parentTicketKey) — dropping. Received:', JSON.stringify(data));
+    return null;
+  }
+
+  // An omitted agentFieldValue is recoverable when the summary's own
+  // `<Role>: ...` prefix names exactly one agent this project has — the id
+  // the request should have carried is then implied by the request itself,
+  // not guessed. Everything else is reported on the parent work item below,
+  // never dropped in silence.
+  let agentFieldValue = data.agentFieldValue;
+  if (!agentFieldValue && summary) {
+    const derived = assignment.deriveAgentFromSummary(ctx.projectName, summary);
+    if (derived) {
+      agentFieldValue = derived.id;
+      console.log(`[gateway] create_subtask under ${parentTicketKey} omitted agentFieldValue — derived "${agentFieldValue}" from the summary's role prefix`);
+    }
+  }
+
   const missing = [];
-  if (!parentTicketKey) missing.push('parentTicketKey');
   if (!summary) missing.push('summary');
   if (!agentFieldValue) missing.push('agentFieldValue');
   if (missing.length > 0) {
-    console.warn(`[gateway] create_subtask missing required fields (${missing.join(', ')}) — dropping. Received:`, JSON.stringify(data));
+    console.warn(`[gateway] create_subtask missing required fields (${missing.join(', ')}) — reporting on ${parentTicketKey}. Received:`, JSON.stringify(data));
+    await reportSubtaskRejection(parentTicketKey, summary, missing, ctx);
     return null;
   }
 

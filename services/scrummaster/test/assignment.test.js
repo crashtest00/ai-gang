@@ -65,3 +65,34 @@ test('validateDecomposition rejects the whole batch atomically when any subtask 
   ]);
   assert.deepEqual(result.permittedAgents, ['refinement-agent', 'backend-agent']);
 });
+
+// deriveAgentFromSummary — the recovery path for a create_subtask request
+// that names its role in the summary but omits the agent id itself.
+
+test('deriveAgentFromSummary derives the agent from a role prefix the project has', () => {
+  const agent = assignment.deriveAgentFromSummary('test-project', 'Backend: add the /health endpoint');
+  assert.equal(agent.id, 'backend-agent');
+});
+
+test('deriveAgentFromSummary accepts the id and display-name spellings of the same role', () => {
+  for (const summary of ['backend-agent: do it', 'Backend Agent: do it', 'BACKEND: do it']) {
+    assert.equal(assignment.deriveAgentFromSummary('test-project', summary).id, 'backend-agent', summary);
+  }
+});
+
+test('deriveAgentFromSummary does not derive an agent the project is not permitted', () => {
+  // frontend-agent is in the fixture catalog but not in test-project's allowed set
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Frontend: build the form'), null);
+});
+
+test('deriveAgentFromSummary derives nothing from an unrecognized or absent role prefix', () => {
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Database: add an index'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Add the /health endpoint'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', ': no role at all'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', ''), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', undefined), null);
+});
+
+test('deriveAgentFromSummary derives nothing for an unconfigured project', () => {
+  assert.equal(assignment.deriveAgentFromSummary('no-such-project', 'Backend: add the /health endpoint'), null);
+});

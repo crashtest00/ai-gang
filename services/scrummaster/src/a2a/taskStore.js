@@ -239,6 +239,18 @@ function markMessageFailed(taskId, messageId) {
   if (outcomes?.has(messageId)) outcomes.set(messageId, 'failed');
 }
 
+// Message ids on this Task whose gateway-side effect was rejected or failed.
+// A container's own execution outcome cannot see these — it only knows
+// whether the agent process exited cleanly — so the gateway consults them
+// before believing a "completed" report (see gateway.js's handleTaskStatus).
+function failedMessageIds(taskId) {
+  const outcomes = messageOutcomesByTask.get(taskId);
+  if (!outcomes) return [];
+  return Array.from(outcomes.entries())
+    .filter(([, outcome]) => outcome === 'failed')
+    .map(([messageId]) => messageId);
+}
+
 function lastMessage(taskId) {
   const record = tasksById.get(taskId);
   if (!record) throw new A2ATaskNotFoundError(`Unknown task ${taskId}`);
@@ -263,6 +275,7 @@ module.exports = {
   applyTransition,
   markMessageSucceeded,
   markMessageFailed,
+  failedMessageIds,
   lastMessage,
   _reset,
 };
