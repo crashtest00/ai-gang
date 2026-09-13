@@ -94,7 +94,7 @@ what the container builds the agent's own instructions from.
 | 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
 | 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
 | 7 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
-| 8 | `scripts/startup/start-project.sh` | Build and start the project container |
+| 8 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
 | 9 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
 
 Before the first of them, the entrypoint has already run
@@ -724,6 +724,27 @@ the event stream grew but nothing was dispatched, check that the project
 is listed in `services/scrummaster/config/projects.json` and that
 ScrumMaster has been restarted since it was added — it reads that file
 once, at startup.
+
+**Work-item consumer leg** — the commands the dispatch produced were
+consumed:
+
+```bash
+docker exec ai-gang-redis redis-cli XINFO GROUPS aigang:workitems:<project>
+docker logs workitem-consumers --tail 50
+```
+
+A `workitemservice` group has to be listed, and the log has to name the
+project. The work-item service reads
+`services/scrummaster/config/projects.json` once at startup, exactly as
+ScrumMaster does, and creates each listed project's consumer groups then.
+If the group is missing, that service is older than the project's
+registration: a story is dispatched, the commands that follow it land on
+the stream, nothing reads them, no subtask is ever created and no agent
+runs — with no error in any log. Make it re-read:
+
+```bash
+cd ~/ai-gang/services/work-item-service && docker compose restart api consumers
+```
 
 **Project container leg** — the agent ran:
 
