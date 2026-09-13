@@ -212,7 +212,7 @@ function buildA2AInstructions(issue, task, message) {
   lines.push('  |------------------|------------------------------|-------------|');
   lines.push('  | comment          | working                      | progress update, no PR yet |');
   lines.push('  | reassign         | working                      | hand the ticket\'s Agent field to another registered agent — data: {"operation":"reassign","agentFieldValue":"<agent>"} |');
-  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"...","description":"...","agentFieldValue":"<agent>"} |');
+  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"<Role>: ...","description":"...","agentFieldValue":"<agent>"}. All three fields are required; agentFieldValue must be one of the allowed agent ids listed above |');
   lines.push('  | (blocked)        | input-required / auth-required | you need human clarification (input-required) or missing credentials/authorization (auth-required) — omit "operation", put the precise question in the text part; do not block without a precise, located question |');
   lines.push('  | (complete)       | completed                    | your work is fully done — omit "operation", include a summary text part |');
   lines.push('- To open a pull request: set "state" to "completed" and add this sibling "artifacts" array to your submission:');

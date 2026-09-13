@@ -73,7 +73,22 @@ submission you send, and reference the previous one as `referenceMessageId`.
 
 For each subtask, submit a `create_subtask` operation. Your own Task stays
 `working` while you create subtasks — the parent ticket is implied by your
-Task, so you do not repeat its key:
+Task, so you do not repeat its key.
+
+`summary`, `description` and `agentFieldValue` are all required on every
+`create_subtask` submission:
+
+- `agentFieldValue` is the id of the agent that will implement the subtask.
+  Use one of the ids listed under `## ALLOWED AGENTS` in your prompt, copied
+  exactly — never a display name, a role word, or an id you invented.
+- `summary` starts with that agent's role followed by a colon, as in
+  `Backend: <concise description>`.
+
+A submission that omits `agentFieldValue` is not created as sent. ScrumMaster
+recovers the id from the summary's role prefix only when that prefix names
+exactly one agent this project has; otherwise it creates nothing and posts a
+comment on the parent ticket naming the missing field. Send the field every
+time rather than relying on that recovery.
 
 ```bash
 cat > /tmp/msg.json << 'ENDJSON'
@@ -94,7 +109,7 @@ cat > /tmp/msg.json << 'ENDJSON'
           "operation": "create_subtask",
           "summary": "<Agent role>: <concise description>",
           "description": "<self-contained description of what this agent needs to do>",
-          "agentFieldValue": "<agent id from ## ALLOWED AGENTS>"
+          "agentFieldValue": "<required — an agent id from ## ALLOWED AGENTS>"
         }
       }
     ]

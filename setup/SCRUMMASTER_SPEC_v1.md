@@ -404,7 +404,7 @@ what to do:
 | --- | --- | --- |
 | `working` | `comment` | Post comment |
 | `working` | `reassign` (`data.agentFieldValue`) | Set Agent field (validated against the agent roster) |
-| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue`) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
+| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue` — all required) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
 | `working` | *(none)* | Plain progress comment (the text Part is posted as-is) |
 | `input-required` / `auth-required` | *(none — state carries the meaning)* | Set Blocked field + comment |
 | `completed` with a `pull-request` artifact | — | Post PR-opened comment only — ticket stays In Progress; Jenkins owns the In Review transition |
@@ -413,6 +413,15 @@ what to do:
 
 An optional `data.reference: { "file": "...", "function": "..." }` sibling
 field is supported on any operation.
+
+A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
+ScrumMaster first tries to recover the id from the summary's own
+`<Role>: ...` prefix, and uses it only when that prefix names exactly one
+agent the project has — never a default. If it cannot, nothing is created and
+the parent ticket receives a comment naming the missing field, the requested
+summary, and the project's permitted agent ids. Either way the outcome is
+visible: a Task with a rejected submission is recorded and logged as failed,
+even when the agent's own container reports that it exited cleanly.
 
 `materializeDecomposition`
 and `pipeline_retry` (Jenkins-originated) are
