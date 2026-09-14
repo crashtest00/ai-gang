@@ -174,7 +174,9 @@ Under **Workitems → Work items**, add a work item with your project's
 name, **Type** `story`, an **Assignee agent id** of `refinement-agent`,
 and **Status** `proposed`, leaving **External key** empty — it ties a work
 item to an existing Jira issue, and this setup has no Jira integration
-configured, so a non-blank value is refused rather than dispatched. It
+configured. The save itself accepts a non-blank value; it's dispatch that
+refuses it, posting a comment explaining why and moving the item to
+`needs-clarification` instead of running it. It
 takes three saves: save the work item, re-open it and fill in the story fields
 (Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) and
 save, then re-open it once more and set **Status** to `ready`. The story

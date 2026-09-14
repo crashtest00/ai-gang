@@ -469,3 +469,70 @@ test('a submission that exhausts its transient retries is recorded failed on its
 
   assert.deepEqual(taskStore.failedMessageIds('HW-1'), [submission.payload.message.messageId]);
 });
+
+// Regression test for a gap in the fix above: that one only covers a
+// submission whose failure happens AFTER applyTransition already recorded
+// it on the Task. A submission whose own referenceMessageId is
+// unresolvable fails inside applyTransition itself (checkMessageLineage's
+// A2AReferenceError — no `.permanent`, so streams.js retries and eventually
+// dead-letters it same as any other transient failure), before the message
+// is ever pushed onto the Task's history or outcomes map at all. Driven
+// through the real gateway stream consumer/onDeadLetter wiring, same as the
+// test above, then through gateway._handleA2ASubmission for the successor —
+// the real entry point every other test in this file uses it through.
+test('a dead-lettered message that never reached applyTransition is still recorded failed, so a successor referencing it is rejected rather than deferred forever', async () => {
+  registerTask('HW-1', { agentId: 'refinement-agent' });
+
+  const orphanPayload = a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: 'msg-never-published', state: 'working',
+    parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })],
+  });
+  await publishGatewayOp(orphanPayload);
+
+  const errorLines = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => { errorLines.push(args.join(' ')); originalConsoleError(...args); };
+
+  const consumer = streams.createConsumer(client, {
+    stream: gatewayStream(),
+    group: 'unresolvable-reference-dead-letter-test',
+    consumerName: 'c1',
+    ...gateway._gatewayConsumerOptions('hello-world'),
+    blockMs: 100,
+    retryDelayMs: 50,
+    reclaimIntervalMs: 30,
+    maxAttempts: 2,
+  });
+  await consumer.start();
+  try {
+    await waitForXLen(streams.deadLetterStreamName(gatewayStream()), 1, 5000);
+    await waitForFailedMessage('HW-1', 2000);
+  } finally {
+    await consumer.stop();
+    console.error = originalConsoleError;
+  }
+
+  // The gap this closes: the dead-lettered message is recorded failed even
+  // though it was never applied to the Task's own message history.
+  assert.deepEqual(taskStore.failedMessageIds('HW-1'), [orphanPayload.message.messageId]);
+  assert.ok(taskStore.getTaskById('HW-1').messages.every(m => m.messageId !== orphanPayload.message.messageId),
+    'the dead-lettered message must never have been applied to the Task history — otherwise this is not exercising the gap');
+  assert.ok(
+    errorLines.some(line => line.includes(orphanPayload.message.messageId) && line.includes('never recorded')),
+    'the hook must log when it could not find the message to mark, not just record it silently'
+  );
+
+  // Without the fix, findAcceptedPredecessor still finds the dead-lettered
+  // entry on the stream (deadLetter() only xAcks, it never removes the
+  // original entry) and reports it "durably accepted", so this would defer
+  // forever (A2ACausalDependencyPendingError) instead of being rejected
+  // outright.
+  const successor = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: orphanPayload.message.messageId, state: 'completed',
+    parts: [buildTextPart('done')],
+  }));
+  await assert.rejects(
+    gateway._handleA2ASubmission(successor, 'hello-world'),
+    taskStore.A2ACausalDependencyFailedError
+  );
+});

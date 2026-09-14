@@ -223,8 +223,88 @@ test('a durably accepted same-Task predecessor waits instead of failing lineage'
   assert.equal(taskStore.getTaskById(taskId).messages.some(message => message.messageId === successor.messageId), false);
 });
 
+// Regression test for a gap in the controlled-reopen path: it used to
+// delete a superseded predecessor's failed outcome outright, so a stale
+// successor still waiting on that same referenceMessageId — one that was
+// deferring on A2ACausalDependencyPendingError before the reopen — would
+// pass checkMessageLineage's lineage check on its next retry (undefined is
+// neither 'pending' nor 'failed') and go on to run its side effect from the
+// abandoned attempt on top of the fresh dispatch. Driven through
+// applyTransition/checkMessageLineage, the real lineage-check entry point
+// every gateway submission goes through — not a direct call to a reopen
+// helper.
+test('a redispatch does not un-gate a stale successor still waiting on the rejection it superseded', () => {
+  const { task, taskId, contextId, messageId: seedMessageId } = freshTask();
+  taskStore.register(task);
+
+  const rejected = buildMessage({
+    messageId: newMessageId(), taskId, contextId, role: 'agent',
+    parts: [buildTextPart('will be rejected')], referenceMessageId: seedMessageId,
+  });
+  taskStore.applyTransition(taskId, { state: 'working', message: rejected });
+  taskStore.markMessageFailed(taskId, rejected.messageId);
+
+  const stillPending = buildMessage({
+    messageId: newMessageId(), taskId, contextId, role: 'agent',
+    parts: [buildTextPart('successor of the rejected message')], referenceMessageId: rejected.messageId,
+  });
+
+  // Before the redispatch: the successor is correctly rejected outright —
+  // this is the existing, already-working half of the guarantee.
+  assert.throws(
+    () => taskStore.applyTransition(taskId, { state: 'working', message: stillPending, requireSuccessfulReference: true }),
+    taskStore.A2ACausalDependencyFailedError
+  );
+
+  const redispatch = buildMessage({
+    messageId: newMessageId(), taskId, contextId, role: 'client',
+    parts: [buildTextPart('redispatch after canonical ready')], referenceMessageId: seedMessageId,
+  });
+  taskStore.applyTransition(taskId, { state: 'working', message: redispatch, reopen: true });
+
+  // After the redispatch: the successor's own reclaim retries the exact
+  // same message again. It must still be rejected outright — not silently
+  // pass lineage and apply its stale side effect on top of the new
+  // dispatch just because the predecessor's failed entry is gone.
+  assert.throws(
+    () => taskStore.applyTransition(taskId, { state: 'working', message: stillPending, requireSuccessfulReference: true }),
+    taskStore.A2ACausalDependencyFailedError
+  );
+  assert.equal(
+    taskStore.getTaskById(taskId).messages.some(m => m.messageId === stillPending.messageId),
+    false,
+    'the stale successor must never have been applied to the Task'
+  );
+});
+
 test('applying a transition to an unknown task fails explicitly', () => {
   assert.throws(() => taskStore.applyTransition('task-unknown', { state: 'working' }), taskStore.A2ATaskNotFoundError);
+});
+
+// recordDeadLetteredMessageFailure
+
+test('recordDeadLetteredMessageFailure overwrites an outcome that was already recorded', () => {
+  const { task, taskId, contextId, messageId: seedMessageId } = freshTask();
+  taskStore.register(task);
+
+  const agentMessage = buildMessage({
+    messageId: newMessageId(), taskId, contextId, role: 'agent',
+    parts: [buildTextPart('already applied')], referenceMessageId: seedMessageId,
+  });
+  taskStore.applyTransition(taskId, { state: 'working', message: agentMessage });
+  assert.deepEqual(taskStore.failedMessageIds(taskId), [], 'the outcome starts pending, not failed');
+
+  const result = taskStore.recordDeadLetteredMessageFailure(taskId, agentMessage.messageId);
+
+  assert.equal(result, 'updated', 'an entry already existed for this message');
+  assert.deepEqual(taskStore.failedMessageIds(taskId), [agentMessage.messageId]);
+});
+
+test('recordDeadLetteredMessageFailure on an unknown task has nothing to record against', () => {
+  const result = taskStore.recordDeadLetteredMessageFailure('task-unknown', 'msg-unknown');
+
+  assert.equal(result, 'unknown-task');
+  assert.deepEqual(taskStore.failedMessageIds('task-unknown'), []);
 });
 
 // contextId grouping

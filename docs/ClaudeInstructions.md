@@ -681,8 +681,10 @@ Under **Workitems → Work items**, add a work item:
 - **Status**: `proposed`
 - **Assignee agent id**: `refinement-agent`
 - **External key**: leave it empty. It is the Jira issue key a work item
-  mirrors, and setting it routes dispatch through Jira, which this flow
-  does not set up.
+  mirrors; this flow has no Jira integration configured, so setting it
+  saves fine but makes dispatch refuse the item outright — a comment
+  explaining why, and the item moved to `needs-clarification` instead of
+  being run.
 
 It takes three saves, in this order, and the order matters:
 
