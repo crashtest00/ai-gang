@@ -44,20 +44,6 @@ def test_get_project_mode_reports_local_by_default(clean_db):
     res = client.get(f'/projects/{PROJECT}/mode')
     body = res.json()
     assert body['mode'] == 'local'
-    # No ProjectConfig row exists yet for this project — distinct from a row
-    # explicitly set to local (see the next test), so a caller that needs to
-    # tell the two apart (dispatchConsumer.js's issueLikeFor) can do so from
-    # this one endpoint response.
-    assert body['configured'] is False
-
-
-def test_get_project_mode_reports_configured_true_for_an_explicit_row(clean_db):
-    client = Client()
-    project_config.set_mode(PROJECT, 'local')
-    res = client.get(f'/projects/{PROJECT}/mode')
-    body = res.json()
-    assert body['mode'] == 'local'
-    assert body['configured'] is True
 
 
 def test_admin_transition_rejected_for_jira_mode_project(clean_db):

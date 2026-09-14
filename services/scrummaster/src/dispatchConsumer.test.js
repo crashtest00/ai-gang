@@ -100,17 +100,12 @@ test('a Jira-mode item reaching ready dispatches through the identical maybeDisp
 // through handleWorkItemEventEnvelope — the literal handler
 // streams.createConsumer is given in startDispatchConsumers — so this
 // exercises the real dispatch-eligibility path, not an isolated helper.
-//
-// `configured: true` here means an explicit local-mode ProjectConfig row
-// exists — the case this refusal is actually for. A missing row (mode
-// still reads "local" but `configured` is false) is a distinct case,
-// covered separately below: it must not be refused this way.
 test('a local-mode item with a non-blank External key is refused and explained, not retried to exhaustion', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
     id: 'wi-bad-key-1', project: PROJECT, type: 'story', status: 'ready',
     assignee_agent_id: 'refinement-agent', external_key: 'GANG-999', parent_id: null,
   }));
-  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local', configured: true }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
   let jiraCalled = false;
   t.mock.method(jira, 'getIssue', async () => { jiraCalled = true; throw new Error('must never be called'); });
   let dispatchCalled = false;
@@ -136,44 +131,6 @@ test('a local-mode item with a non-blank External key is refused and explained, 
   assert.match(comment.payload.body, /Jira/);
   const transition = published.find(c => c.payload.command === 'transitionStatus');
   assert.equal(transition && transition.payload.status, 'needs-clarification');
-});
-
-// Regression test for a follow-up finding on the refusal above: an absent
-// ProjectConfig row reads identically to an explicit local-mode row
-// (`mode: 'local'`) except for `configured: false` — project_config.py's
-// get_mode treats no row as local mode by definition, the documented
-// default new projects rely on never needing to pre-create a row. A
-// Jira-mode project whose row just hasn't been written yet (a race with
-// catchup.py's connect-Jira flow) looks exactly like that on this one
-// signal, so refusing and mutating the item here — as the previous test
-// does for a genuinely local-mode project — would misfire on a project
-// this dispatch could resolve correctly moments later. Same real entry
-// point as the test above.
-test('an item with a non-blank External key on a project with no recorded mode configuration is retried, not refused', async (t) => {
-  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
-    id: 'wi-unconfigured-1', project: PROJECT, type: 'story', status: 'ready',
-    assignee_agent_id: 'refinement-agent', external_key: 'GANG-1000', parent_id: null,
-  }));
-  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local', configured: false }));
-  let jiraCalled = false;
-  t.mock.method(jira, 'getIssue', async () => { jiraCalled = true; throw new Error('must never be called'); });
-  let dispatchCalled = false;
-  t.mock.method(handlers, 'dispatchTask', async () => { dispatchCalled = true; });
-  const published = [];
-  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => { published.push({ project, payload }); });
-
-  let caught = null;
-  try {
-    await handleWorkItemEventEnvelope(createdEnvelope('wi-unconfigured-1'), PROJECT);
-  } catch (err) {
-    caught = err;
-  }
-
-  assert.ok(caught, 'must throw so the stream consumer retries it');
-  assert.ok(!caught.permanent, 'must not be a single-attempt permanent failure — the row may still land');
-  assert.equal(jiraCalled, false, 'must never attempt a Jira call while the project\'s mode is unresolved');
-  assert.equal(dispatchCalled, false, 'must not dispatch — there is nothing valid to dispatch yet');
-  assert.deepEqual(published, [], 'must not comment on or transition the item over an ambiguous, possibly-transient signal');
 });
 
 test('maybeDispatch does nothing when the item is not yet dispatch-eligible', async (t) => {

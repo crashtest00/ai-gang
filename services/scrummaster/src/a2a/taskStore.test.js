@@ -281,6 +281,32 @@ test('applying a transition to an unknown task fails explicitly', () => {
   assert.throws(() => taskStore.applyTransition('task-unknown', { state: 'working' }), taskStore.A2ATaskNotFoundError);
 });
 
+// recordDeadLetteredMessageFailure
+
+test('recordDeadLetteredMessageFailure overwrites an outcome that was already recorded', () => {
+  const { task, taskId, contextId, messageId: seedMessageId } = freshTask();
+  taskStore.register(task);
+
+  const agentMessage = buildMessage({
+    messageId: newMessageId(), taskId, contextId, role: 'agent',
+    parts: [buildTextPart('already applied')], referenceMessageId: seedMessageId,
+  });
+  taskStore.applyTransition(taskId, { state: 'working', message: agentMessage });
+  assert.deepEqual(taskStore.failedMessageIds(taskId), [], 'the outcome starts pending, not failed');
+
+  const result = taskStore.recordDeadLetteredMessageFailure(taskId, agentMessage.messageId);
+
+  assert.equal(result, 'updated', 'an entry already existed for this message');
+  assert.deepEqual(taskStore.failedMessageIds(taskId), [agentMessage.messageId]);
+});
+
+test('recordDeadLetteredMessageFailure on an unknown task has nothing to record against', () => {
+  const result = taskStore.recordDeadLetteredMessageFailure('task-unknown', 'msg-unknown');
+
+  assert.equal(result, 'unknown-task');
+  assert.deepEqual(taskStore.failedMessageIds('task-unknown'), []);
+});
+
 // contextId grouping
 
 test('a subtask shares its parent story\'s contextId', () => {
