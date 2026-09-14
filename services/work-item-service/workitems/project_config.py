@@ -21,10 +21,19 @@ JIRA = ProjectConfig.JIRA
 
 
 def get_mode(project: str) -> dict:
+    """`mode` stays LOCAL by definition when no row exists (see the module
+    docstring) — every other caller in this codebase treats that as an
+    ordinary, fully-decided local-mode project, and this must keep doing
+    the same. `configured` is additive: it tells a caller that specifically
+    needs to tell "no row yet" apart from "a row explicitly set to local"
+    (a Jira-mode project whose row hasn't been written yet reads
+    identically to a genuinely local one otherwise) whether a row exists at
+    all, without changing what `mode` itself means for anyone who doesn't
+    look at it."""
     row = ProjectConfig.objects.filter(project=project).first()
     if row is None:
-        return {'project': project, 'mode': LOCAL, 'jiraProjectKey': None}
-    return {'project': project, 'mode': row.mode, 'jiraProjectKey': row.jira_project_key}
+        return {'project': project, 'mode': LOCAL, 'jiraProjectKey': None, 'configured': False}
+    return {'project': project, 'mode': row.mode, 'jiraProjectKey': row.jira_project_key, 'configured': True}
 
 
 def set_mode(project: str, mode: str, *, jira_project_key: Optional[str] = None) -> None:

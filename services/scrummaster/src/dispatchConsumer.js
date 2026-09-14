@@ -110,10 +110,27 @@ function issueLikeFromCanonical(full) {
 // Jira ticket to comment on) and refused permanently, so it dead-letters
 // once instead of burning its retry budget on something a retry can never
 // fix.
+//
+// `mode.configured` (project_config.get_mode's own return — see its
+// docstring) tells a project with no ProjectConfig row apart from one
+// explicitly set to local: the former still reads mode "local" (the
+// documented default for no row) but may only be Jira mode whose row
+// hasn't been written yet, e.g. a race with catchup.py's connect-Jira flow.
+// Refusing outright on that ambiguous signal would mutate the item
+// (comment + needs-clarification) for a condition that can still resolve
+// on its own. Only an explicit local-mode row is refused; an unconfigured
+// project is left to the ordinary transient-retry path instead, so it
+// either starts reading Jira mode once the row lands, or genuinely
+// exhausts its retries and dead-letters like any other transient failure.
 async function issueLikeFor(full) {
   if (full.external_key) {
     const mode = await canonicalWorkItems.getMode(full.project);
     if (mode.mode !== 'jira') {
+      if (!mode.configured) {
+        throw new Error(
+          `Work item ${full.id} has an External key ("${full.external_key}") but project "${full.project}" has no recorded mode configuration yet`
+        );
+      }
       await explainUnsupportedExternalKey(full);
       const err = new Error(
         `Work item ${full.id} has an External key ("${full.external_key}") but project "${full.project}" has no Jira integration configured`

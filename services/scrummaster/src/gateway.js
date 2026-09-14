@@ -35,11 +35,27 @@ const consumers = [];
 // happens to exit cleanly anyway is reported completed. This is the other
 // half of that guarantee: whatever the gateway stream ever dead-letters is
 // also reflected onto the Task it belonged to.
+//
+// A submission can dead-letter before it was ever recorded on the Task at
+// all, though: a Redis lookup findAcceptedPredecessor depends on erroring,
+// or the submission's own referenceMessageId turning out unresolvable, both
+// throw ahead of applyTransition ever running. recordDeadLetteredMessageFailure
+// writes the failure regardless of whether an entry already existed, so a
+// successor that names this messageId as its own referenceMessageId is
+// still rejected outright by taskStore's lineage check instead of reading it
+// as merely unresolved (accepted-but-not-yet-applied) and deferring forever.
 function markDeadLetteredSubmissionFailed(envelope) {
   const taskId = envelope && envelope.taskId;
   const messageId = envelope && envelope.payload && envelope.payload.message && envelope.payload.message.messageId;
-  if (taskId && messageId) {
-    taskStore.markMessageFailed(taskId, messageId);
+  if (!taskId || !messageId) return;
+  const result = taskStore.recordDeadLetteredMessageFailure(taskId, messageId);
+  if (result === 'unknown-task') {
+    console.warn(`[gateway] Dead-lettered message ${messageId} names unknown task ${taskId} — nothing to record`);
+  } else if (result === 'recorded') {
+    console.error(
+      `[gateway] Dead-lettered message ${messageId} for task ${taskId} was never recorded on the Task — ` +
+      `recording its failure directly so a successor referencing it as its own predecessor is not deferred forever`
+    );
   }
 }
 

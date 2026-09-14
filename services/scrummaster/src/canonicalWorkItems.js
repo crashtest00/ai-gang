@@ -36,7 +36,7 @@ function commandStreamName(project) {
 // Direct read. `client` is axios by default, injectable for testing.
 async function getMode(project, { client = axios } = {}) {
   const { data } = await client.get(`${baseUrl()}/projects/${encodeURIComponent(project)}/mode`);
-  return data; // { project, mode, jiraProjectKey }
+  return data; // { project, mode, jiraProjectKey, configured }
 }
 
 async function getWorkItem(id, { client = axios, full = false } = {}) {
