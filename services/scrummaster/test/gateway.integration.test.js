@@ -154,6 +154,15 @@ async function waitForXLen(stream, expected, timeoutMs = 3000) {
   throw new Error(`timed out waiting for ${stream} to reach length ${expected}`);
 }
 
+async function waitForFailedMessage(taskId, timeoutMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (taskStore.failedMessageIds(taskId).length > 0) return;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for a failed message on task ${taskId}`);
+}
+
 test('create_subtask creates the subtask once and dispatches exactly one task, even when redelivered', async () => {
   const lastMessageId = registerTask('HW-1', { agentId: 'refinement-agent' });
 
@@ -412,4 +421,51 @@ test('a materializeDecomposition operation for a local-mode project publishes to
     canonicalWorkItems.publishCommand = originalPublishCommand;
     jira.createSubtaskForProposal = originalCreateSubtask;
   }
+});
+
+// Regression test for a gap a 2026-09-14 doc-vs-code audit found: a
+// submission whose gateway-side effect kept throwing a transient error was,
+// once streams.js's own retry budget ran out, dead-lettered same as any
+// other exhausted entry — but nothing told the A2A Task store that message
+// had failed, so the Task kept reading as if it were still pending. A
+// container that happened to exit cleanly regardless (it cannot see a
+// gateway-side rejection at all) would then have its Task read completed,
+// and any successor message waiting on this one as its referenceMessageId
+// would defer forever (taskStore.js's A2ACausalDependencyPendingError /
+// streams.js's retryWithoutAttempt), never itself timing out. This drives
+// the actual gateway stream consumer (gateway._gatewayConsumerOptions, the
+// same handler/onDeadLetter wiring startGatewaySubscriber uses in
+// production) through real retry exhaustion, with only the retry timing
+// sped up.
+test('a submission that exhausts its transient retries is recorded failed on its Task, not left reading as pending forever', async () => {
+  const lastMessageId = registerTask('HW-1');
+
+  const submission = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: lastMessageId, state: 'working',
+    parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })],
+  }));
+
+  const originalPostComment = jira.postComment;
+  jira.postComment = async () => { throw new Error('transient jira outage'); };
+
+  const consumer = streams.createConsumer(client, {
+    stream: gatewayStream(),
+    group: 'row149-retry-exhaustion-test',
+    consumerName: 'c1',
+    ...gateway._gatewayConsumerOptions('hello-world'),
+    blockMs: 100,
+    retryDelayMs: 50,
+    reclaimIntervalMs: 30,
+    maxAttempts: 2,
+  });
+  await consumer.start();
+  try {
+    await waitForXLen(streams.deadLetterStreamName(gatewayStream()), 1, 5000);
+    await waitForFailedMessage('HW-1', 2000);
+  } finally {
+    await consumer.stop();
+    jira.postComment = originalPostComment;
+  }
+
+  assert.deepEqual(taskStore.failedMessageIds('HW-1'), [submission.payload.message.messageId]);
 });

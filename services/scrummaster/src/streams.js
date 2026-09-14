@@ -238,6 +238,17 @@ function classifyHealth(h, { pendingAgeThresholdMs = 10 * 60 * 1000, deadLetterT
 // `.permanent = true` sends the entry straight to the dead-letter stream
 // without consuming a retry attempt slot; any other throw is treated as a
 // transient failure and left pending for reclaim/retry up to maxAttempts.
+//
+// `onDeadLetter(envelope, reason, attempts)` (optional) runs, best-effort,
+// whenever an entry with a real (parsed) envelope is dead-lettered — both an
+// immediate `.permanent` rejection and ordinary retry exhaustion. This stream
+// is transport-only and has no notion of what a caller's envelope means, so
+// it cannot itself update any domain-level record of the outcome; a caller
+// that keeps its own bookkeeping about a message's fate (e.g. gateway.js's
+// A2A Task store, which a container's later status report is compared
+// against) hooks in here rather than duplicating retry/exhaustion logic at
+// the call site. A hook failure is logged, never allowed to re-fail the
+// entry or block the consumer loop.
 function createConsumer(client, {
   stream,
   group,
@@ -249,6 +260,7 @@ function createConsumer(client, {
   blockMs = DEFAULTS.blockMs,
   reclaimIntervalMs = DEFAULTS.reclaimIntervalMs,
   batchSize = DEFAULTS.batchSize,
+  onDeadLetter,
 }) {
   let running = false;
   let loopPromise = null;
@@ -268,6 +280,15 @@ function createConsumer(client, {
 
   async function bumpAttempts(entryId) {
     return client.hIncrBy(attemptsKey(stream, group), entryId, 1);
+  }
+
+  async function fireOnDeadLetter(envelope, reason, attemptNumber) {
+    if (!onDeadLetter) return;
+    try {
+      await onDeadLetter(envelope, reason, attemptNumber);
+    } catch (hookErr) {
+      console.error(`[streams] ${stream}/${group} onDeadLetter hook failed for a dead-lettered entry:`, hookErr.message);
+    }
   }
 
   async function processEntry(entryId, fields) {
@@ -295,11 +316,13 @@ function createConsumer(client, {
       if (err && err.permanent) {
         console.error(`[streams] ${stream}/${group} entry ${entryId} permanently failed (attempt ${attemptNumber}):`, err.message);
         await deadLetter(client, stream, group, entryId, envelope, err.message, attemptNumber);
+        await fireOnDeadLetter(envelope, err.message, attemptNumber);
         return;
       }
       if (attemptNumber >= maxAttempts) {
         console.error(`[streams] ${stream}/${group} entry ${entryId} exhausted ${attemptNumber} attempts, dead-lettering:`, err?.message);
         await deadLetter(client, stream, group, entryId, envelope, `retry exhausted: ${err?.message}`, attemptNumber);
+        await fireOnDeadLetter(envelope, `retry exhausted: ${err?.message}`, attemptNumber);
         return;
       }
       // Leave pending. It becomes reclaimable once its idle time exceeds

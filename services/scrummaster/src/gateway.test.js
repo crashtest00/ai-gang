@@ -12,6 +12,7 @@ const redis = require('./redis');
 const streams = require('./streams');
 const idempotency = require('./idempotency');
 const canonicalWorkItems = require('./canonicalWorkItems');
+const handlers = require('./handlers');
 const taskStore = require('./a2a/taskStore');
 const { newMessageId, newArtifactId } = require('./a2a/ids');
 const { buildTextPart, buildDataPart, buildMessage, buildTask, buildArtifact } = require('./a2a/parts');
@@ -280,6 +281,32 @@ test('reassign to an unknown agent reports a visible assignment failure instead 
   assert.equal(setAgentFieldCalled, false);
   assert.deepEqual(blocked, { k: ISSUE_KEY, v: true });
   assert.match(posted, /catalog validation/);
+});
+
+test('reassign with no agentFieldValue comments the rejection on the ticket instead of dropping silently', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask();
+  let setAgentFieldCalled = false;
+  const posted = [];
+  t.mock.method(jira, 'setAgentField', async () => { setAgentFieldCalled = true; });
+  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [buildTextPart('handing off'), buildDataPart({ operation: 'reassign' })],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.equal(setAgentFieldCalled, false);
+  assert.equal(posted.length, 1, 'the ticket must carry a visible record of the rejection');
+  assert.equal(posted[0].key, ISSUE_KEY);
+  assert.match(posted[0].body, /agentFieldValue/);
+  assert.match(posted[0].body, /backend-agent/, 'the permitted agent ids are named for recovery');
+  assert.doesNotMatch(posted[0].body, /resend the create_subtask operation/);
+  assert.equal(taskStore.failedMessageIds(ISSUE_KEY).length, 1, 'the Task must carry the failure so it cannot log completed');
 });
 
 test('create_subtask creates a Jira subtask and dispatches a new Task to it', async (t) => {
@@ -660,6 +687,55 @@ test('a task with no failed submission is still reported completed', async (t) =
 
   assert.deepEqual(result, { taskId: ISSUE_KEY, status: 'completed' });
   assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'completed');
+});
+
+// A rejection the requesting agent cannot see or usefully resend leaves the
+// ticket recoverable only through a fresh dispatch (handlers.dispatchTask's
+// controlled-reopen path) — that redispatch must supersede the stale
+// failure, not leave the Task reading failed forever once it genuinely
+// succeeds.
+test('a redispatch supersedes an earlier rejection so the task can complete cleanly afterward', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+  t.mock.method(jira, 'postComment', async () => {});
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(streams, 'publish', async () => ({ deduped: false, entryId: '0-1' }));
+
+  const rejected = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [
+      buildTextPart('Creating subtask'),
+      buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
+    ],
+  });
+  await handleA2ASubmission(rejected, PROJECT_NAME);
+  assert.deepEqual(taskStore.failedMessageIds(ISSUE_KEY), [rejected.payload.message.messageId]);
+
+  // The same reopen mechanism a pipeline-retry/rework/unblock redispatch
+  // uses (handlers.dispatchTask), driven through its real entry point.
+  await handlers.dispatchTask(
+    { key: ISSUE_KEY, project: 'GANG', projectName: PROJECT_NAME },
+    { id: 'refinement-agent', routing: { channelSuffix: 'refinement' } },
+    { dispatchId: 'retry-1', promptFactory: () => 'retry prompt' }
+  );
+  assert.deepEqual(taskStore.failedMessageIds(ISSUE_KEY), [], 'the redispatch must supersede the earlier rejection');
+
+  const newSeed = taskStore.lastMessage(ISSUE_KEY).messageId;
+  const completion = envelope({
+    contextId, referenceMessageId: newSeed, state: 'completed',
+    parts: [buildTextPart('Created the subtask this time')],
+  });
+  await handleA2ASubmission(completion, PROJECT_NAME);
+
+  const result = await handleTaskStatus({
+    kind: 'task_status',
+    messageId: newMessageId(),
+    taskId: ISSUE_KEY,
+    contextId,
+    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+  }, PROJECT_NAME);
+
+  assert.deepEqual(result, { taskId: ISSUE_KEY, status: 'completed' }, 'a superseding success must not still read failed');
 });
 
 test('create_subtask rejection names every missing required field and blocks causal completion', async (t) => {
