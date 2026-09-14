@@ -198,6 +198,29 @@ function applyTransition(taskId, {
   }
 
   const controlledReopen = reopen && state === 'working' && message?.role === 'client';
+
+  // A controlled reopen is a fresh continuation: a human or canonical event
+  // (pipeline retry, human rework, unblock) deliberately redispatching this
+  // Task past whatever happened on its earlier attempt. A message already
+  // recorded failed (markMessageFailed) belongs to that earlier attempt —
+  // the agent that sent it cannot see the rejection comment it produced, and
+  // a literal resend referencing it would itself be refused by the lineage
+  // check below, so the only real recovery *is* a reopen. Carrying the old
+  // failure forward past that point would leave the Task reading failed
+  // (gateway.js's handleTaskStatus) forever, even once the redispatched
+  // attempt genuinely succeeds — so a genuine reopen clears it. Guarded on
+  // `!existingMessage` so a redelivery of the same reopen message (already
+  // applied) doesn't re-run this against bookkeeping a later, unrelated
+  // failure may since have added.
+  if (controlledReopen && !existingMessage) {
+    const outcomes = messageOutcomesByTask.get(taskId);
+    if (outcomes) {
+      for (const [msgId, outcome] of outcomes) {
+        if (outcome === 'failed') outcomes.delete(msgId);
+      }
+    }
+  }
+
   const pendingRetry = existingMessage && existingOutcome === 'pending' && record.state === state;
   if (schema.TERMINAL_STATES.includes(record.state) && !controlledReopen && !pendingRetry) {
     throw new A2ATerminalTaskError(

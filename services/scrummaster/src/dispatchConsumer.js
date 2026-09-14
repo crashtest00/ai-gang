@@ -97,11 +97,55 @@ function issueLikeFromCanonical(full) {
 // Jira-only field (summary/description text formatting, live comment
 // authorship) into canonical events. Local mode: no Jira issue exists at
 // all, so the canonical record IS the full record.
+//
+// `external_key` only means something when this project actually has a live
+// Jira integration to resolve it against — a local-mode project's supported
+// path is the one the UserGuide documents, leaving it blank. A work item
+// that carries one anyway (typed in believing it was optional metadata, say)
+// would otherwise reach jira.getIssue() below and get a 404 that reads as a
+// transient failure — retried to exhaustion with no subtask, no agent
+// dispatch, and no pull request, and nothing telling the operator why.
+// Caught here, before ever calling Jira: explained on the item itself (the
+// only place an operator watching Django admin will see it — there is no
+// Jira ticket to comment on) and refused permanently, so it dead-letters
+// once instead of burning its retry budget on something a retry can never
+// fix.
 async function issueLikeFor(full) {
   if (full.external_key) {
+    const mode = await canonicalWorkItems.getMode(full.project);
+    if (mode.mode !== 'jira') {
+      await explainUnsupportedExternalKey(full);
+      const err = new Error(
+        `Work item ${full.id} has an External key ("${full.external_key}") but project "${full.project}" has no Jira integration configured`
+      );
+      err.permanent = true;
+      throw err;
+    }
     return jira.getIssue(full.external_key);
   }
   return issueLikeFromCanonical(full);
+}
+
+async function explainUnsupportedExternalKey(full) {
+  const body =
+    `[system] Cannot dispatch this item — it has an External key ("${full.external_key}") set, but this ` +
+    `project has no Jira integration configured. External key must stay blank until one is set up; clear ` +
+    `it and save to retry.`;
+
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'appendComment',
+    actor: 'system',
+    workItemId: full.id,
+    author: 'system',
+    body,
+    referenceFile: null,
+    referenceFunction: null,
+    sourceMessageId: null,
+  });
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'transitionStatus', actor: 'system', workItemId: full.id, status: 'needs-clarification',
+  });
+  console.error(`[dispatch] Work item ${full.id} has an unsupported External key ("${full.external_key}") for a local-mode project — refusing dispatch`);
 }
 
 async function maybeDispatch(workItemId, envelope) {

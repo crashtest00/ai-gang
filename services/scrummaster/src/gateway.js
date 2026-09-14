@@ -21,6 +21,40 @@ const { redispatchImplementationOwner, dispatchTask, reportAssignmentFailure: re
 // to, never from message content.
 const consumers = [];
 
+// A container's subscriber can only report whether the agent process exited
+// cleanly — it has no way to know that the gateway side effect one of its
+// submissions asked for was itself rejected or never landed. handleTaskStatus
+// covers the case where that rejection happened synchronously, within the
+// same delivery, by marking the message failed before returning (see its own
+// comment). It has no way to cover a submission whose gateway-side handling
+// merely errored transiently and was later dead-lettered after exhausting
+// retries on a wholly separate delivery — nothing calls markMessageFailed for
+// that path otherwise, so the Task keeps reading as if the submission were
+// still pending, its successor stays deferred forever (taskStore's
+// requireSuccessfulReference/retryWithoutAttempt), and a container that
+// happens to exit cleanly anyway is reported completed. This is the other
+// half of that guarantee: whatever the gateway stream ever dead-letters is
+// also reflected onto the Task it belonged to.
+function markDeadLetteredSubmissionFailed(envelope) {
+  const taskId = envelope && envelope.taskId;
+  const messageId = envelope && envelope.payload && envelope.payload.message && envelope.payload.message.messageId;
+  if (taskId && messageId) {
+    taskStore.markMessageFailed(taskId, messageId);
+  }
+}
+
+// The exact handler/onDeadLetter wiring one project's gateway stream
+// consumer uses — factored out so a test can drive it through
+// streams.createConsumer with its own (fast) retry timing instead of
+// production's, while still exercising the real wiring rather than a
+// reimplementation of it.
+function gatewayConsumerOptions(projectName) {
+  return {
+    handler: envelope => handleGatewayEnvelope(envelope, projectName),
+    onDeadLetter: markDeadLetteredSubmissionFailed,
+  };
+}
+
 async function startGatewaySubscriber() {
   const client = redis.getClient();
   const consumerName = process.env.SCRUMMASTER_CONSUMER_ID || require('os').hostname();
@@ -31,7 +65,7 @@ async function startGatewaySubscriber() {
       stream,
       group: registry.GATEWAY_GROUP,
       consumerName,
-      handler: envelope => handleGatewayEnvelope(envelope, projectName),
+      ...gatewayConsumerOptions(projectName),
     });
     await consumer.start();
     consumers.push(consumer);
@@ -559,35 +593,55 @@ async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
   console.error(`[gateway] ${ticketKey} assignment rejected — requested "${requestedAgent}" (${result.code})`);
 }
 
-// Report a create_subtask request that cannot be acted on, mode-aware. A
-// dropped request used to leave the parent work item with no subtask, no
-// comment and no status change — nothing a human or the requesting agent
-// could see — so the parent always gets a comment naming the missing field
-// and the summary that was requested. The parent's own status is left alone:
-// the requesting agent's Task carries the failure (see handleTaskStatus),
-// and its subsequent submissions are already refused by lineage validation.
+// Report an operation request that cannot be acted on because required data
+// was missing, mode-aware. A dropped request used to leave the parent work
+// item with no subtask/no reassignment, no comment, and no status change —
+// nothing a human or the requesting agent could see — so the parent always
+// gets a comment naming the missing field(s), with `detailLines` supplying
+// whatever operation-specific context helps recovery (e.g. create_subtask's
+// requested summary, or the project's permitted agent ids).
+//
+// This is not recoverable by the requesting agent resending, so the comment
+// is written for a human, not the agent: a running agent never reads
+// comments, and even one that somehow did could not usefully act on this —
+// a resend that references the rejected message is refused by the same
+// lineage check that makes markMessageFailed's failure durable (see
+// taskStore.js's checkMessageLineage), and the parent's status is
+// deliberately left alone here (the requesting agent's own Task already
+// carries the failure — see handleTaskStatus). The one real recovery is a
+// fresh dispatch of this ticket, which taskStore.js's controlled-reopen path
+// now also clears the stale failure for.
+async function reportMissingFields(ticketKey, operation, missingFields, detailLines, ctx) {
+  const comment =
+    `[system] Cannot ${operation} — the request is missing ${missingFields.join(' and ')}.\n\n` +
+    detailLines.map(line => `${line}\n`).join('') +
+    `\nThis cannot be fixed by resending: the agent that made this request cannot see this comment, ` +
+    `and a resend referencing the same rejected request would be refused for the same reason. A human ` +
+    `must correct the request or the project's configuration and trigger a fresh dispatch of this ticket.\n` +
+    `Ticket: ${ticketKey}`;
+
+  await postComment(ticketKey, ctx, 'system', comment, null);
+  console.error(`[gateway] ${operation} rejected on ${ticketKey} — missing ${missingFields.join(', ')}`);
+}
+
+// Report a create_subtask request that cannot be acted on — reportMissingFields
+// with the create_subtask-specific context (the requested summary, and, when
+// agentFieldValue is what's missing, the project's permitted agent ids).
 async function reportSubtaskRejection(parentTicketKey, summary, missingFields, ctx) {
   const project = registry.getProject(ctx.projectName);
   const permitted = project && project.agents.length > 0
     ? project.agents.join(', ')
     : '(none configured for this project)';
 
-  let comment =
-    `[system] Cannot create the requested subtask — the create_subtask request is missing ` +
-    `${missingFields.join(' and ')}.\n\n` +
-    `Requested summary: ${summary ? `"${summary}"` : '(none supplied)'}\n`;
+  const detailLines = [`Requested summary: ${summary ? `"${summary}"` : '(none supplied)'}`];
   if (missingFields.includes('agentFieldValue')) {
-    comment += `Permitted agents for this project: ${permitted}\n`;
+    detailLines.push(`Permitted agents for this project: ${permitted}`);
     if (summary) {
-      comment += `The summary's "<Role>: ..." prefix named no single one of them, so no agent could be derived from it.\n`;
+      detailLines.push(`The summary's "<Role>: ..." prefix named no single one of them, so no agent could be derived from it.`);
     }
   }
-  comment +=
-    `\nRecovery: resend the create_subtask operation with every required field set.\n` +
-    `Ticket: ${parentTicketKey}`;
 
-  await postComment(parentTicketKey, ctx, 'system', comment, null);
-  console.error(`[gateway] create_subtask rejected on ${parentTicketKey} — missing ${missingFields.join(', ')}`);
+  await reportMissingFields(parentTicketKey, 'create_subtask', missingFields, detailLines, ctx);
 }
 
 // Change a ticket's recorded implementation owner. Every path that creates
@@ -596,7 +650,11 @@ async function reportSubtaskRejection(parentTicketKey, summary, missingFields, c
 async function handleReassign(record, agentFieldValue, agentName, ctx) {
   const ticketKey = record.jiraIssueKey;
   if (!agentFieldValue) {
-    console.warn(`[gateway] reassign for ${ticketKey} missing agentFieldValue — dropping`);
+    const project = registry.getProject(ctx.projectName);
+    const permitted = project && project.agents.length > 0
+      ? project.agents.join(', ')
+      : '(none configured for this project)';
+    await reportMissingFields(ticketKey, 'reassign', ['agentFieldValue'], [`Permitted agents for this project: ${permitted}`], ctx);
     return false;
   }
 
@@ -737,4 +795,5 @@ module.exports = {
   _handleA2ASubmission: handleA2ASubmission,
   _handlePipelineRetry: handlePipelineRetry,
   _handleTaskStatus: handleTaskStatus,
+  _gatewayConsumerOptions: gatewayConsumerOptions,
 };
