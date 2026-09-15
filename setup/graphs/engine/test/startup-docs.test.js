@@ -233,10 +233,11 @@ test('the end-to-end leg uses the work-item type and status the service actually
   assert.match(admin, /WorkItemStoryDetailInline/);
   assert.match(leg.replace(/\s+/g, ' '), /three saves/);
 
-  // external_key routes dispatch through Jira, which this flow does not
-  // set up, so the leg has to say to leave it empty.
+  // An External key names a Jira issue: with no Jira integration configured
+  // the dispatch refuses the item rather than routing it through Jira, so
+  // the leg has to say to leave it empty.
   const dispatchSource = read(path.join(REPO_ROOT, 'services', 'scrummaster', 'src', 'dispatchConsumer.js'));
-  assert.match(dispatchSource, /if \(full\.external_key\) \{\n\s+return jira\.getIssue/);
+  assert.match(dispatchSource, /if \(full\.external_key\) \{[\s\S]{0,600}?mode\.mode !== 'jira'[\s\S]{0,600}?return jira\.getIssue\(full\.external_key\)/);
   assert.match(leg.replace(/\s+/g, ' '), /External key.{0,40}leave it empty/i);
 });
 
