@@ -43,10 +43,23 @@ const CONFIG = {
 // consumer group — and records every call. The consumer group appears
 // when, and only when, the consumers have been restarted: without that
 // restart the stand-in behaves exactly as the daemon did on the live run.
-function stubDocker(dir, { restartCreatesGroup = true } = {}) {
+//
+// The XINFO GROUPS listing is split across two writes with a real pause
+// between them when `groupsReplyPauseSeconds` is given, standing in for
+// redis-cli's own reply arriving in more than one read: the target group
+// is in the first write, everything after it (consumers, pending, and
+// more) in the second.
+function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds = 0 } = {}) {
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
   const stub = path.join(bin, 'docker');
+  const groupsReply = groupsReplyPauseSeconds > 0
+    ? [
+        '        printf "name\\nworkitemservice\\n"',
+        `        sleep ${groupsReplyPauseSeconds}`,
+        '        printf "consumers\\n1\\npending\\n0\\n"',
+      ].join('\n')
+    : '        printf "name\\nworkitemservice\\nconsumers\\n1\\npending\\n0\\n"';
   fs.writeFileSync(stub, [
     '#!/usr/bin/env bash',
     'printf "%s|%s\\n" "${PWD#$AIGANG_TEST_ROOT/}" "$*" >> "$AIGANG_TEST_ARGV"',
@@ -62,7 +75,7 @@ function stubDocker(dir, { restartCreatesGroup = true } = {}) {
     '  case "$*" in',
     '    *"XINFO GROUPS"*)',
     '      if [[ -f "$AIGANG_TEST_GROUP_FLAG" ]]; then',
-    '        printf "name\\nworkitemservice\\nconsumers\\n1\\npending\\n0\\n"',
+    groupsReply,
     '      fi',
     '      exit 0 ;;',
     '    *"redis-cli ping"*) printf "PONG\\n"; exit 0 ;;',
@@ -217,6 +230,26 @@ test('health confirms the work-item service is serving the configured project', 
     calls(env).some((c) => c.command.includes(`XINFO GROUPS ${COMMAND_STREAM}`)),
     'the health check must ask about the configured project, not only about the containers'
   );
+  const doc = record(env);
+  assert.equal(doc.services['workitem-consumers'], 'healthy');
+  assert.equal(doc.state, 'complete');
+});
+
+// redis-cli's real XINFO GROUPS reply arrives in more than one piece for
+// any group with company (consumers, pending, more groups): the target
+// group can be read before the rest of the reply has. A check that reads
+// only up to its own match and stops closes the pipe out from under
+// redis-cli — which then dies of SIGPIPE finishing a write nothing is
+// reading — and under `set -o pipefail` that failure, not the match,
+// is what the health check used to see.
+test('the health check still recognizes the group once found, even while more of the reply is still arriving', () => {
+  const root = makeRoot();
+  const env = environment(root, { groupsReplyPauseSeconds: 0.2 });
+  fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
+  completeStepsBefore('confirm-health', env);
+
+  const result = runStep('confirm-health.sh', env);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const doc = record(env);
   assert.equal(doc.services['workitem-consumers'], 'healthy');
   assert.equal(doc.state, 'complete');
