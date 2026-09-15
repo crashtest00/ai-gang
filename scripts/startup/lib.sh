@@ -215,10 +215,20 @@ workitem_command_stream() {
 # the group's presence is the one observable fact that says the project
 # is being served. Without it, every command written for that project
 # waits on the stream undelivered and nothing anywhere reports an error.
+#
+# `grep -x` here, not `grep -qx`: XINFO GROUPS lists the target group
+# alongside sibling fields (consumers, pending, and more, after it), so
+# a quiet grep that stops reading the moment it finds the group can still
+# be mid-pipe when redis-cli or the group's own writer is scheduled back
+# in to send the rest — closing its end of the pipe under it and handing
+# it SIGPIPE. Under `set -o pipefail` that turns a group that was found
+# into a wait failure: the pipeline reports the producer's 141, not
+# grep's own success. Reading to EOF, with output thrown away instead of
+# suppressed, removes the only thing pipefail had to complain about.
 workitem_commands_consumed() {
   local project="$1"
   docker exec ai-gang-redis redis-cli XINFO GROUPS "$(workitem_command_stream "$project")" 2>/dev/null \
-    | grep -qx "$WORKITEM_COMMAND_GROUP"
+    | grep -x "$WORKITEM_COMMAND_GROUP" >/dev/null
 }
 
 # Retries a condition until it holds, or gives up. The attempt count is
