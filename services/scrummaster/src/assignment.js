@@ -52,14 +52,21 @@ function validateAssignment(projectName, agentId) {
 // returns null, leaving the caller to report the request rather than guess.
 // This never falls back to a default agent: it only recovers an id the
 // request itself already implies.
+//
+// `excludeAgentId` is the agent that made the request. It is never a
+// derivation candidate: handing the subtask back to its own requester routes
+// the work straight back to the agent that asked for it to be done by
+// someone else. An explicit id is the requester's stated intent and is
+// validated like any other; this is inference, and inference must not
+// produce that loop on its own.
 // Returns the catalog entry, or null.
-function deriveAgentFromSummary(projectName, summary) {
+function deriveAgentFromSummary(projectName, summary, { excludeAgentId } = {}) {
   const role = summaryRolePrefix(summary);
   if (!role) return null;
 
   const matches = registry
     .getEffectiveAgents(projectName)
-    .filter(agent => roleAliases(agent).includes(role));
+    .filter(agent => agent.id !== excludeAgentId && roleAliases(agent).includes(role));
 
   return matches.length === 1 ? matches[0] : null;
 }

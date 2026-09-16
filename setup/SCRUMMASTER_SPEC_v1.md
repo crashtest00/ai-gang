@@ -406,8 +406,9 @@ what to do:
 | `working` | `reassign` (`data.agentFieldValue`) | Set Agent field (validated against the agent roster) |
 | `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue` — all required) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
 | `working` | *(none)* | Plain progress comment (the text Part is posted as-is) |
+| `working` | any other value | Refused: a comment naming the unsupported operation and the ones that are supported, and the ticket is left Blocked |
 | `input-required` / `auth-required` | *(none — state carries the meaning)* | Set Blocked field + comment |
-| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — ticket stays In Progress; Jenkins owns the In Review transition |
+| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — no transition is made here, and the log reports the status the ticket actually holds; Jenkins owns the In Review transition |
 | `completed` without an artifact | — | Post the closing comment, if any |
 | `failed` / `canceled` / `rejected` | — | Set Blocked field + comment identifying the terminal failure |
 
@@ -417,9 +418,18 @@ field is supported on any operation.
 A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
 ScrumMaster first tries to recover the id from the summary's own
 `<Role>: ...` prefix, and uses it only when that prefix names exactly one
-agent the project has — never a default. If it cannot, nothing is created and
+agent the project has, other than the agent that sent the request — never a
+default, and never the requester itself, which would route the subtask
+straight back to the agent that asked for it. If it cannot, nothing is created and
 the parent ticket receives a comment naming the missing field, the requested
-summary, and the project's permitted agent ids. Either way the outcome is
+summary, and the project's permitted agent ids.
+
+Every request ScrumMaster refuses to act on — a missing field, an agent that
+failed catalog validation, an operation it has no handler for — also leaves
+the ticket Blocked (canonically, `needs-clarification`). A refused request
+leaves the parent with no subtask and no reassignment, so it must not go on
+reading as ready to work on, and the refusal must not leave the ticket in a
+different state depending on which refusal it was. Either way the outcome is
 visible: a Task with a rejected submission is recorded and logged as failed,
 even when the agent's own container reports that it exited cleanly.
 

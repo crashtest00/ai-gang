@@ -52,10 +52,23 @@ function diffAgentFieldOptions(catalogIds, retiredIds, jiraOptions) {
   };
 }
 
-// Run one audit pass. Never throws for drift — only for a Jira API failure,
-// which the caller should log and treat as "audit did not complete" rather
-// than "no drift found".
+// An installation with no Jira connection has nothing to audit: the Agent
+// field this compares against only exists inside a Jira instance. Without
+// this check the audit calls the shipped template's placeholder host on
+// every boot and logs the resulting failure, which reads as a fault when it
+// is simply an installation that does not use Jira.
+function noJiraToAudit() {
+  if (jira.isConfigured()) return false;
+  console.log('[audit] No Jira connection is configured — skipping the Agent field drift check.');
+  return true;
+}
+
+// Run one audit pass. Returns null when there is no Jira to audit. Never
+// throws for drift — only for a Jira API failure, which the caller should
+// log and treat as "audit did not complete" rather than "no drift found".
 async function auditAgentFieldDrift() {
+  if (noJiraToAudit()) return null;
+
   const catalogIds = registry.getAllAgentIds();
   const retiredIds = registry.getRetiredAgentIds();
   const jiraOptions = await jira.getAgentFieldOptions();
@@ -87,8 +100,11 @@ async function auditAgentFieldDrift() {
 
 // Run the audit at startup and every intervalMs thereafter. Logs and
 // swallows Jira API failures so a transient Jira outage doesn't crash
-// ScrumMaster or block the next scheduled attempt.
+// ScrumMaster or block the next scheduled attempt. Returns null, with no
+// timer at all, when there is no Jira to audit.
 function scheduleAgentFieldAudit(intervalMs = 24 * 60 * 60 * 1000) {
+  if (noJiraToAudit()) return null;
+
   const run = () => {
     auditAgentFieldDrift().catch(err => {
       console.error('[audit] Agent field drift check failed:', err.message);

@@ -64,9 +64,9 @@ function buildTaskPrompt(issue, agent, context = {}) {
 
   if (context.allowedAgents && context.allowedAgents.length > 0) {
     lines.push(`## ALLOWED AGENTS`);
-    lines.push(`This project permits assigning subtasks only to the agent ids below. Any other value`);
-    lines.push(`will be rejected atomically by the decomposition tool along with the rest of your submission —`);
-    lines.push(`use exactly one of these ids in each subtask's "agent" field:`);
+    lines.push(`This project permits assigning subtasks only to the agent ids below. A request naming`);
+    lines.push(`any other value is refused and creates nothing — use exactly one of these ids, copied`);
+    lines.push(`exactly, as each subtask's "agentFieldValue":`);
     for (const a of context.allowedAgents) {
       lines.push(`- ${a.id}: ${a.agentCard.description}`);
     }

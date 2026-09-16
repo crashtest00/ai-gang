@@ -396,7 +396,7 @@ async function handleA2ASubmission(envelope, projectName) {
           outcome = { ticket_key: jiraIssueKey };
           break;
         default:
-          console.warn(`[gateway] Unknown operation "${operation}" for task ${taskId} — dropping`);
+          await reportUnsupportedOperation(jiraIssueKey, operation, ctx);
           outcome = null;
       }
     }
@@ -546,13 +546,33 @@ async function handleTerminalFailure(ticketKey, agentName, state, body, ctx) {
   console.log(`[gateway] Task ${state} on ${ticketKey}`);
 }
 
+// Read the work item's own persisted status, mode-aware. Only for reporting:
+// the gateway's in-memory Task state is not the work item's status, and
+// nothing in the completion path transitions it, so a log line that names a
+// status has to go and look rather than assert one. A failed read must
+// never turn a successful projection into a retry, so it degrades to "not
+// known" and says so.
+async function persistedStatus(ticketKey, ctx) {
+  try {
+    if (ctx.mode.mode === 'jira') {
+      const issue = await jira.getIssue(ticketKey);
+      return issue && issue.status ? issue.status : null;
+    }
+    const item = await canonicalWorkItems.getWorkItem(ticketKey);
+    return item && item.status ? item.status : null;
+  } catch (err) {
+    console.warn(`[gateway] Could not read the persisted status of ${ticketKey}: ${err.message}`);
+    return null;
+  }
+}
+
 // Handle a completed Task. A "pull-request" Artifact means the agent opened
 // a PR — post a comment only. Opening a PR must not move the ticket out of
-// "In Progress" or change its recorded implementation owner: Jenkins is the
-// sole owner of the "In Review" transition, firing only after tests pass,
-// merge, and beta deploy succeed — a Jira-mode
-// concern only (Release work items are carved out of this), so
-// local mode has no status transition to make here in either branch.
+// whatever status it is in, or change its recorded implementation owner:
+// Jenkins is the sole owner of the "In Review" transition, firing only after
+// tests pass, merge, and beta deploy succeed — a Jira-mode concern only
+// (Release work items are carved out of this), so local mode has no status
+// transition to make here in either branch.
 async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   const prArtifact = (artifacts || []).find(a => a.name === 'pull-request');
 
@@ -564,7 +584,11 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
     const comment = `[${agentName}] PR opened and ready for review: ${prUrl}${summaryPart ? `\n\n${summaryPart.text}` : ''}\n\nTicket: ${ticketKey}`;
     await postComment(ticketKey, ctx, agentName, comment, null);
 
-    console.log(`[gateway] PR opened for ${ticketKey} — comment posted, ticket remains In Progress`);
+    const status = await persistedStatus(ticketKey, ctx);
+    console.log(
+      `[gateway] PR opened for ${ticketKey} — comment posted, no transition made here; ` +
+      (status ? `${ticketKey} is "${status}"` : `${ticketKey}'s status could not be read`)
+    );
     return;
   }
 
@@ -572,6 +596,22 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
     await postComment(ticketKey, ctx, agentName, `[${agentName}] ${body}\nTicket: ${ticketKey}`, null);
   }
   console.log(`[gateway] Task completed for ${ticketKey}`);
+}
+
+// Move a work item into the state that means "a human has to look at this",
+// mode-aware. Jira mode represents it as the Blocked flag layered on top of
+// whatever status the ticket holds; the canonical vocabulary has no such
+// flag, so 'needs-clarification' carries the same meaning there. Every
+// request the gateway refuses to act on ends here, so that a refusal is one
+// visible state rather than a different one per refusal reason.
+async function flagForAttention(ticketKey, actor, ctx) {
+  if (ctx.mode.mode === 'jira') {
+    await jira.setBlockedField(ticketKey, true);
+    return;
+  }
+  await canonicalWorkItems.publishCommand(ctx.projectName, {
+    command: 'transitionStatus', actor, workItemId: ticketKey, status: 'needs-clarification',
+  });
 }
 
 // Report a rejected agent-field/agentFieldValue assignment back to the
@@ -602,9 +642,7 @@ async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
     `Recovery: retry with one of the permitted values above.\n` +
     `Ticket: ${ticketKey}`;
 
-  await canonicalWorkItems.publishCommand(ctx.projectName, {
-    command: 'transitionStatus', actor: 'system', workItemId: ticketKey, status: 'needs-clarification',
-  });
+  await flagForAttention(ticketKey, 'system', ctx);
   await postComment(ticketKey, ctx, 'system', comment, null);
   console.error(`[gateway] ${ticketKey} assignment rejected — requested "${requestedAgent}" (${result.code})`);
 }
@@ -622,11 +660,17 @@ async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
 // comments, and even one that somehow did could not usefully act on this —
 // a resend that references the rejected message is refused by the same
 // lineage check that makes markMessageFailed's failure durable (see
-// taskStore.js's checkMessageLineage), and the parent's status is
-// deliberately left alone here (the requesting agent's own Task already
-// carries the failure — see handleTaskStatus). The one real recovery is a
-// fresh dispatch of this ticket, which taskStore.js's controlled-reopen path
-// now also clears the stale failure for.
+// taskStore.js's checkMessageLineage). The one real recovery is a fresh
+// dispatch of this ticket, which taskStore.js's controlled-reopen path also
+// clears the stale failure for.
+//
+// The work item is moved to the same needs-a-human state a rejected
+// assignment moves it to (flagForAttention above). A dropped request leaves
+// the parent with no subtask and no reassignment, and the comment is a row
+// in a thread nobody is watching; without the state change the parent still
+// reads as ready to work on, which is the one thing it is not. Both
+// refusals are the same event — a request the gateway would not act on —
+// and they must not leave the work item in two different states.
 async function reportMissingFields(ticketKey, operation, missingFields, detailLines, ctx) {
   const comment =
     `[system] Cannot ${operation} — the request is missing ${missingFields.join(' and ')}.\n\n` +
@@ -636,8 +680,28 @@ async function reportMissingFields(ticketKey, operation, missingFields, detailLi
     `must correct the request or the project's configuration and trigger a fresh dispatch of this ticket.\n` +
     `Ticket: ${ticketKey}`;
 
+  await flagForAttention(ticketKey, 'system', ctx);
   await postComment(ticketKey, ctx, 'system', comment, null);
   console.error(`[gateway] ${operation} rejected on ${ticketKey} — missing ${missingFields.join(', ')}`);
+}
+
+// Report a request naming an operation this gateway has no handler for.
+// Such a request used to be logged and dropped, leaving the work item with
+// no record of it at all: the agent believed it had asked for something, the
+// gateway did nothing, and the only trace was a container log line. Reported
+// on the work item and flagged the same way every other refused request is.
+async function reportUnsupportedOperation(ticketKey, operation, ctx) {
+  const comment =
+    `[system] Cannot carry out the requested operation "${operation}" — this gateway has no handler for it.\n\n` +
+    `Supported operations are comment, reassign and create_subtask.\n\n` +
+    `This cannot be fixed by resending: the agent that made this request cannot see this comment, ` +
+    `and a resend referencing the same rejected request would be refused for the same reason. A human ` +
+    `must correct the request and trigger a fresh dispatch of this ticket.\n` +
+    `Ticket: ${ticketKey}`;
+
+  await flagForAttention(ticketKey, 'system', ctx);
+  await postComment(ticketKey, ctx, 'system', comment, null);
+  console.error(`[gateway] unsupported operation "${operation}" rejected on ${ticketKey}`);
 }
 
 // Report a create_subtask request that cannot be acted on — reportMissingFields
@@ -731,13 +795,17 @@ async function handleCreateSubtask(record, data, ctx) {
   }
 
   // An omitted agentFieldValue is recoverable when the summary's own
-  // `<Role>: ...` prefix names exactly one agent this project has — the id
-  // the request should have carried is then implied by the request itself,
-  // not guessed. Everything else is reported on the parent work item below,
+  // `<Role>: ...` prefix names exactly one agent this project has, other
+  // than the requester itself — the id the request should have carried is
+  // then implied by the request, not guessed, and cannot be the requester's
+  // own id, which would route the subtask straight back to the agent that
+  // asked for it. Everything else is reported on the parent work item below,
   // never dropped in silence.
   let agentFieldValue = data.agentFieldValue;
   if (!agentFieldValue && summary) {
-    const derived = assignment.deriveAgentFromSummary(ctx.projectName, summary);
+    const derived = assignment.deriveAgentFromSummary(ctx.projectName, summary, {
+      excludeAgentId: record.metadata.agentId,
+    });
     if (derived) {
       agentFieldValue = derived.id;
       console.log(`[gateway] create_subtask under ${parentTicketKey} omitted agentFieldValue — derived "${agentFieldValue}" from the summary's role prefix`);
