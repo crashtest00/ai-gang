@@ -771,13 +771,17 @@ async function handleCreateSubtask(record, data, ctx) {
   }
 
   // An omitted agentFieldValue is recoverable when the summary's own
-  // `<Role>: ...` prefix names exactly one agent this project has — the id
-  // the request should have carried is then implied by the request itself,
-  // not guessed. Everything else is reported on the parent work item below,
+  // `<Role>: ...` prefix names exactly one agent this project has, other
+  // than the requester itself — the id the request should have carried is
+  // then implied by the request, not guessed, and cannot be the requester's
+  // own id, which would route the subtask straight back to the agent that
+  // asked for it. Everything else is reported on the parent work item below,
   // never dropped in silence.
   let agentFieldValue = data.agentFieldValue;
   if (!agentFieldValue && summary) {
-    const derived = assignment.deriveAgentFromSummary(ctx.projectName, summary);
+    const derived = assignment.deriveAgentFromSummary(ctx.projectName, summary, {
+      excludeAgentId: record.metadata.agentId,
+    });
     if (derived) {
       agentFieldValue = derived.id;
       console.log(`[gateway] create_subtask under ${parentTicketKey} omitted agentFieldValue — derived "${agentFieldValue}" from the summary's role prefix`);

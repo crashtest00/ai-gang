@@ -418,7 +418,9 @@ field is supported on any operation.
 A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
 ScrumMaster first tries to recover the id from the summary's own
 `<Role>: ...` prefix, and uses it only when that prefix names exactly one
-agent the project has — never a default. If it cannot, nothing is created and
+agent the project has, other than the agent that sent the request — never a
+default, and never the requester itself, which would route the subtask
+straight back to the agent that asked for it. If it cannot, nothing is created and
 the parent ticket receives a comment naming the missing field, the requested
 summary, and the project's permitted agent ids.
 

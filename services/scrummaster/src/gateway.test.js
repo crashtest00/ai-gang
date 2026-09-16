@@ -9,6 +9,7 @@ process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json
 
 const jira = require('./jira');
 const redis = require('./redis');
+const registry = require('./registry');
 const streams = require('./streams');
 const idempotency = require('./idempotency');
 const canonicalWorkItems = require('./canonicalWorkItems');
@@ -544,6 +545,74 @@ test('create_subtask without agentFieldValue derives the agent from the summary 
   assert.equal(createdSubtask.summary, 'Backend: /health endpoint');
   assert.ok(published, 'the derived subtask is dispatched like any other');
   assert.equal(published.envelope.taskId, 'GANG-43');
+});
+
+// Derivation is a recovery, not a router: it may only recover an id the
+// request itself already implies. Two agents in the same project answering
+// to the same role prefix mean the request implies neither of them, and the
+// requesting agent is never a candidate for its own request.
+
+test('create_subtask does not derive an agent when two of the project\'s agents answer to the same role prefix', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const backend = registry.getAgent('backend-agent');
+  const twin = {
+    ...backend,
+    id: 'backend-platform-agent',
+    displayName: 'Backend Agent',
+    routing: { channelSuffix: 'backend-platform' },
+  };
+  t.mock.method(registry, 'getEffectiveAgents', () => [backend, twin]);
+
+  let createSubtaskCalled = false;
+  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
+  t.mock.method(jira, 'setBlockedField', async () => {});
+  const posted = [];
+  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Backend: implement endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null, 'an ambiguous prefix must not be resolved by picking one');
+  assert.equal(createSubtaskCalled, false);
+  assert.equal(posted.length, 1);
+  assert.match(posted[0].body, /agentFieldValue/);
+  assert.match(posted[0].body, /no single one of them/);
+});
+
+test('create_subtask does not derive the requesting agent back onto its own subtask', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+  let createSubtaskCalled = false;
+  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
+  t.mock.method(jira, 'setBlockedField', async () => {});
+  const posted = [];
+  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Refinement: break this down further', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null, 'the requester is not a derivation candidate for its own request');
+  assert.equal(createSubtaskCalled, false);
+  assert.equal(posted.length, 1, 'the parent ticket must carry a visible record of the rejection');
+  assert.match(posted[0].body, /agentFieldValue/);
 });
 
 test('create_subtask with no derivable agent comments the rejection on the parent and creates nothing', async (t) => {
@@ -1091,6 +1160,32 @@ test('local mode: create_subtask reuses the previously-minted id on a from-scrat
 
   assert.deepEqual(result, { subtaskId: 'already-minted-id' });
   assert.equal(calls.length, 0, 'materialize.py\'s own store-level idempotency already covers redelivery; no need to re-publish');
+});
+
+test('local mode: create_subtask without agentFieldValue derives the agent from the summary role prefix', async (t) => {
+  const calls = mockLocalMode(t);
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask: Backend: implement endpoint'),
+        buildDataPart({ operation: 'create_subtask', summary: 'Backend: implement endpoint', description: 'full desc' }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  const materialize = calls.find(c => c.payload.command === 'materializeDecomposition');
+  assert.ok(materialize, 'a derivable request must be materialized, not reported as rejected');
+  assert.equal(materialize.payload.message.subtasks[0].agent, 'backend-agent',
+    'the omitted agent id is derived from the "Backend:" prefix in the mode the local flow runs in');
+  assert.ok(!calls.some(c => c.payload.command === 'transitionStatus'), 'nothing was refused, so nothing is flagged');
 });
 
 test('local mode: create_subtask with an invalid agent reports a visible failure and publishes nothing', async (t) => {
