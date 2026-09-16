@@ -86,9 +86,10 @@ Task, so you do not repeat its key.
 
 A submission that omits `agentFieldValue` is not created as sent. ScrumMaster
 recovers the id from the summary's role prefix only when that prefix names
-exactly one agent this project has; otherwise it creates nothing and posts a
-comment on the parent ticket naming the missing field. Send the field every
-time rather than relying on that recovery.
+exactly one agent this project has; otherwise it creates nothing, posts a
+comment on the parent ticket naming the missing field, and leaves the parent
+Blocked for a human to look at. Send the field every time rather than relying
+on that recovery.
 
 ```bash
 cat > /tmp/msg.json << 'ENDJSON'

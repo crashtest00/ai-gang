@@ -287,8 +287,10 @@ test('reassign with no agentFieldValue comments the rejection on the ticket inst
   mockJiraMode(t);
   const { contextId, messageId } = registerTask();
   let setAgentFieldCalled = false;
+  let blocked = null;
   const posted = [];
   t.mock.method(jira, 'setAgentField', async () => { setAgentFieldCalled = true; });
+  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
   t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
 
   const outcome = await handleA2ASubmission(
@@ -301,6 +303,7 @@ test('reassign with no agentFieldValue comments the rejection on the ticket inst
 
   assert.equal(outcome, null);
   assert.equal(setAgentFieldCalled, false);
+  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true }, 'a dropped request must not leave the ticket reading as ready to work on');
   assert.equal(posted.length, 1, 'the ticket must carry a visible record of the rejection');
   assert.equal(posted[0].key, ISSUE_KEY);
   assert.match(posted[0].body, /agentFieldValue/);
@@ -547,7 +550,9 @@ test('create_subtask with no derivable agent comments the rejection on the paren
   mockJiraMode(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   let createSubtaskCalled = false;
+  let blocked = null;
   t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
+  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
   const posted = [];
   t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
 
@@ -564,6 +569,8 @@ test('create_subtask with no derivable agent comments the rejection on the paren
 
   assert.equal(outcome, null);
   assert.equal(createSubtaskCalled, false);
+  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true },
+    'a dropped subtask chain must leave the parent in the same state a rejected assignment does, not reading as ready');
   assert.equal(posted.length, 1, 'the parent ticket must carry a visible record of the rejection');
   assert.equal(posted[0].key, ISSUE_KEY);
   assert.match(posted[0].body, /agentFieldValue/);
@@ -591,6 +598,10 @@ test('local mode: create_subtask with no derivable agent appends the rejection c
   assert.ok(comment, 'the parent work item must carry a visible record of the rejection');
   assert.match(comment.payload.body, /agentFieldValue/);
   assert.match(comment.payload.body, /Add a \/health endpoint/);
+  const transition = calls.find(c => c.payload.command === 'transitionStatus');
+  assert.ok(transition, 'a dropped subtask chain must move the parent, not only comment on it');
+  assert.equal(transition.payload.status, 'needs-clarification',
+    'the same state the sibling assignment-failure path leaves it in');
 });
 
 test('a task whose submission was rejected is reported failed, not completed', async (t) => {
@@ -1100,6 +1111,55 @@ test('local mode: create_subtask with an invalid agent reports a visible failure
 
   assert.ok(!calls.some(c => c.payload.command === 'materializeDecomposition'));
   const transition = calls.find(c => c.payload.command === 'transitionStatus');
+  assert.equal(transition.payload.status, 'needs-clarification');
+});
+
+// A request naming an operation the gateway has no handler for used to be
+// logged and dropped: the agent believed it had asked for something, the
+// work item recorded nothing, and the only trace was a container log line.
+
+test('an operation the gateway cannot carry out is reported on the ticket, not only logged', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask();
+  const posted = [];
+  let blocked = null;
+  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
+  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [buildTextPart('promoting'), buildDataPart({ operation: 'promote_to_release' })],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.equal(posted.length, 1, 'the ticket must carry a visible record of the refused request');
+  assert.equal(posted[0].key, ISSUE_KEY);
+  assert.match(posted[0].body, /promote_to_release/, 'the comment names the operation that was refused');
+  assert.match(posted[0].body, /create_subtask/, 'and the operations that would have worked');
+  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true });
+  assert.equal(taskStore.failedMessageIds(ISSUE_KEY).length, 1, 'the Task must carry the failure so it cannot log completed');
+});
+
+test('local mode: an operation the gateway cannot carry out is appended and flagged on the work item', async (t) => {
+  const calls = mockLocalMode(t);
+  const { contextId, messageId } = registerTask();
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [buildTextPart('promoting'), buildDataPart({ operation: 'promote_to_release' })],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  const transition = calls.find(c => c.payload.command === 'transitionStatus');
+  assert.ok(comment, 'the work item must carry a visible record of the refused request');
+  assert.match(comment.payload.body, /promote_to_release/);
   assert.equal(transition.payload.status, 'needs-clarification');
 });
 
