@@ -601,3 +601,83 @@ test('a late duplicate entry for a terminal task is acknowledged once and does n
   assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
     'and nothing recorded against the Task that genuinely completed');
 });
+
+// A submission that arrives after its Task has already finished, carrying an
+// identity of its own rather than being a redelivery of one already applied
+// (the test above), used to be retried to exhaustion and dead-lettered —
+// "already terminal" carried no verdict at all, so streams.js treated it as a
+// transient failure. Worse, the dead letter recorded that message as failed
+// against the Task, and handleTaskStatus consults exactly that before
+// believing a container's report: one stray late message turned the
+// container's later, truthful "completed" into "failed", and a task that
+// genuinely finished lost its outcome. Driven through the real gateway stream
+// consumer wiring (gateway._gatewayConsumerOptions) with only the retry
+// timing sped up, so a retry or a dead letter shows up inside the test rather
+// than ten minutes later.
+test('a later message for a task that already finished is acknowledged and reported, and never costs that task its outcome', async () => {
+  const seedMessageId = registerTask('HW-1');
+  const group = 'terminal-task-resend-test';
+
+  const completion = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: seedMessageId, state: 'completed',
+    parts: [buildTextPart('Verified and done')],
+  }));
+
+  const consumer = streams.createConsumer(client, {
+    stream: gatewayStream(),
+    group,
+    consumerName: 'c1',
+    ...gateway._gatewayConsumerOptions('hello-world'),
+    blockMs: 100,
+    retryDelayMs: 50,
+    reclaimIntervalMs: 30,
+    maxAttempts: 2,
+  });
+  await consumer.start();
+  try {
+    await waitFor(() => taskStore.getTaskById('HW-1').state === 'completed', 'the Task to reach its terminal state');
+    await waitFor(
+      async () => (await client.xPending(gatewayStream(), group)).pending === 0,
+      'the completion to be acknowledged'
+    );
+
+    // A genuinely new message: its own messageId, so nothing upstream
+    // recognises it as something already applied.
+    const late = await publishGatewayOp(a2aPayload({
+      taskId: 'HW-1', contextId: 'HW-1', state: 'working',
+      parts: [buildTextPart('one more note'), buildDataPart({ operation: 'comment' })],
+    }));
+    assert.notEqual(late.payload.message.messageId, completion.payload.message.messageId,
+      'this must not be the same message as the completion — otherwise it is the duplicate case, not this one');
+
+    await waitFor(() => fakeJira.comments.length === 2, 'the late message to be reported on the work item');
+    // Several retry/reclaim cycles at this consumer's timings — long enough
+    // for a retry, a dead letter or a second report to have appeared.
+    await new Promise(r => setTimeout(r, 400));
+  } finally {
+    await consumer.stop();
+  }
+
+  assert.equal((await client.xPending(gatewayStream(), group)).pending, 0,
+    'the later message is acknowledged on its first delivery, not left pending to be retried');
+  assert.equal(await client.xLen(streams.deadLetterStreamName(gatewayStream())), 0,
+    'and never dead-lettered');
+  assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
+    'so nothing is recorded failed against a task that genuinely finished');
+
+  const reports = fakeJira.comments.filter(c => /already finished/.test(c.body));
+  assert.equal(reports.length, 1, 'exactly one comment, saying the work had already finished');
+  assert.equal(reports[0].key, 'HW-1');
+  assert.match(reports[0].body, /completed/, 'and naming the outcome it finished with');
+
+  // The whole point: the container's own later report for this task still
+  // reads as completed.
+  const statusReport = buildEnvelope({
+    kind: KIND.TASK_STATUS, project: 'hello-world', taskId: 'HW-1', contextId: 'HW-1',
+    payload: { status: 'completed', ticket_key: 'HW-1', agent_name: 'backend-agent' },
+  });
+  assert.deepEqual(
+    await gateway._handleTaskStatus(statusReport, 'hello-world'),
+    { taskId: 'HW-1', status: 'completed' }
+  );
+});

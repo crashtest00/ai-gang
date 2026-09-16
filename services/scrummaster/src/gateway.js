@@ -338,13 +338,22 @@ async function handleA2ASubmission(envelope, projectName) {
   }
 
   const acceptedMessageIds = await findAcceptedPredecessor(record, message, projectName);
-  taskStore.applyTransition(taskId, {
-    state: msg.state,
-    message,
-    artifacts: msg.artifacts,
-    acceptedMessageIds,
-    requireSuccessfulReference: true,
-  });
+  const stateBeforeApplying = record.state;
+  try {
+    taskStore.applyTransition(taskId, {
+      state: msg.state,
+      message,
+      artifacts: msg.artifacts,
+      acceptedMessageIds,
+      requireSuccessfulReference: true,
+    });
+  } catch (err) {
+    if (err instanceof taskStore.A2ATerminalTaskError) {
+      await reportTaskAlreadyFinished(record, stateBeforeApplying, projectName, envelope);
+      return { ticket_key: record.jiraIssueKey, alreadyFinished: stateBeforeApplying };
+    }
+    throw err;
+  }
 
   const jiraIssueKey = record.jiraIssueKey;
   if (!jiraIssueKey) {
@@ -408,6 +417,51 @@ async function handleA2ASubmission(envelope, projectName) {
   if (outcome === null) taskStore.markMessageFailed(taskId, message.messageId);
   else taskStore.markMessageSucceeded(taskId, message.messageId);
   return outcome;
+}
+
+// A genuinely new submission that arrives after its Task has already
+// finished. This is not a redelivery of something already applied — that is
+// recognised a layer up, by messageId, and costs nothing. This is a later
+// message with its own identity, and there is no longer anything to apply it
+// to.
+//
+// Retrying it cannot help: the Task's state will not become non-terminal on
+// its own, so every attempt fails identically until the entry is
+// dead-lettered — and dead-lettering it records that message as failed
+// against the Task (markDeadLetteredSubmissionFailed above), which then
+// turns the container's later, truthful "completed" report into "failed"
+// (handleTaskStatus consults failedMessageIds). One stray late message would
+// cost a Task that genuinely finished its own outcome.
+//
+// So the entry is acknowledged on its first delivery instead: no retries, no
+// dead letter, nothing recorded against the Task. What an operator needs —
+// that a further update arrived too late to be applied, and what the work had
+// already finished as — is written where they will see it, on the work item
+// itself. Nothing else about the item changes: its recorded outcome is
+// exactly what this is protecting.
+async function reportTaskAlreadyFinished(record, finishedState, projectName, envelope) {
+  const ticketKey = record.jiraIssueKey;
+  if (!ticketKey) {
+    console.warn(
+      `[gateway] Task ${record.id} is already ${finishedState} and a later message was acknowledged without ` +
+      `being applied, but the Task has no work item to report that on`
+    );
+    return;
+  }
+
+  const mode = await canonicalWorkItems.getMode(projectName);
+  const ctx = { projectName, mode, messageId: envelope.messageId };
+  const comment =
+    `[system] A further update arrived for this work item after its assigned work had already finished ` +
+    `(${finishedState}), so it was not applied and the recorded outcome stands.\n\n` +
+    `Restarting work on this item is a fresh dispatch of it, not a resend.\n` +
+    `Ticket: ${ticketKey}`;
+
+  await postComment(ticketKey, ctx, 'system', comment, null);
+  console.warn(
+    `[gateway] Task ${record.id} is already ${finishedState} — a later message was acknowledged without being ` +
+    `applied, and reported on ${ticketKey}`
+  );
 }
 
 // A reference absent from in-memory history may still be a valid predecessor
