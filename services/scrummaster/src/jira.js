@@ -11,6 +11,34 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+// The placeholder values services/scrummaster/.env.example ships with.
+// Platform startup copies that file verbatim into the derived
+// services/scrummaster/.env, so an installation that never connected Jira
+// still has these exact strings in its environment: present, but not a
+// configuration. Matching them literally keeps this a fact about the
+// shipped template rather than a guess about what an operator typed.
+const ENV_PLACEHOLDERS = new Set([
+  'https://your-org.atlassian.net',
+  'ai-gang-bot@your-domain.com',
+  'customfield_XXXXX',
+]);
+
+// The environment variables no Jira call can succeed without: the instance
+// to talk to, the account to talk as, its token, and the Agent field's own
+// id.
+const REQUIRED_ENV = ['JIRA_BASE_URL', 'JIRA_USER_EMAIL', 'JIRA_API_TOKEN', 'JIRA_AGENT_FIELD_ID'];
+
+// Whether this installation has a real Jira to talk to at all. Callers that
+// run on a timer rather than in response to a Jira-backed work item consult
+// this first: without it they call the shipped template's placeholder host
+// on every boot and log a failure that says nothing about the installation.
+function isConfigured() {
+  return REQUIRED_ENV.every(name => {
+    const value = (process.env[name] || '').trim();
+    return value !== '' && !ENV_PLACEHOLDERS.has(value);
+  });
+}
+
 // Extracts plain text from Atlassian Document Format (ADF)
 function adfToText(node) {
   if (!node) return '';
@@ -358,6 +386,7 @@ async function createSubtaskForProposal(parentKey, projectKey, { summary, descri
 }
 
 module.exports = {
+  isConfigured,
   getIssue,
   postComment,
   setAgentField,
