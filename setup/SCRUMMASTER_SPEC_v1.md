@@ -408,7 +408,7 @@ what to do:
 | `working` | *(none)* | Plain progress comment (the text Part is posted as-is) |
 | `working` | any other value | Refused: a comment naming the unsupported operation and the ones that are supported, and the ticket is left Blocked |
 | `input-required` / `auth-required` | *(none — state carries the meaning)* | Set Blocked field + comment |
-| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — ticket stays In Progress; Jenkins owns the In Review transition |
+| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — no transition is made here, and the log reports the status the ticket actually holds; Jenkins owns the In Review transition |
 | `completed` without an artifact | — | Post the closing comment, if any |
 | `failed` / `canceled` / `rejected` | — | Set Blocked field + comment identifying the terminal failure |
 

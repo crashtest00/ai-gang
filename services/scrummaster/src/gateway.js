@@ -546,13 +546,33 @@ async function handleTerminalFailure(ticketKey, agentName, state, body, ctx) {
   console.log(`[gateway] Task ${state} on ${ticketKey}`);
 }
 
+// Read the work item's own persisted status, mode-aware. Only for reporting:
+// the gateway's in-memory Task state is not the work item's status, and
+// nothing in the completion path transitions it, so a log line that names a
+// status has to go and look rather than assert one. A failed read must
+// never turn a successful projection into a retry, so it degrades to "not
+// known" and says so.
+async function persistedStatus(ticketKey, ctx) {
+  try {
+    if (ctx.mode.mode === 'jira') {
+      const issue = await jira.getIssue(ticketKey);
+      return issue && issue.status ? issue.status : null;
+    }
+    const item = await canonicalWorkItems.getWorkItem(ticketKey);
+    return item && item.status ? item.status : null;
+  } catch (err) {
+    console.warn(`[gateway] Could not read the persisted status of ${ticketKey}: ${err.message}`);
+    return null;
+  }
+}
+
 // Handle a completed Task. A "pull-request" Artifact means the agent opened
 // a PR — post a comment only. Opening a PR must not move the ticket out of
-// "In Progress" or change its recorded implementation owner: Jenkins is the
-// sole owner of the "In Review" transition, firing only after tests pass,
-// merge, and beta deploy succeed — a Jira-mode
-// concern only (Release work items are carved out of this), so
-// local mode has no status transition to make here in either branch.
+// whatever status it is in, or change its recorded implementation owner:
+// Jenkins is the sole owner of the "In Review" transition, firing only after
+// tests pass, merge, and beta deploy succeed — a Jira-mode concern only
+// (Release work items are carved out of this), so local mode has no status
+// transition to make here in either branch.
 async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   const prArtifact = (artifacts || []).find(a => a.name === 'pull-request');
 
@@ -564,7 +584,11 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
     const comment = `[${agentName}] PR opened and ready for review: ${prUrl}${summaryPart ? `\n\n${summaryPart.text}` : ''}\n\nTicket: ${ticketKey}`;
     await postComment(ticketKey, ctx, agentName, comment, null);
 
-    console.log(`[gateway] PR opened for ${ticketKey} — comment posted, ticket remains In Progress`);
+    const status = await persistedStatus(ticketKey, ctx);
+    console.log(
+      `[gateway] PR opened for ${ticketKey} — comment posted, no transition made here; ` +
+      (status ? `${ticketKey} is "${status}"` : `${ticketKey}'s status could not be read`)
+    );
     return;
   }
 

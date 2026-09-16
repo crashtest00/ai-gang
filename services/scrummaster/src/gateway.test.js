@@ -184,6 +184,7 @@ test('completed with a pull-request artifact posts only a comment — no transit
   t.mock.method(jira, 'postComment', async (k, b) => calls.push(['postComment', k, b]));
   t.mock.method(jira, 'transitionIssue', async (k, s) => calls.push(['transitionIssue', k, s]));
   t.mock.method(jira, 'setAgentField', async (k, v) => calls.push(['setAgentField', k, v]));
+  t.mock.method(jira, 'getIssue', async (key) => ({ key, status: 'In Progress' }));
 
   const artifact = buildArtifact({
     artifactId: newArtifactId(),
@@ -1050,6 +1051,10 @@ function mockLocalMode(t) {
   t.mock.method(jira, 'getIssue', async () => { throw new Error('must not call jira in local mode'); });
   t.mock.method(jira, 'createSubtask', async () => { throw new Error('must not call jira in local mode'); });
   t.mock.method(jira, 'transitionIssue', async () => { throw new Error('must not call jira in local mode'); });
+  // The gateway reports a work item's own persisted status rather than
+  // asserting one from its in-memory Task state — same HTTP boundary as
+  // getMode, stubbed the same way.
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
   return calls;
 }
 
@@ -1132,6 +1137,45 @@ test('local mode: completed with a pull-request artifact only appends a comment,
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.command, 'appendComment');
   assert.match(calls[0].payload.body, /github\.com\/org\/repo\/pull\/7/);
+});
+
+// The gateway's Task state is not the work item's status. Nothing in the
+// completion path transitions the item, and in the mode the local flow runs
+// in nothing earlier did either — so a log line naming a status has to read
+// the persisted one. It used to assert "In Progress" while the admin showed
+// the item untouched.
+
+test('local mode: the PR-opened log reports the work item\'s persisted status, not an assumed one', async (t) => {
+  const calls = mockLocalMode(t);
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
+  const { contextId, messageId } = registerTask();
+  const logs = [];
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+
+  const artifact = buildArtifact({
+    artifactId: newArtifactId(),
+    taskId: ISSUE_KEY,
+    name: 'pull-request',
+    parts: [
+      { kind: 'file', file: { name: 'pull-request', mimeType: 'text/uri-list', uri: 'https://github.com/org/repo/pull/7' } },
+      buildTextPart('Implements the endpoint'),
+    ],
+  });
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'completed',
+      parts: [buildTextPart('Verified and opened PR')],
+      artifacts: [artifact],
+    }),
+    PROJECT_NAME
+  );
+
+  const line = logs.find(l => l.includes('PR opened for'));
+  assert.ok(line, 'the PR-opened line must still be logged');
+  assert.match(line, /is "ready"/, 'it must name the status the work item actually holds');
+  assert.doesNotMatch(line, /In Progress/, 'and must not name a status nothing persisted');
+  assert.ok(!calls.some(c => c.payload.command === 'transitionStatus'), 'reporting the status must not change it');
 });
 
 test('local mode: reassign publishes an assign command for a catalog-valid agent', async (t) => {
