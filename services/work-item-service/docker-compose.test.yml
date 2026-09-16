@@ -10,6 +10,16 @@ services:
       - "15432:5432"
     tmpfs:
       - /var/lib/postgresql/data
+    # Without this, `docker compose up --wait` returns as soon as the
+    # container is running, which on a cold start is well before Postgres
+    # accepts connections — every test then errors on a refused connection.
+    # With it, --wait means what it says.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workitem -d workitem"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
 
   workitem-test-redis:
     image: redis:7-alpine
