@@ -188,13 +188,46 @@ async function maybeDispatch(workItemId, envelope) {
 
   await handlers.dispatchTask(issueLike, agent, { dispatchId: envelope.messageId, promptFactory });
 
-  // handleShovelReady's own post-dispatch side effect, preserved: mirror a
-  // dev-agent dispatch to Jira's "In Progress" status. Not applicable to a
-  // refinement-agent dispatch (handleStoryCreated never did this) or to a
-  // local-mode item (no Jira issue to transition).
-  if (!isRefinement && full.external_key) {
-    await jira.transitionIssue(full.external_key, 'In Progress');
+  // Post-dispatch, the work item must stop reading as merely waiting to be
+  // picked up: an agent now has it, and the only place an operator can see
+  // that is the item's own status.
+  //
+  // With a Jira integration, that is the linked issue's "In Progress"
+  // status, mirrored exactly as it always has been for a dev-agent dispatch
+  // — and, as before, not for a refinement dispatch, whose ticket a human
+  // moves on the Jira board. An external key can only be present at all
+  // when the project has a live Jira integration (issueLikeFor above
+  // refuses it otherwise), so it is the whole condition for that branch.
+  //
+  // Without a Jira integration there is no issue to mirror onto, and the
+  // canonical record is the only thing anyone can look at. So the item
+  // itself is moved to 'in-progress' — for every dispatch made here,
+  // refinement included: nothing else ever moves it off 'ready', and an
+  // item being decomposed is being worked just as much as one being
+  // implemented. Until this, an item could be dispatched, worked, and have
+  // a pull request opened on it while still displaying as ready to pick up.
+  //
+  // That transition echoes back as a status-changed event this same
+  // consumer reads. It costs nothing and repeats nothing: maybeDispatch's
+  // own `status !== 'ready'` guard above rejects the echo, and
+  // maybeRedispatchForRework acts only on an 'in-review' -> 'in-progress'
+  // history entry, which this is not.
+  if (full.external_key) {
+    if (!isRefinement) await jira.transitionIssue(full.external_key, 'In Progress');
+    return;
   }
+
+  // An item with no external key in a Jira-mode project has no issue to
+  // mirror onto AND no accepted direct-write path either — the internal API
+  // accepts a status write only from a validated Jira-originated event
+  // while a project is in Jira mode — so there is nothing this can do but
+  // leave it alone.
+  const mode = await canonicalWorkItems.getMode(full.project);
+  if (mode.mode === 'jira') return;
+
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'transitionStatus', actor: full.assignee_agent_id, workItemId: full.id, status: 'in-progress',
+  });
 }
 
 // handleReworkRequested's trigger: a human moved a ticket from "In Review"

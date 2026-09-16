@@ -381,14 +381,14 @@ test('a MaterializationValidationError from dependencies.js is dead-lettered, no
   }
 });
 
-// Regression test for the gap a 2026-09-07 doc-vs-code audit found:
-// mode-aware routing (dependencies.js's routeMaterialization) was built and
-// unit-tested in isolation, but gateway.js's dispatch path called
+// Regression test for a gap that a passing unit test hid: mode-aware routing
+// (dependencies.js's routeMaterialization) was built and covered in
+// isolation, but gateway.js's dispatch path called
 // dependencies.materializeDecomposition directly, bypassing it entirely — so
 // a local-mode project's decomposition silently kept going straight to Jira
-// in production despite the Implementation Status checklist reading as done.
-// This test exercises gateway.js's real, unmocked entry point end to end and
-// would have failed against that bug.
+// in production while everything written to cover it still passed. This test
+// exercises gateway.js's real, unmocked entry point end to end and would
+// have failed against that bug.
 test('a materializeDecomposition operation for a local-mode project publishes to the Internal Work-Item Service, not Jira', async () => {
   const originalGetMode = canonicalWorkItems.getMode;
   const originalPublishCommand = canonicalWorkItems.publishCommand;
@@ -432,20 +432,20 @@ test('a materializeDecomposition operation for a local-mode project publishes to
   }
 });
 
-// Regression test for a gap a 2026-09-14 doc-vs-code audit found: a
-// submission whose gateway-side effect kept throwing a transient error was,
-// once streams.js's own retry budget ran out, dead-lettered same as any
-// other exhausted entry — but nothing told the A2A Task store that message
-// had failed, so the Task kept reading as if it were still pending. A
-// container that happened to exit cleanly regardless (it cannot see a
-// gateway-side rejection at all) would then have its Task read completed,
-// and any successor message waiting on this one as its referenceMessageId
-// would defer forever (taskStore.js's A2ACausalDependencyPendingError /
-// streams.js's retryWithoutAttempt), never itself timing out. This drives
-// the actual gateway stream consumer (gateway._gatewayConsumerOptions, the
-// same handler/onDeadLetter wiring startGatewaySubscriber uses in
-// production) through real retry exhaustion, with only the retry timing
-// sped up.
+// Regression test for a gap between what dead-lettering did and what the
+// Task record was told about it: a submission whose gateway-side effect kept
+// throwing a transient error was, once streams.js's own retry budget ran
+// out, dead-lettered same as any other exhausted entry — but nothing told
+// the A2A Task store that message had failed, so the Task kept reading as if
+// it were still pending. A container that happened to exit cleanly
+// regardless (it cannot see a gateway-side rejection at all) would then have
+// its Task read completed, and any successor message waiting on this one as
+// its referenceMessageId would defer forever (taskStore.js's
+// A2ACausalDependencyPendingError / streams.js's retryWithoutAttempt), never
+// itself timing out. This drives the actual gateway stream consumer
+// (gateway._gatewayConsumerOptions, the same handler/onDeadLetter wiring
+// startGatewaySubscriber uses in production) through real retry exhaustion,
+// with only the retry timing sped up.
 test('a submission that exhausts its transient retries is recorded failed on its Task, not left reading as pending forever', async () => {
   const lastMessageId = registerTask('HW-1');
 
@@ -600,4 +600,84 @@ test('a late duplicate entry for a terminal task is acknowledged once and does n
     'both entries acknowledged');
   assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
     'and nothing recorded against the Task that genuinely completed');
+});
+
+// A submission that arrives after its Task has already finished, carrying an
+// identity of its own rather than being a redelivery of one already applied
+// (the test above), used to be retried to exhaustion and dead-lettered —
+// "already terminal" carried no verdict at all, so streams.js treated it as a
+// transient failure. Worse, the dead letter recorded that message as failed
+// against the Task, and handleTaskStatus consults exactly that before
+// believing a container's report: one stray late message turned the
+// container's later, truthful "completed" into "failed", and a task that
+// genuinely finished lost its outcome. Driven through the real gateway stream
+// consumer wiring (gateway._gatewayConsumerOptions) with only the retry
+// timing sped up, so a retry or a dead letter shows up inside the test rather
+// than ten minutes later.
+test('a later message for a task that already finished is acknowledged and reported, and never costs that task its outcome', async () => {
+  const seedMessageId = registerTask('HW-1');
+  const group = 'terminal-task-resend-test';
+
+  const completion = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: seedMessageId, state: 'completed',
+    parts: [buildTextPart('Verified and done')],
+  }));
+
+  const consumer = streams.createConsumer(client, {
+    stream: gatewayStream(),
+    group,
+    consumerName: 'c1',
+    ...gateway._gatewayConsumerOptions('hello-world'),
+    blockMs: 100,
+    retryDelayMs: 50,
+    reclaimIntervalMs: 30,
+    maxAttempts: 2,
+  });
+  await consumer.start();
+  try {
+    await waitFor(() => taskStore.getTaskById('HW-1').state === 'completed', 'the Task to reach its terminal state');
+    await waitFor(
+      async () => (await client.xPending(gatewayStream(), group)).pending === 0,
+      'the completion to be acknowledged'
+    );
+
+    // A genuinely new message: its own messageId, so nothing upstream
+    // recognises it as something already applied.
+    const late = await publishGatewayOp(a2aPayload({
+      taskId: 'HW-1', contextId: 'HW-1', state: 'working',
+      parts: [buildTextPart('one more note'), buildDataPart({ operation: 'comment' })],
+    }));
+    assert.notEqual(late.payload.message.messageId, completion.payload.message.messageId,
+      'this must not be the same message as the completion — otherwise it is the duplicate case, not this one');
+
+    await waitFor(() => fakeJira.comments.length === 2, 'the late message to be reported on the work item');
+    // Several retry/reclaim cycles at this consumer's timings — long enough
+    // for a retry, a dead letter or a second report to have appeared.
+    await new Promise(r => setTimeout(r, 400));
+  } finally {
+    await consumer.stop();
+  }
+
+  assert.equal((await client.xPending(gatewayStream(), group)).pending, 0,
+    'the later message is acknowledged on its first delivery, not left pending to be retried');
+  assert.equal(await client.xLen(streams.deadLetterStreamName(gatewayStream())), 0,
+    'and never dead-lettered');
+  assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
+    'so nothing is recorded failed against a task that genuinely finished');
+
+  const reports = fakeJira.comments.filter(c => /already finished/.test(c.body));
+  assert.equal(reports.length, 1, 'exactly one comment, saying the work had already finished');
+  assert.equal(reports[0].key, 'HW-1');
+  assert.match(reports[0].body, /completed/, 'and naming the outcome it finished with');
+
+  // The whole point: the container's own later report for this task still
+  // reads as completed.
+  const statusReport = buildEnvelope({
+    kind: KIND.TASK_STATUS, project: 'hello-world', taskId: 'HW-1', contextId: 'HW-1',
+    payload: { status: 'completed', ticket_key: 'HW-1', agent_name: 'backend-agent' },
+  });
+  assert.deepEqual(
+    await gateway._handleTaskStatus(statusReport, 'hello-world'),
+    { taskId: 'HW-1', status: 'completed' }
+  );
 });

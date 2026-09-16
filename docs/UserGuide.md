@@ -187,6 +187,14 @@ breaks it into subtasks for the agents your project has; each of those
 runs in your project's container and opens a pull request on the
 repository you named.
 
+Nothing else is yours to do, and the work item list is where you watch it
+happen. Reload it and the story's **Status** has moved from `ready` to
+`in-progress` by itself — that is an agent having picked it up. Every work
+item does this, the subtasks the Refinement Agent creates included, so the
+list tells you at a glance which pieces are being worked on right now. A
+work item still sitting at `ready` has not been picked up; open it and
+read its comments, which is where anything that refused to run says why.
+
 ### Changing your mind later
 
 The configuration is recorded the first time it succeeds, in
