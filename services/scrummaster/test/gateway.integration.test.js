@@ -154,6 +154,15 @@ async function waitForXLen(stream, expected, timeoutMs = 3000) {
   throw new Error(`timed out waiting for ${stream} to reach length ${expected}`);
 }
 
+async function waitFor(predicate, description, timeoutMs = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
 async function waitForFailedMessage(taskId, timeoutMs = 3000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -450,7 +459,7 @@ test('a submission that exhausts its transient retries is recorded failed on its
 
   const consumer = streams.createConsumer(client, {
     stream: gatewayStream(),
-    group: 'row149-retry-exhaustion-test',
+    group: 'retry-exhaustion-test',
     consumerName: 'c1',
     ...gateway._gatewayConsumerOptions('hello-world'),
     blockMs: 100,
@@ -535,4 +544,60 @@ test('a dead-lettered message that never reached applyTransition is still record
     gateway._handleA2ASubmission(successor, 'hello-world'),
     taskStore.A2ACausalDependencyFailedError
   );
+});
+
+// A stream entry for a Task that has already reached a terminal state used
+// to show up in a live run as a failure ("already terminal"), a retry, and a
+// second completion in the logs — the shape the dead-letter work exists to
+// remove. A redelivery is the ordinary way that happens: the gateway
+// acknowledged an entry it had already applied, and the consumer saw it
+// again. It must be acknowledged once, cost nothing, and never re-run or
+// re-report the completion it already reported.
+test('a late duplicate entry for a terminal task is acknowledged once and does not report completion again', async () => {
+  const lastMessageId = registerTask('HW-1');
+
+  const completion = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: lastMessageId, state: 'completed',
+    parts: [buildTextPart('Verified and done')],
+  }));
+
+  const logLines = [];
+  const originalConsoleLog = console.log;
+  console.log = (...args) => { logLines.push(args.join(' ')); originalConsoleLog(...args); };
+
+  await gateway.startGatewaySubscriber();
+  try {
+    await waitFor(() => taskStore.getTaskById('HW-1').state === 'completed', 'the Task to reach its terminal state');
+    await waitFor(
+      async () => (await client.xPending(gatewayStream(), registry.GATEWAY_GROUP)).pending === 0,
+      'the first delivery to be acknowledged'
+    );
+
+    // The same entry arrives again, after the Task is already terminal.
+    await client.xAdd(gatewayStream(), '*', { data: JSON.stringify(completion) });
+
+    await waitFor(
+      async () => (await client.xLen(gatewayStream())) === 2
+        && (await client.xPending(gatewayStream(), registry.GATEWAY_GROUP)).pending === 0,
+      'the duplicate to be acknowledged too'
+    );
+    // Long enough for a retry of the duplicate to have shown up, had it been
+    // left pending instead of acknowledged.
+    await new Promise(r => setTimeout(r, 300));
+  } finally {
+    await gateway.stopGatewaySubscriber();
+    console.log = originalConsoleLog;
+  }
+
+  assert.equal(
+    logLines.filter(line => line.includes('Task completed for HW-1')).length, 1,
+    'the completion must be reported once, not once per delivery'
+  );
+  assert.equal(fakeJira.comments.length, 1, 'and its comment posted once');
+  assert.equal(await client.xLen(streams.deadLetterStreamName(gatewayStream())), 0,
+    'a duplicate is not a failure and must never dead-letter');
+  assert.equal((await client.xPending(gatewayStream(), registry.GATEWAY_GROUP)).pending, 0,
+    'both entries acknowledged');
+  assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
+    'and nothing recorded against the Task that genuinely completed');
 });
