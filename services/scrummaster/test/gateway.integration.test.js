@@ -381,14 +381,14 @@ test('a MaterializationValidationError from dependencies.js is dead-lettered, no
   }
 });
 
-// Regression test for the gap a 2026-09-07 doc-vs-code audit found:
-// mode-aware routing (dependencies.js's routeMaterialization) was built and
-// unit-tested in isolation, but gateway.js's dispatch path called
+// Regression test for a gap that a passing unit test hid: mode-aware routing
+// (dependencies.js's routeMaterialization) was built and covered in
+// isolation, but gateway.js's dispatch path called
 // dependencies.materializeDecomposition directly, bypassing it entirely — so
 // a local-mode project's decomposition silently kept going straight to Jira
-// in production despite the Implementation Status checklist reading as done.
-// This test exercises gateway.js's real, unmocked entry point end to end and
-// would have failed against that bug.
+// in production while everything written to cover it still passed. This test
+// exercises gateway.js's real, unmocked entry point end to end and would
+// have failed against that bug.
 test('a materializeDecomposition operation for a local-mode project publishes to the Internal Work-Item Service, not Jira', async () => {
   const originalGetMode = canonicalWorkItems.getMode;
   const originalPublishCommand = canonicalWorkItems.publishCommand;
@@ -432,20 +432,20 @@ test('a materializeDecomposition operation for a local-mode project publishes to
   }
 });
 
-// Regression test for a gap a 2026-09-14 doc-vs-code audit found: a
-// submission whose gateway-side effect kept throwing a transient error was,
-// once streams.js's own retry budget ran out, dead-lettered same as any
-// other exhausted entry — but nothing told the A2A Task store that message
-// had failed, so the Task kept reading as if it were still pending. A
-// container that happened to exit cleanly regardless (it cannot see a
-// gateway-side rejection at all) would then have its Task read completed,
-// and any successor message waiting on this one as its referenceMessageId
-// would defer forever (taskStore.js's A2ACausalDependencyPendingError /
-// streams.js's retryWithoutAttempt), never itself timing out. This drives
-// the actual gateway stream consumer (gateway._gatewayConsumerOptions, the
-// same handler/onDeadLetter wiring startGatewaySubscriber uses in
-// production) through real retry exhaustion, with only the retry timing
-// sped up.
+// Regression test for a gap between what dead-lettering did and what the
+// Task record was told about it: a submission whose gateway-side effect kept
+// throwing a transient error was, once streams.js's own retry budget ran
+// out, dead-lettered same as any other exhausted entry — but nothing told
+// the A2A Task store that message had failed, so the Task kept reading as if
+// it were still pending. A container that happened to exit cleanly
+// regardless (it cannot see a gateway-side rejection at all) would then have
+// its Task read completed, and any successor message waiting on this one as
+// its referenceMessageId would defer forever (taskStore.js's
+// A2ACausalDependencyPendingError / streams.js's retryWithoutAttempt), never
+// itself timing out. This drives the actual gateway stream consumer
+// (gateway._gatewayConsumerOptions, the same handler/onDeadLetter wiring
+// startGatewaySubscriber uses in production) through real retry exhaustion,
+// with only the retry timing sped up.
 test('a submission that exhausts its transient retries is recorded failed on its Task, not left reading as pending forever', async () => {
   const lastMessageId = registerTask('HW-1');
 
