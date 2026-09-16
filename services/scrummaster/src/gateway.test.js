@@ -17,6 +17,7 @@ const handlers = require('./handlers');
 const taskStore = require('./a2a/taskStore');
 const { newMessageId, newArtifactId } = require('./a2a/ids');
 const { buildTextPart, buildDataPart, buildMessage, buildTask, buildArtifact } = require('./a2a/parts');
+const { buildTaskPrompt } = require('./prompt');
 const { _handleA2ASubmission: handleA2ASubmission, _handlePipelineRetry: handlePipelineRetry, _handleTaskStatus: handleTaskStatus } = require('./gateway');
 
 const ISSUE_KEY = 'GANG-42';
@@ -551,6 +552,69 @@ test('create_subtask without agentFieldValue derives the agent from the summary 
 // request itself already implies. Two agents in the same project answering
 // to the same role prefix mean the request implies neither of them, and the
 // requesting agent is never a candidate for its own request.
+
+// The prompt is the only place an agent learns what to call the field that
+// carries a subtask's owner, and the gateway is the only thing that reads
+// it. Naming it one thing in the allowed-agent list and another in the
+// submission shape is how the field comes back omitted. This takes the name
+// straight out of the rendered prompt and sends a request under it.
+
+test('the field the prompt tells an agent to send an agent id in is the field the gateway reads', async (t) => {
+  mockJiraMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const issue = {
+    key: ISSUE_KEY, summary: 'Parent story', projectName: PROJECT_NAME, parent: null, comments: [],
+  };
+  const prompt = buildTaskPrompt(issue, registry.getAgent('refinement-agent'), {
+    allowedAgents: registry.getEffectiveAgents(PROJECT_NAME),
+    task: { id: ISSUE_KEY, contextId },
+    message: { messageId },
+  });
+
+  const allowedSection = prompt.slice(prompt.indexOf('## ALLOWED AGENTS'), prompt.indexOf('## A2A TASK CONTEXT'));
+  assert.match(allowedSection, /agentFieldValue/, 'the allowed-agent list must name the field the submission uses');
+  assert.doesNotMatch(allowedSection, /"agent"/, 'and must not name it a second way');
+
+  const declared = prompt.match(/"operation":"create_subtask"[^}]*"([A-Za-z]+)":"<agent>"/);
+  assert.ok(declared, 'the prompt must show a create_subtask submission carrying an agent id');
+  const fieldName = declared[1];
+
+  t.mock.method(jira, 'getIssue', async (key) => ({
+    key, project: 'GANG', projectName: PROJECT_NAME, parent: key === 'GANG-43' ? ISSUE_KEY : null,
+    summary: 'Backend: implement endpoint', comments: [],
+  }));
+  let createdWith = null;
+  t.mock.method(jira, 'createSubtask', async (_parentKey, _projectKey, _summary, _description, agentFieldValue) => {
+    createdWith = agentFieldValue;
+    return 'GANG-43';
+  });
+  t.mock.method(jira, 'transitionIssue', async () => {});
+  t.mock.method(jira, 'postComment', async () => { throw new Error('a request using the documented field name must not be refused'); });
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(streams, 'publish', async (_client, _stream, e) => ({ deduped: false, entryId: '0-1', messageId: e.messageId }));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({
+          operation: 'create_subtask',
+          summary: 'Backend: implement endpoint',
+          description: 'full desc',
+          [fieldName]: 'backend-agent',
+        }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(createdWith, 'backend-agent',
+    `the gateway must read the agent id from "${fieldName}", the field the prompt declares`);
+});
 
 test('create_subtask does not derive an agent when two of the project\'s agents answer to the same role prefix', async (t) => {
   mockJiraMode(t);
