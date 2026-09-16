@@ -228,13 +228,19 @@ test('completed with no artifact and a summary posts only the closing comment', 
 
 test('failed/canceled/rejected leave a visible, attributable blocked state', async (t) => {
   mockJiraMode(t);
+  // Installed once, not once per iteration: mocking the same method twice
+  // in one test makes the second mock the "original" the first restores to,
+  // so a mock survives the test and the next one silently inherits it.
+  let blocked = null;
+  let posted = null;
+  t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
+  t.mock.method(jira, 'postComment', async (k, b) => { posted = b; });
+
   for (const state of ['failed', 'canceled', 'rejected']) {
     taskStore._reset();
+    blocked = null;
+    posted = null;
     const { contextId, messageId } = registerTask();
-    let blocked = null;
-    let posted = null;
-    t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
-    t.mock.method(jira, 'postComment', async (k, b) => { posted = b; });
 
     await handleA2ASubmission(
       envelope({ contextId, referenceMessageId: messageId, state, parts: [buildTextPart('agent process crashed')] }),
@@ -743,6 +749,7 @@ test('a task whose submission was rejected is reported failed, not completed', a
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   t.mock.method(jira, 'createSubtask', async () => { throw new Error('must not create anything'); });
   t.mock.method(jira, 'postComment', async () => {});
+  t.mock.method(jira, 'setBlockedField', async () => {});
 
   await handleA2ASubmission(
     envelope({
@@ -777,6 +784,7 @@ test('a task whose chain permanently failed is reported failed, not completed', 
   mockJiraMode(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   t.mock.method(jira, 'postComment', async () => {});
+  t.mock.method(jira, 'setBlockedField', async () => {});
 
   // The rejected create_subtask poisons the rest of the chain: the agent's
   // own completion message references it and is permanently failed.
@@ -843,6 +851,7 @@ test('a redispatch supersedes an earlier rejection so the task can complete clea
   mockJiraMode(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   t.mock.method(jira, 'postComment', async () => {});
+  t.mock.method(jira, 'setBlockedField', async () => {});
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(streams, 'publish', async () => ({ deduped: false, entryId: '0-1' }));
 
@@ -889,6 +898,7 @@ test('create_subtask rejection names every missing required field and blocks cau
   const warnings = [];
   t.mock.method(console, 'warn', (...args) => warnings.push(args.join(' ')));
   t.mock.method(jira, 'postComment', async () => {});
+  t.mock.method(jira, 'setBlockedField', async () => {});
 
   const rejected = envelope({
     contextId,
@@ -1096,9 +1106,12 @@ test('local mode: input-required transitions to needs-clarification and appends 
 
 test('local mode: failed/canceled/rejected transition to the mapped terminal status and append a comment', async (t) => {
   const expected = { failed: 'failed', canceled: 'cancelled', rejected: 'cancelled' };
+  // Installed once — see the Jira-mode sibling above for why a second
+  // mock of the same method in one test outlives it.
+  const calls = mockLocalMode(t);
   for (const state of Object.keys(expected)) {
     taskStore._reset();
-    const calls = mockLocalMode(t);
+    calls.length = 0;
     const { contextId, messageId } = registerTask();
 
     await handleA2ASubmission(
@@ -1147,7 +1160,6 @@ test('local mode: completed with a pull-request artifact only appends a comment,
 
 test('local mode: the PR-opened log reports the work item\'s persisted status, not an assumed one', async (t) => {
   const calls = mockLocalMode(t);
-  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
   const { contextId, messageId } = registerTask();
   const logs = [];
   t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
