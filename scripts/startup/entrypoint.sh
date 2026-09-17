@@ -16,7 +16,9 @@
 #   3. Compare the configuration against what this checkout was
 #      initialized with, and refuse a changed one before anything moves.
 #   4. Derive each service's environment file from the platform .env.
-#   5. Hand the ordered steps to the Initialization Agent, unsupervised,
+#   5. Hand the ordered steps to the Initialization Agent — one
+#      unsupervised, single-turn run, isolated from the developer
+#      instructions the checkout carries for its own contributors —
 #      keeping everything it prints in the checkout as well as showing it.
 #   6. Check the status record the steps maintain, and exit on what it
 #      says rather than on the agent's word. When the record says the run
@@ -168,6 +170,23 @@ You are the Initialization Agent bringing the AI Gang platform up on this
 machine, unsupervised. No human is watching and no one will answer a
 question, so do not ask one.
 
+This is one non-interactive turn. There is no next turn and nothing will
+notify you of anything: the process ends the moment your turn ends, and
+whatever had not finished by then is abandoned where it stood. So:
+
+  - Run every command in the foreground and wait for it to finish,
+    however long it takes. A cold image build takes several minutes and
+    prints nothing at all until it is over; silence is what a step that
+    is working looks like, not a reason to stop waiting.
+  - Never start a command in the background, and never end your turn to
+    wait for one. Backgrounding a step ends the run at that step, with
+    the step half-done and nothing saying so.
+  - Do not end your turn until either the last step has reported the
+    platform is up, or you have recorded a failure with
+    ./scripts/startup/status.sh fail "<one-line reason>".
+
+The run ends when your turn ends.
+
 The working directory is the AI Gang checkout. Its configuration
 (ai-gang.config.json) and its environment file (.env) have already been
 validated; the project name, deployment target, stack profile and
@@ -222,8 +241,21 @@ log "handing the ordered steps to the Initialization Agent"
 : > "$AIGANG_AGENT_LOG_FILE"
 chmod 600 "$AIGANG_AGENT_LOG_FILE"
 
+# --setting-sources with an empty list: load no settings source at all,
+# neither the checkout's nor this container's home directory. The
+# checkout is a software project, and its CLAUDE.md and .claude/settings.json
+# are addressed to the people and agents who develop AI Gang: they ask for
+# branches and pull requests, for a closing next-step line, for long
+# commands to be put in the background — and they install a hook that
+# refuses Edit and Write outside a worktree. Claude Code loads all of that
+# from the working directory by default, and the Initialization Agent, which
+# runs here to bring a platform up rather than to change the project,
+# followed it: it backgrounded a step and ended its turn, which in a
+# single-turn run ends the run. The prompt built above is the whole of what
+# this agent is told. --dangerously-skip-permissions is a flag, not a
+# setting, so it still applies.
 set +e
-claude --print --dangerously-skip-permissions "$(cat "$PROMPT_FILE")" 2>&1 \
+claude --print --dangerously-skip-permissions --setting-sources '' "$(cat "$PROMPT_FILE")" 2>&1 \
   | tee -a "$AIGANG_AGENT_LOG_FILE"
 # The agent's status, not tee's: tee succeeds whatever the agent did, and
 # step 6 below is only allowed to report what the agent actually did.

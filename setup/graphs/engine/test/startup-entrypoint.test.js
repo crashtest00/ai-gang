@@ -415,3 +415,146 @@ test("a second run keeps the previous run's capture alongside its record and log
   const kept = fs.readFileSync(path.join(root, '.ai-gang', 'previous', 'agent.log'), 'utf8');
   assert.ok(kept.includes(LAST_WORDS), "the first run's capture must be kept");
 });
+
+// ---- how the Initialization Agent is invoked ----
+//
+// Two properties of the invocation, both of which a real run lost a
+// whole installation to.
+//
+// The run is a single non-interactive turn: `claude --print` exits when
+// the turn ends. An agent that starts a long step in the background and
+// ends its turn to wait for it is not waiting for anything — the process
+// is gone and the step is abandoned mid-build, the record still saying
+// in-progress. So the prompt has to say that the turn is the run.
+//
+// And the agent must not be reading the checkout's own developer
+// instructions. A checkout of AI Gang is a software project: its
+// CLAUDE.md and .claude/settings.json are addressed to the people and
+// agents who work on it, and ask for branches, pull requests, a closing
+// next-step line and long commands put in the background. Claude Code
+// loads them from the working directory by default. The entrypoint
+// passes --setting-sources with an empty list so that none of it is
+// loaded, and the built prompt is the whole of what the agent is told.
+
+// Records the invocation, then works through every step so the run
+// completes and the assertions below run against a healthy run. The
+// prompt is the last argument, and is kept on its own because it spans
+// many lines; everything before it is the argv.
+const RECORDS_ITS_INVOCATION = `#!/bin/sh
+set -e
+argv="$AIGANG_ROOT/agent-argv.txt"
+: > "$argv"
+n=$#
+i=1
+for a in "$@"; do
+  if [ "$i" -lt "$n" ]; then
+    printf 'arg[%s]\\n' "$a" >> "$argv"
+  else
+    printf '%s' "$a" > "$AIGANG_ROOT/agent-prompt.txt"
+  fi
+  i=$((i + 1))
+done
+printf 'cwd[%s]\\n' "$(pwd)" >> "$argv"
+steps="$AIGANG_ROOT/scripts/startup/steps.sh"
+status="$AIGANG_ROOT/scripts/startup/status.sh"
+"$steps" list | while IFS='|' read -r number id script description; do
+  "$status" step-start "$id"
+  "$status" step-done "$id"
+done
+"$status" complete
+exit 0
+`;
+
+// A distinctive line in a CLAUDE.md at the checkout root, exactly where
+// the real one sits.
+const DEVELOPER_INSTRUCTION = 'Every turn ends with a quinoa-hexadecimal line.';
+
+async function capturedInvocation() {
+  const root = runnableCheckout();
+  fs.writeFileSync(
+    path.join(root, 'CLAUDE.md'),
+    `# Contributing\n\n${DEVELOPER_INSTRUCTION}\n\nPut long commands in the background.\n`
+  );
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, '.claude', 'settings.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(git *)'] } })
+  );
+
+  const result = await runToAgent(root, agentBin(RECORDS_ITS_INVOCATION));
+  assert.equal(result.code, 0, `the recording run must complete: ${result.stderr}`);
+  return {
+    root,
+    argv: fs.readFileSync(path.join(root, 'agent-argv.txt'), 'utf8'),
+    prompt: fs.readFileSync(path.join(root, 'agent-prompt.txt'), 'utf8'),
+  };
+}
+
+test('the prompt tells the agent the turn is the run, and every step waits in the foreground', async () => {
+  const { prompt } = await capturedInvocation();
+
+  assert.match(prompt, /one non-interactive turn/,
+    'the prompt does not say the run is a single turn');
+  assert.match(prompt, /The run ends when your turn ends\./,
+    'the prompt does not say that ending the turn ends the run');
+  assert.match(prompt, /Run every command in the foreground and wait for it to finish/,
+    'the prompt does not require every command to run in the foreground');
+  assert.match(prompt, /Never start a command in the background/,
+    'the prompt does not forbid backgrounding a step');
+  assert.match(prompt, /prints nothing at all until it is over/,
+    'the prompt does not warn that a long build is silent while it works');
+  assert.match(prompt, /Do not end your turn until either the last step has reported/,
+    'the prompt does not say what has to be true before the turn may end');
+
+  // The escape hatch the run is allowed to end on has to be the one that
+  // leaves a record behind.
+  assert.match(prompt, /status\.sh fail/,
+    'the prompt does not name the way to end a run on a failure');
+
+  // Still the whole of what it was: the ordered steps and the rules for
+  // a step that fails.
+  for (const step of spawnSync('bash', [path.join(REPO_ROOT, 'scripts', 'startup', 'steps.sh'), 'list'],
+    { encoding: 'utf8' }).stdout.trim().split('\n')) {
+    const [, , script] = step.split('|');
+    assert.ok(prompt.includes(`./${script}`), `${script} is no longer in the prompt`);
+  }
+  assert.match(prompt, /A clean failure is the correct\s+outcome/);
+});
+
+test("the agent is run with no settings source, so the checkout's developer instructions are not loaded", async () => {
+  const { root, argv, prompt } = await capturedInvocation();
+
+  // The flag, and its value: an empty list, meaning load none of user,
+  // project or local.
+  const lines = argv.split('\n');
+  const flag = lines.indexOf('arg[--setting-sources]');
+  assert.ok(flag >= 0, `--setting-sources is not on the agent's command line: ${argv}`);
+  assert.equal(lines[flag + 1], 'arg[]',
+    `--setting-sources must be given an empty list of sources: ${argv}`);
+
+  // ...and it is still the unsupervised, non-interactive invocation.
+  assert.ok(lines.includes('arg[--print]'), `--print is missing: ${argv}`);
+  assert.ok(lines.includes('arg[--dangerously-skip-permissions]'),
+    `--dangerously-skip-permissions is missing: ${argv}`);
+
+  // The working directory is deliberately still the checkout — every
+  // step in the prompt is a relative path — so the isolation is the flag
+  // and nothing else. This is why the flag has to be there: a CLAUDE.md
+  // is sitting right next to the agent as it runs.
+  assert.ok(argv.includes(`cwd[${root}]`), `the agent did not run in the checkout: ${argv}`);
+  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')));
+
+  // Nothing of that file reaches the agent through the prompt, which is
+  // the whole of what the entrypoint tells it.
+  assert.equal(prompt.includes(DEVELOPER_INSTRUCTION), false,
+    "the checkout's developer instructions leaked into the prompt");
+
+  // What this test cannot do is prove Claude Code honours the flag: the
+  // agent here is a stub, and no stub can load a CLAUDE.md the way the
+  // real one does. That half is the CLI's own contract — `claude --help`
+  // documents --setting-sources as the list of setting sources to load,
+  // and rejects any name that is not user, project or local — and it is
+  // checked against the installed CLI by hand, not here. What is checked
+  // here is the part that is ours: that the entrypoint asks for it, on
+  // every run, with an empty list.
+});

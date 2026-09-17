@@ -79,6 +79,15 @@ runs the Initialization Agent — Claude Code, unsupervised, with
 permission prompts bypassed — against the ordered steps below. The
 container exits when initialization finishes, and does not restart.
 
+That agent gets one non-interactive turn, and the run ends when the turn
+does: it is told to run every step in the foreground and wait, because a
+step left running in the background is abandoned half-done the moment the
+turn ends. It is also run with no settings source loaded, so the
+`CLAUDE.md` and `.claude/settings.json` in the checkout — which are
+addressed to people and agents developing AI Gang, and ask for branches,
+pull requests and backgrounded commands — are not loaded into it. The
+prompt the entrypoint builds is the whole of what it is told.
+
 ### The ordered steps
 
 Each of these is a script. The agent invokes them in this order; it does
