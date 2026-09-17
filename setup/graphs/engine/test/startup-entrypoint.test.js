@@ -237,3 +237,181 @@ test('a root-owned checkout is reported in the run log rather than passing silen
   assert.equal(result.stdout.includes('owned by root'), false,
     'an unprivileged run must not claim it is running as root');
 });
+
+// ---- what the Initialization Agent printed ----
+//
+// The agent works unsupervised, and its own output used to go to the
+// container's stdout and nowhere else. An agent that stopped partway —
+// mid-step, exit status 0, the record still saying in-progress — left
+// nothing in the checkout saying why: not its last message, not an
+// error, no indication of whether it hit a failure at all. So the
+// entrypoint keeps everything it prints in .ai-gang/agent.log, and when
+// the record says the run did not finish it puts the end of that capture
+// into the step log, where an operator is already looking.
+//
+// Both tests below drive the real entrypoint end to end against a
+// temporary checkout, with a stub agent on PATH standing in for
+// `claude`. Nothing here needs Docker: the entrypoint itself only
+// requires the command to exist, and every step that would use it
+// belongs to the agent.
+
+const ENV_TEMPLATE = path.join(REPO_ROOT, '.env.template');
+const SM_ENV_EXAMPLE = path.join(REPO_ROOT, 'services', 'scrummaster', '.env.example');
+
+const PLATFORM_ENV = [
+  'ANTHROPIC_API_KEY=sk-ant-test-not-a-real-key',
+  'GH_TOKEN=github_pat_test_not_a_real_token',
+  'AIGANG_ADMIN_USER=operator',
+  'AIGANG_ADMIN_EMAIL=operator@example.invalid',
+  'AIGANG_ADMIN_PASSWORD=a-test-only-password',
+  'PGPASSWORD=a-test-only-pg-password',
+  'DJANGO_SECRET_KEY=a-test-only-django-key',
+].join('\n') + '\n';
+
+// A checkout the real entrypoint can validate, derive from and record
+// against, built from the repository's own scripts and validator. The
+// two directories derive-env.sh writes into are this temporary tree's,
+// not the repository's.
+function runnableCheckout() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-agent-run-'));
+  fs.symlinkSync(path.join(REPO_ROOT, 'scripts'), path.join(root, 'scripts'));
+  fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
+  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
+  fs.copyFileSync(SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));
+  fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
+  fs.writeFileSync(path.join(root, '.env'), PLATFORM_ENV);
+  fs.writeFileSync(path.join(root, 'ai-gang.config.json'), JSON.stringify({
+    schemaVersion: 1,
+    project: { name: 'a-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  return root;
+}
+
+// A stand-in for the Initialization Agent: whatever script body is given,
+// with docker alongside it so the entrypoint's command check passes.
+function agentBin(body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-agent-bin-'));
+  fs.writeFileSync(path.join(dir, 'docker'), '#!/bin/sh\nexit 0\n');
+  fs.chmodSync(path.join(dir, 'docker'), 0o755);
+  fs.writeFileSync(path.join(dir, 'claude'), body);
+  fs.chmodSync(path.join(dir, 'claude'), 0o755);
+  return dir;
+}
+
+function runToAgent(root, binDir) {
+  return new Promise((resolve) => {
+    const child = spawn('bash', [ENTRYPOINT], {
+      cwd: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-home-')),
+        // Exported, not just set for the entrypoint: the stub agent runs
+        // status.sh, which must address this checkout's record and not
+        // the repository's.
+        AIGANG_ROOT: root,
+        AIGANG_STATE_DIR: path.join(root, '.ai-gang'),
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+// The line an operator would want and, until now, never got.
+const LAST_WORDS = 'waiting for the work-item service to answer, and it never did';
+
+// Stops while a step is still in progress, exit status 0 — the shape of
+// the real thing, which ends its turn without saying so. The earlier
+// lines are there to be dropped: the copy in the step log is bounded.
+const STOPS_EARLY = `#!/bin/sh
+i=1
+while [ "$i" -le 60 ]; do
+  echo "agent output line $i"
+  i=$((i + 1))
+done
+echo "${LAST_WORDS}"
+exit 0
+`;
+
+// Works through every step the way a real run does, so the record reads
+// complete and the entrypoint exits 0.
+const COMPLETES = `#!/bin/sh
+set -e
+steps="$AIGANG_ROOT/scripts/startup/steps.sh"
+status="$AIGANG_ROOT/scripts/startup/status.sh"
+"$steps" list | while IFS='|' read -r number id script description; do
+  "$status" step-start "$id"
+  "$status" step-done "$id"
+done
+echo "${LAST_WORDS}"
+"$status" complete
+exit 0
+`;
+
+test("an agent that stops before the last step leaves its output in the checkout", async () => {
+  const root = runnableCheckout();
+  const result = await runToAgent(root, agentBin(STOPS_EARLY));
+  assert.notEqual(result.code, 0, 'a run whose record is not complete must exit nonzero');
+
+  const stateDir = path.join(root, '.ai-gang');
+  const agentLog = path.join(stateDir, 'agent.log');
+  assert.ok(fs.existsSync(agentLog), `nothing captured the agent's output: ${result.stderr}`);
+  const captured = fs.readFileSync(agentLog, 'utf8');
+  assert.ok(captured.includes(LAST_WORDS), "the agent's last line is not in the capture");
+  assert.ok(captured.includes('agent output line 1'), 'the capture is not the whole of what the agent printed');
+
+  // Unfiltered agent output, so the file is the operator's alone.
+  assert.equal(fs.statSync(agentLog).mode & 0o777, 0o600, 'the capture must be owner-readable only');
+
+  // ...and it still reached the container's stdout as it happened.
+  assert.ok(result.stdout.includes(LAST_WORDS), "the agent's output no longer streams to stdout");
+
+  // The step log — the file the run's own diagnostic points at — carries
+  // the end of it, after the line saying the run did not complete.
+  const log = fs.readFileSync(path.join(stateDir, 'startup.log'), 'utf8');
+  const notComplete = log.indexOf('initialization did not complete');
+  assert.ok(notComplete > 0, `the step log does not report the incomplete run: ${log}`);
+  assert.ok(log.indexOf(LAST_WORDS) > notComplete, "the agent's last line is not in the step log's tail");
+  assert.ok(log.includes('agent.log'), 'the step log does not say where the whole capture is');
+
+  // Bounded: the tail, not a second copy of the transcript.
+  assert.equal(log.includes('agent output line 1\n'), false, 'the step log copied more than the tail');
+  assert.ok(log.includes('agent output line 60'), 'the tail is shorter than the 40 lines it claims');
+});
+
+test('a completed run leaves the capture and keeps the step log free of a tail', async () => {
+  const root = runnableCheckout();
+  const result = await runToAgent(root, agentBin(COMPLETES));
+  assert.equal(result.code, 0, `a completed run must exit 0: ${result.stderr}`);
+
+  const stateDir = path.join(root, '.ai-gang');
+  const captured = fs.readFileSync(path.join(stateDir, 'agent.log'), 'utf8');
+  assert.ok(captured.includes(LAST_WORDS), "a completed run must keep the agent's output too");
+
+  const log = fs.readFileSync(path.join(stateDir, 'startup.log'), 'utf8');
+  assert.match(log, /initialization complete/);
+  assert.equal(log.includes('initialization did not complete'), false);
+  assert.equal(log.includes(LAST_WORDS), false,
+    'a run that completed has no reason to copy the agent transcript into the step log');
+});
+
+test("a second run keeps the previous run's capture alongside its record and log", async () => {
+  // The capture is a run's record like the other two, and the re-run
+  // that follows a failure must not be what destroys it.
+  const root = runnableCheckout();
+  const first = await runToAgent(root, agentBin(STOPS_EARLY));
+  assert.notEqual(first.code, 0);
+
+  const second = await runToAgent(root, agentBin(COMPLETES));
+  assert.equal(second.code, 0, second.stderr);
+
+  const kept = fs.readFileSync(path.join(root, '.ai-gang', 'previous', 'agent.log'), 'utf8');
+  assert.ok(kept.includes(LAST_WORDS), "the first run's capture must be kept");
+});

@@ -149,19 +149,26 @@ A first run builds four images and takes a while. Run it in the
 foreground and watch; if you would rather watch from elsewhere,
 `.ai-gang/status.json` in the checkout says which step is in progress and
 how each service is doing, and `.ai-gang/startup.log` holds the same
-step-by-step lines, tailed live into your terminal.
+step-by-step lines, tailed live into your terminal. `.ai-gang/agent.log`
+holds everything the platform itself printed while working through those
+steps.
 
 If something goes wrong, the run stops with a nonzero status and says what
 failed. Fix it and run the same command again — re-running is safe, and
 picks up where it left off rather than starting a second copy of anything.
 
-Both files stay in the checkout after the run ends, whether it succeeded
-or failed, and nothing deletes them. `.ai-gang/startup.log` is not the
-whole of what scrolled past in your terminal, though: it holds each
-step's own progress lines, not the two lines printed before that tail
-starts, and not the platform's own setup output while it works through
-those steps — that prints straight to your terminal and is not saved
-anywhere. Running again moves the previous run's log and status record to
+All three files stay in the checkout after the run ends, whether it
+succeeded or failed, and nothing deletes them. `.ai-gang/startup.log` is
+not the whole of what scrolled past in your terminal, though: it holds
+each step's own progress lines, not the two lines printed before that
+tail starts, and not the platform's own setup output while it works
+through those steps — that goes to `.ai-gang/agent.log`, which is the
+file to read when a run stops partway and you want to know what it was
+doing. It can quote whatever the setup was looking at, so it is readable
+only by you. A run that ends without finishing also copies that file's
+last 40 lines into `.ai-gang/startup.log`, under the line saying it did
+not complete, so one file answers the first question. Running again moves
+the previous run's log, status record and `agent.log` to
 `.ai-gang/previous/` rather than overwriting them, so you still have the
 failed run to look at.
 

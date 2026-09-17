@@ -126,8 +126,8 @@ routine step is the script's job.
 
 ### Reading a run
 
-Two things in the checkout, outside every container, and readable from a
-second shell while the run is in progress:
+Three things in the checkout, outside every container, and readable from
+a second shell while the run is in progress:
 
 - `.ai-gang/status.json` — the step in progress, every step's state, each
   service's health, and, on completion, the Django admin address. No
@@ -136,8 +136,19 @@ second shell while the run is in progress:
   the container's stdout. It is not the whole of what the container
   prints there: two banner lines print before that tail starts and are
   gone by the time it does, and the Initialization Agent's own output —
-  its `claude --print` transcript — streams straight to the container's
-  stdout and is never written to this file.
+  its `claude --print` transcript — goes to `.ai-gang/agent.log` instead
+  of here, apart from the bounded tail described next.
+- `.ai-gang/agent.log` — everything the Initialization Agent printed,
+  stdout and stderr together, written as it streams to the container's
+  stdout rather than instead of it. An agent that stops partway through a
+  step exits 0 like one that finished, so this file is the only account
+  of what it was doing and whether it hit anything; without it that
+  account left with the container. It is an unfiltered transcript, not
+  lines a step chose to print, so it is written owner-readable only
+  (0600). When a run ends with the record saying anything but complete,
+  the last 40 lines of it are copied into `.ai-gang/startup.log` after
+  the line reporting that, so the step log on its own shows the agent's
+  last words.
 
 `.ai-gang/config-identity.json` records the configuration this checkout
 was initialized with. Running the same command again against an
@@ -146,13 +157,14 @@ reconnects, creating no second project, network, account or container. A
 run whose configuration differs from that record is refused before
 anything changes.
 
-All three stay in the checkout after the container exits, and nothing in
-the flow deletes them — a failed run's record and log are still there
-afterwards, and are what a later reader diagnoses it from. Starting
-again does not overwrite them either: a new run moves the previous run's
-record and log to `.ai-gang/previous/` first. `.ai-gang/startup.log` is
-the step log that survives the container, not a full copy of everything
-the container printed — see above for what it leaves out.
+All four stay in the checkout after the container exits, and nothing in
+the flow deletes them — a failed run's record, log and agent transcript
+are still there afterwards, and are what a later reader diagnoses it
+from. Starting again does not overwrite them either: a new run moves the
+previous run's record, log and transcript to `.ai-gang/previous/` first.
+`.ai-gang/startup.log` is the step log that survives the container, not a
+full copy of everything the container printed — see above for what it
+leaves out, and `.ai-gang/agent.log` for the part of it the agent wrote.
 
 ### Which phases below this flow covers
 

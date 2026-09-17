@@ -38,6 +38,17 @@ AIGANG_ADMIN_URL="$("$STARTUP_DIR/status.sh" admin-url)"
 # the agent's own tool output never reaches the container's stdout.
 AIGANG_LOG_FILE="$AIGANG_STATE_DIR/startup.log"
 
+# Everything the Initialization Agent printed, stdout and stderr together.
+# The agent's output is the only account of why it stopped where it did,
+# and until it was captured here it existed only on the container's
+# stdout — gone with the container, and never in the checkout at all. A
+# run that ends with the record still saying in-progress is exactly the
+# case where that account is the whole diagnosis, so it has to outlive
+# the container like the other records do. It is written owner-readable
+# only: unlike the step log, which holds only lines the steps chose to
+# print, this is an unfiltered transcript and nothing here filters it.
+AIGANG_AGENT_LOG_FILE="$AIGANG_STATE_DIR/agent.log"
+
 # Where the run before this one is kept. A run's records are the only
 # account of what it did, and they outlive the container that wrote them:
 # they are in the operator's checkout, outside every container, and
@@ -50,7 +61,7 @@ AIGANG_PREVIOUS_DIR="$AIGANG_STATE_DIR/previous"
 # Moves the previous run's records aside, if there are any. Called once,
 # by the entrypoint, before a new run's record is created.
 keep_previous_run() {
-  if [[ ! -f "$AIGANG_STATUS_FILE" && ! -f "$AIGANG_LOG_FILE" ]]; then
+  if [[ ! -f "$AIGANG_STATUS_FILE" && ! -f "$AIGANG_LOG_FILE" && ! -f "$AIGANG_AGENT_LOG_FILE" ]]; then
     return 0
   fi
   mkdir -p "$AIGANG_PREVIOUS_DIR"
@@ -59,6 +70,9 @@ keep_previous_run() {
   fi
   if [[ -f "$AIGANG_LOG_FILE" ]]; then
     mv -f "$AIGANG_LOG_FILE" "$AIGANG_PREVIOUS_DIR/startup.log"
+  fi
+  if [[ -f "$AIGANG_AGENT_LOG_FILE" ]]; then
+    mv -f "$AIGANG_AGENT_LOG_FILE" "$AIGANG_PREVIOUS_DIR/agent.log"
   fi
   return 0
 }
