@@ -103,12 +103,13 @@ test('the admin address matches where the service is actually published and moun
 test('the record filenames the documents name are the ones the scripts write', () => {
   const doc = read(CLAUDE_DOC);
   for (const name of ['.ai-gang/status.json', '.ai-gang/config-identity.json', '.ai-gang/startup.log',
-    '.ai-gang/previous/']) {
+    '.ai-gang/agent.log', '.ai-gang/previous/']) {
     assert.ok(doc.includes(name), `${name} is not documented`);
   }
   assert.match(read(path.join(STARTUP_DIR, 'status.sh')), /STATUS_FILE="\$AIGANG_STATE_DIR\/status\.json"/);
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_IDENTITY_FILE="\$AIGANG_STATE_DIR\/config-identity\.json"/);
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_LOG_FILE="\$AIGANG_STATE_DIR\/startup\.log"/);
+  assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_AGENT_LOG_FILE="\$AIGANG_STATE_DIR\/agent\.log"/);
   assert.match(read(path.join(STARTUP_DIR, 'lib.sh')), /AIGANG_PREVIOUS_DIR="\$AIGANG_STATE_DIR\/previous"/);
 });
 
@@ -139,6 +140,17 @@ test('both documents say startup.log is not a full copy of what the container pr
       text.includes('is not the whole of') || text.includes('not a full copy'),
       `${label} does not say startup.log is a subset of what the container printed`
     );
+  }
+});
+
+test("both documents say where the Initialization Agent's own output is kept", () => {
+  // The step log holds what the steps printed; the agent's own output is
+  // the rest of the run, and is the only thing that explains an agent
+  // that stopped partway. A document that names only the step log sends
+  // a reader to the file that cannot answer that question.
+  for (const [label, file] of [['ClaudeInstructions.md', CLAUDE_DOC], ['UserGuide.md', USER_GUIDE]]) {
+    assert.ok(read(file).includes('.ai-gang/agent.log'),
+      `${label} does not say where the agent's own output is kept`);
   }
 });
 

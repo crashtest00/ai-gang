@@ -16,9 +16,12 @@
 #   3. Compare the configuration against what this checkout was
 #      initialized with, and refuse a changed one before anything moves.
 #   4. Derive each service's environment file from the platform .env.
-#   5. Hand the ordered steps to the Initialization Agent, unsupervised.
+#   5. Hand the ordered steps to the Initialization Agent, unsupervised,
+#      keeping everything it prints in the checkout as well as showing it.
 #   6. Check the status record the steps maintain, and exit on what it
-#      says rather than on the agent's word.
+#      says rather than on the agent's word. When the record says the run
+#      did not finish, say so with the end of what the agent printed, so
+#      the run that stopped short explains itself.
 #
 # The container has no role after that. It exits, and does not restart.
 
@@ -208,12 +211,27 @@ RULES
 status phase initializing
 log "handing the ordered steps to the Initialization Agent"
 
+# Everything the agent prints is kept, as well as shown. It still streams
+# to the container's stdout, which is what an operator watching a
+# foreground run sees; the copy is what is left to read once the
+# container is gone. Without it, an agent that stopped mid-step left
+# nothing anywhere saying why — not its last message, not an error, not
+# whether it hit a failure at all — and the exit status alone does not
+# tell those apart, because an agent that simply ends its turn early
+# exits 0 like one that finished.
+: > "$AIGANG_AGENT_LOG_FILE"
+chmod 600 "$AIGANG_AGENT_LOG_FILE"
+
 set +e
-claude --print --dangerously-skip-permissions "$(cat "$PROMPT_FILE")"
-AGENT_EXIT=$?
+claude --print --dangerously-skip-permissions "$(cat "$PROMPT_FILE")" 2>&1 \
+  | tee -a "$AIGANG_AGENT_LOG_FILE"
+# The agent's status, not tee's: tee succeeds whatever the agent did, and
+# step 6 below is only allowed to report what the agent actually did.
+AGENT_EXIT=${PIPESTATUS[0]}
 set -e
 rm -f "$PROMPT_FILE"
 log "Initialization Agent exited with status $AGENT_EXIT"
+log "the Initialization Agent's output is in $AIGANG_AGENT_LOG_FILE"
 
 # --- 6. exit on the record, not on the agent's word --------------------
 stop_log_tail
@@ -228,5 +246,21 @@ if [[ "$RUN_STATE" == "in-progress" ]]; then
 fi
 
 warn "initialization did not complete — status is '$RUN_STATE'"
-warn "see $AIGANG_STATUS_FILE and $AIGANG_LOG_FILE"
+warn "see $AIGANG_STATUS_FILE, $AIGANG_LOG_FILE and $AIGANG_AGENT_LOG_FILE"
+
+# The agent's last words, copied into the step log so that the one file
+# an operator is pointed at first answers the first question a run that
+# stopped short raises: what the agent was doing when it stopped. The
+# whole capture is a file away; this is the end of it, bounded, so the
+# step log stays a log and does not become a second transcript.
+AGENT_LOG_TAIL_LINES=40
+if [[ -s "$AIGANG_AGENT_LOG_FILE" ]]; then
+  warn "the last $AGENT_LOG_TAIL_LINES lines the Initialization Agent printed:"
+  while IFS= read -r line; do
+    printf '  %s\n' "$line" >&2
+    log_line "  $line"
+  done < <(tail -n "$AGENT_LOG_TAIL_LINES" "$AIGANG_AGENT_LOG_FILE")
+else
+  warn "the Initialization Agent printed nothing — $AIGANG_AGENT_LOG_FILE is empty"
+fi
 exit 1
