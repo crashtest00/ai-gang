@@ -26,8 +26,8 @@ test('checkBranchTracking: "matches" when upstream equals the remote default bra
 
 test('checkBranchTracking: "stale" after a server-side default-branch rename leaves the tracking ref mismatched', async () => {
   // Local checkout still tracks "origin/master"; the remote's default
-  // branch was renamed to "main" — this is exactly the V1 E2E finding
-  // graph-process-engine.md's Objective describes.
+  // branch was renamed to "main" — this is exactly the stale-tracking-ref
+  // case this check exists to catch.
   const exec = fakeExec([
     ['@{u}', 'origin/master\n'],
     ['refs/remotes/origin/HEAD', 'refs/remotes/origin/main\n'],

@@ -1,12 +1,10 @@
 """
 Django settings for the AI Gang Internal Work-Item Service.
 
-the internal-work-item-service design §4 "Implementation
-intent": "a Django application as this service, with PostgreSQL as its
-datastore... Django is expected to also host the human-facing admin UI
-referenced in REQ-08."
+This service is implemented as a Django application, with PostgreSQL as
+its datastore. Django is expected to also host the human-facing admin UI.
 
-REQ-01: this service is the ONLY component that holds credentials/a client
+This service is the ONLY component that holds credentials/a client
 library for its own datastore — every setting below that names a secret or
 connection string is local to this settings module.
 """
@@ -68,7 +66,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'workitemservice.wsgi.application'
 
 
-# --- Database (REQ-01/REQ-02) ------------------------------------------
+# --- Database -----------------------------------------------------------
 # Mirrors the Node implementation's db.js precedence exactly: a single
 # DATABASE_URL wins if set, otherwise PGHOST/PGPORT/PGUSER/PGPASSWORD/
 # PGDATABASE (defaults match the old service's local-dev defaults so
@@ -133,7 +131,7 @@ REDIS_URL = os.environ.get(
     f"redis://{os.environ.get('REDIS_HOST', 'localhost')}:{os.environ.get('REDIS_PORT', '6379')}",
 )
 
-# Catalog-backed agent-assignment validation (REQ-03/REQ-13) reads the SAME
+# Catalog-backed agent-assignment validation reads the SAME
 # on-disk catalog files ScrumMaster's own registry.js reads — see
 # workitems/registry.py's module comment for why this is a deliberate
 # reimplementation, not a runtime call into ScrumMaster.
@@ -146,3 +144,36 @@ WORKITEM_CONSUMER_ID = os.environ.get('WORKITEM_CONSUMER_ID') or os.uname().node
 RELAY_POLL_INTERVAL_MS = int(os.environ.get('RELAY_POLL_INTERVAL_MS', '1000'))
 RELAY_BATCH_SIZE = int(os.environ.get('RELAY_BATCH_SIZE', '20'))
 RELAY_ROW_DELAY_MS = int(os.environ.get('RELAY_ROW_DELAY_MS', '0'))  # test-only knob, see workitems/relay.py
+
+
+# --- Logging -------------------------------------------------------------
+# Left unset, Django falls back to its own default logging config, whose
+# console handler is filtered to require_debug_true — with DEBUG off (as
+# in every real deployment of this service), an unhandled exception in a
+# request is reported nowhere at all: no traceback on screen (DEBUG is
+# off), and none in the container's own logs either (the one handler that
+# would have written it there is disabled). This minimal config restores
+# just enough to fix that: an unhandled 500 (django.request, which Django's
+# own handler always logs at ERROR before returning the response) reaches
+# stderr regardless of DEBUG, which is what the container log collector
+# actually captures.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}

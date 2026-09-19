@@ -107,7 +107,7 @@ function latestMtimeMs(dirPath) {
 
 /**
  * Total size in bytes of a directory tree, used only to report how much
- * space a prune run reclaimed (REQ-05) — computed BEFORE removal.
+ * space a prune run reclaimed — computed BEFORE removal.
  *
  * @param {string} dirPath
  * @returns {number}

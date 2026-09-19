@@ -1,10 +1,10 @@
 """
-canonical-work-model.md REQ-22 — Django-owned interpretation of the full
+Django-owned interpretation of the full
 Jira webhook payload (not just `changelog` entries with `field ==
 'status'`). Each test here proves ONE of `services/scrummaster/src/server.js`'s
 former `routeWebhookEvent` scenarios now produces the same resulting
 canonical behavior via `workitems/webhook_consumer.py` +
-`workitems/jira_interpret.py`, per REQ-22's own acceptance criterion.
+`workitems/jira_interpret.py`.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(cle
 
     item = WorkItem.objects.get(external_key='TP-1')
     assert item.type == 'story'
-    assert item.status == 'ready', "REQ-17/REQ-21: fields complete -> immediately dispatch-eligible"
+    assert item.status == 'ready', "fields complete -> immediately dispatch-eligible"
     assert item.assignee_agent_id == 'refinement-agent'
     assert item.story_detail.behavior == 'Users can log in.'
 
@@ -88,7 +88,7 @@ def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_
     handle_webhook_envelope(envelope_for('TP-2', 'jira:issue_created', _story_fields(complete=False)))
 
     item = WorkItem.objects.get(external_key='TP-2')
-    assert item.status == 'proposed', "REQ-17: must not leave 'proposed' with required fields missing"
+    assert item.status == 'proposed', "must not leave 'proposed' with required fields missing"
     assert item.assignee_agent_id == 'refinement-agent', 'handlers.js sets the Agent field regardless of validation outcome'
 
     side_effect = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item.id)
@@ -145,7 +145,7 @@ def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_ful
     handle_webhook_envelope(env)
 
     item.refresh_from_db()
-    assert item.status == 'ready', 'REQ-17 gate now passes -> dispatch-eligible, matching handleBlockedCleared'
+    assert item.status == 'ready', 'story-fields gate now passes -> dispatch-eligible, matching handleBlockedCleared'
     assert item.story_detail.acceptance_criteria == 'Given valid creds, a session is created.'
     assert WebhookFailure.objects.filter(work_item_id=item.id).count() == 0
 
@@ -168,7 +168,7 @@ def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, mon
     item.refresh_from_db()
     assert item.status == 'proposed', 'must not dispatch while required fields are still missing'
     failure = WebhookFailure.objects.get(work_item_id=item.id)
-    assert failure.reason  # REQ-09: a durable, operator-visible failure record.
+    assert failure.reason  # a durable, operator-visible failure record.
     side_effects = list(OutboxEvent.objects.filter(event_type='work_item.jira_side_effect', work_item_id=item.id))
     reblock = [e for e in side_effects if e.payload['detail'].get('reblock')]
     assert len(reblock) == 1
@@ -197,7 +197,7 @@ def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals
 
 
 # ---------------------------------------------------------------------------
-# REQ-18 — comment webhooks (previously silently discarded)
+# Comment webhooks (previously silently discarded)
 # ---------------------------------------------------------------------------
 
 def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(clean_db):
@@ -219,7 +219,7 @@ def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(
     assert comment.body == 'Please clarify the auth flow.'
     assert OutboxEvent.objects.filter(event_type='work_item.comment_added', work_item_id=item_id).exists()
 
-    # Redelivery of the same Jira comment must not create a second row (REQ-18).
+    # Redelivery of the same Jira comment must not create a second row.
     handle_webhook_envelope(env)
     assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 1
 
@@ -277,7 +277,7 @@ def test_release_done_is_recorded_and_republished(clean_db):
 
 
 # ---------------------------------------------------------------------------
-# REQ-22 catch-all — an issue-link changelog entry, previously silently
+# Catch-all — an issue-link changelog entry, previously silently
 # discarded, must be durably recorded and republished.
 # ---------------------------------------------------------------------------
 

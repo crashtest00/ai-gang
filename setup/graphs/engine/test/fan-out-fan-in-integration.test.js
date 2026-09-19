@@ -90,7 +90,7 @@ test('one branch fails: the sibling still completes, fan-in still eventually pro
     return { status: sub.outcome === 'success' ? 'done' : 'failed' };
   });
 
-  // Sibling isolation (REQ-07): vm-infra-setup still completed.
+  // Sibling isolation: vm-infra-setup still completed.
   assert.deepEqual(branchRunLog, ['vm-infra-setup']);
 
   const byBranch = Object.fromEntries(status.branches.map((b) => [b.address, b]));
@@ -101,7 +101,7 @@ test('one branch fails: the sibling still completes, fan-in still eventually pro
   );
   assert.equal(byBranch['init-parallel-phases#init-parallel-phases:vm-infra-setup'].status, 'done');
 
-  // REQ-10: the group is complete (every branch terminal) even though one failed —
-  // "complete" tracks accounting, not success. Nothing is silently lost (AC-04).
+  // The group is complete (every branch terminal) even though one failed —
+  // "complete" tracks accounting, not success. Nothing is silently lost.
   assert.equal(status.complete, true);
 });

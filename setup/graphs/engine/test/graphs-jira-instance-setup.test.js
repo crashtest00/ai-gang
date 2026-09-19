@@ -1,7 +1,7 @@
 'use strict';
 
 // Structural validation and end-to-end walks of the checked-in
-// jira-instance-setup pilot graph (graph-process-engine.md REQ-17),
+// jira-instance-setup pilot graph,
 // converting docs/ClaudeInstructions.md Phase 1 (1.0 Jira Service Account,
 // 1.1 Jira Custom Fields). Unlike every other converted graph so far, this
 // one's fork is a human's declared preference (whether this AI Gang
@@ -69,8 +69,7 @@ test('answering "yes" walks both instance-setup steps in order (1.0 then 1.1) to
   ]);
 });
 
-// REQ-17 acceptance: "resuming with any answer other than a declared `when`
-// key is rejected."
+// Resuming with any answer other than a declared `when` key is rejected.
 test('an answer other than "yes"/"no" is rejected, not silently defaulted', async () => {
   const doc = loadGraph();
   await assert.rejects(
@@ -79,15 +78,14 @@ test('an answer other than "yes"/"no" is rejected, not silently defaulted', asyn
   );
 });
 
-// REQ-17 acceptance: "Walking to any escalation node halts the walk...
-// pending a human's choice."
+// Walking to any escalation node halts the walk pending a human's choice.
 test('with no resolveEscalation handler at all, the walk halts rather than guessing', async () => {
   const doc = loadGraph();
   await assert.rejects(() => walkGraph(doc, {}), /halts the walk pending a human choice/);
 });
 
-// REQ-17 acceptance: "No escalation node declares a check, procedure, or
-// writes field" — asserted directly against the checked-in document, not
+// No escalation node declares a check, procedure, or
+// writes field — asserted directly against the checked-in document, not
 // just the generic schema-level test in schema.test.js.
 test('the entry escalation node declares no check, procedure, or writes', () => {
   const doc = loadGraph();

@@ -1,7 +1,7 @@
 'use strict';
 
 // Redis Streams transport: durable producer/consumer primitives shared by
-// every ScrumMaster<->agent flow. See the redis-streams design.
+// every ScrumMaster<->agent flow.
 //
 // Design notes:
 // - One shared client is enough. Unlike Pub/Sub, Streams commands (XADD,
@@ -16,7 +16,7 @@
 const { fromStreamFields, toStreamFields, validateEnvelope } = require('./envelope');
 
 const DEFAULTS = Object.freeze({
-  leaseMs: 35 * 60 * 1000,      // REQ-06 default: 35 minutes
+  leaseMs: 35 * 60 * 1000,      // default: 35 minutes
   // XAUTOCLAIM takes a single minIdleTime for the whole scan, so this is the
   // only threshold actually enforced before an entry is reclaimed — it must
   // exceed realistic handler duration, not just genuine-retry latency,
@@ -26,7 +26,7 @@ const DEFAULTS = Object.freeze({
   // task; a handler that's still working past that is reclaimed and re-run
   // concurrently (see the mitigated bug in reclaimStale below).
   retryDelayMs: 10 * 60 * 1000,
-  maxAttempts: 3,                // REQ-06 default: 3 attempts
+  maxAttempts: 3,                // default: 3 attempts
   blockMs: 5000,
   reclaimIntervalMs: 60 * 1000,
   batchSize: 10,
@@ -66,7 +66,7 @@ async function ensureGroup(client, stream, group) {
 // Durably enqueue an envelope. If `dedupeKey` is supplied, the add is
 // idempotent: a caller that has already durably enqueued this logical
 // message (e.g. the same Jira webhook delivered twice) gets
-// `{ deduped: true }` back instead of a second stream entry (REQ-02, REQ-05).
+// `{ deduped: true }` back instead of a second stream entry.
 async function publish(client, stream, envelope, { dedupeKey, dedupeTtlSeconds = 7 * 24 * 60 * 60 } = {}) {
   validateEnvelope(envelope);
 
@@ -107,7 +107,7 @@ function compareStreamIds(a, b) {
   return (aSeq || 0) - (bSeq || 0);
 }
 
-// Trim acknowledged entries older than retentionMs (REQ-10, default 7 days).
+// Trim acknowledged entries older than retentionMs (default 7 days).
 // Never trims past the oldest entry still pending in `group` — an
 // unacknowledged poison message or a slow retry must stay recoverable
 // regardless of age.
@@ -123,7 +123,7 @@ async function trimAcknowledged(client, stream, group, retentionMs = 7 * 24 * 60
   await client.xTrim(stream, 'MINID', minId);
 }
 
-// Trim dead-letter entries older than retentionMs (REQ-10, default 30 days).
+// Trim dead-letter entries older than retentionMs (default 30 days).
 // Dead-letter entries have no consumer group of their own to protect —
 // operators are expected to replay what they need within the window.
 async function trimDeadLetters(client, sourceStream, retentionMs = 30 * 24 * 60 * 60 * 1000) {
@@ -160,7 +160,7 @@ async function recordSuccess(client, stream, group) {
   await client.set(healthKey(stream, group), new Date().toISOString());
 }
 
-// Aggregate health/diagnostics for one stream+group (REQ-09).
+// Aggregate health/diagnostics for one stream+group.
 async function health(client, stream, group) {
   const result = {
     stream,
@@ -195,7 +195,7 @@ async function health(client, stream, group) {
   try {
     // node-redis's xInfoGroups() mapping drops the 'lag' field (Redis
     // 7+: entries never yet delivered to this group), so read it via the
-    // raw reply instead — this is the REQ-09 "undelivered count".
+    // raw reply instead — this is the "undelivered count".
     const raw = await client.sendCommand(['XINFO', 'GROUPS', stream]);
     const groupInfo = (raw || []).map(flatReplyToObject).find(g => g.name === group);
     if (groupInfo && groupInfo.lag !== undefined && groupInfo.lag !== null) {
@@ -223,7 +223,7 @@ function flatReplyToObject(pairs) {
   return obj;
 }
 
-// health status classification per REQ-09.
+// health status classification.
 function classifyHealth(h, { pendingAgeThresholdMs = 10 * 60 * 1000, deadLetterThreshold = 1 } = {}) {
   if (!h.connected) return 'unhealthy';
   if ((h.oldestPendingAgeMs ?? 0) > pendingAgeThresholdMs) return 'degraded';
@@ -238,6 +238,17 @@ function classifyHealth(h, { pendingAgeThresholdMs = 10 * 60 * 1000, deadLetterT
 // `.permanent = true` sends the entry straight to the dead-letter stream
 // without consuming a retry attempt slot; any other throw is treated as a
 // transient failure and left pending for reclaim/retry up to maxAttempts.
+//
+// `onDeadLetter(envelope, reason, attempts)` (optional) runs, best-effort,
+// whenever an entry with a real (parsed) envelope is dead-lettered — both an
+// immediate `.permanent` rejection and ordinary retry exhaustion. This stream
+// is transport-only and has no notion of what a caller's envelope means, so
+// it cannot itself update any domain-level record of the outcome; a caller
+// that keeps its own bookkeeping about a message's fate (e.g. gateway.js's
+// A2A Task store, which a container's later status report is compared
+// against) hooks in here rather than duplicating retry/exhaustion logic at
+// the call site. A hook failure is logged, never allowed to re-fail the
+// entry or block the consumer loop.
 function createConsumer(client, {
   stream,
   group,
@@ -249,6 +260,7 @@ function createConsumer(client, {
   blockMs = DEFAULTS.blockMs,
   reclaimIntervalMs = DEFAULTS.reclaimIntervalMs,
   batchSize = DEFAULTS.batchSize,
+  onDeadLetter,
 }) {
   let running = false;
   let loopPromise = null;
@@ -268,6 +280,15 @@ function createConsumer(client, {
 
   async function bumpAttempts(entryId) {
     return client.hIncrBy(attemptsKey(stream, group), entryId, 1);
+  }
+
+  async function fireOnDeadLetter(envelope, reason, attemptNumber) {
+    if (!onDeadLetter) return;
+    try {
+      await onDeadLetter(envelope, reason, attemptNumber);
+    } catch (hookErr) {
+      console.error(`[streams] ${stream}/${group} onDeadLetter hook failed for a dead-lettered entry:`, hookErr.message);
+    }
   }
 
   async function processEntry(entryId, fields) {
@@ -295,11 +316,13 @@ function createConsumer(client, {
       if (err && err.permanent) {
         console.error(`[streams] ${stream}/${group} entry ${entryId} permanently failed (attempt ${attemptNumber}):`, err.message);
         await deadLetter(client, stream, group, entryId, envelope, err.message, attemptNumber);
+        await fireOnDeadLetter(envelope, err.message, attemptNumber);
         return;
       }
       if (attemptNumber >= maxAttempts) {
         console.error(`[streams] ${stream}/${group} entry ${entryId} exhausted ${attemptNumber} attempts, dead-lettering:`, err?.message);
         await deadLetter(client, stream, group, entryId, envelope, `retry exhausted: ${err?.message}`, attemptNumber);
+        await fireOnDeadLetter(envelope, `retry exhausted: ${err?.message}`, attemptNumber);
         return;
       }
       // Leave pending. It becomes reclaimable once its idle time exceeds

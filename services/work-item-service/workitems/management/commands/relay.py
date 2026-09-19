@@ -1,11 +1,10 @@
 """
-Standalone outbox relay process (internal-work-item-service.md REQ-06,
-Open Question 1: "whether the outbox relay runs as a separate deployable
-process or in-process within the service is an implementation detail, not
-decided here" — this repo runs it as a separate process, `python
+Standalone outbox relay process. Whether the outbox relay runs as a
+separate deployable process or in-process within the service is an
+implementation detail; this repo runs it as a separate process, `python
 manage.py relay`, so it can be killed and restarted independently of the
 HTTP/consumer process, which is also what
-tests/test_relay_integration.py exercises).
+tests/test_relay_integration.py exercises.
 
 Env (read via Django settings, which read them from the environment —
 see workitemservice/settings.py): PGHOST/PGPORT/PGUSER/PGPASSWORD/
@@ -24,7 +23,7 @@ from workitems.relay import run_loop
 
 
 class Command(BaseCommand):
-    help = 'Run the transactional outbox relay loop (REQ-06).'
+    help = 'Run the transactional outbox relay loop.'
 
     def handle(self, *args, **options):
         redis_client = new_client()

@@ -1,7 +1,6 @@
 'use strict';
 
-// Pure decision logic for Jenkins workspace/Docker-cache pruning
-// (the jenkins-cache-retention design REQ-01..REQ-04).
+// Pure decision logic for Jenkins workspace/Docker-cache pruning.
 //
 // Nothing in this file touches the filesystem, shells out to `docker`, or
 // calls the Jenkins REST API. Every function takes plain data in and
@@ -23,8 +22,8 @@ const DEFAULT_DISK_CHECK_INTERVAL_MINUTES = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Decide which on-disk job workspaces are eligible for pruning (REQ-01),
- * with in-progress builds always excluded no matter what (REQ-04).
+ * Decide which on-disk job workspaces are eligible for pruning,
+ * with in-progress builds always excluded no matter what.
  *
  * @param {Array<{job: string, branch: string|null, path: string, mtimeMs: number, building: boolean}>} workspaces
  * @param {object} [opts]
@@ -56,9 +55,9 @@ function selectWorkspacesToPrune(workspaces, opts = {}) {
       const overAge = ageMs > maxAgeMs;
       const overCount = rank >= maxKeepPerJob;
 
-      // REQ-04 is a hard override: an in-progress build's workspace is
-      // never eligible, regardless of age or how many superseded
-      // workspaces its job has — checked last, wins over every other rule.
+      // An in-progress build's workspace is never eligible, regardless of
+      // age or how many superseded workspaces its job has — checked last,
+      // wins over every other rule.
       if (ws.building) {
         keep.push({ ...ws, reason: 'active-build' });
         return;
@@ -79,14 +78,14 @@ function selectWorkspacesToPrune(workspaces, opts = {}) {
 }
 
 /**
- * Build the argv for the nightly Docker image/layer cache prune (REQ-02).
+ * Build the argv for the nightly Docker image/layer cache prune.
  * Deliberately does NOT pass `-a`: `docker system prune` without `-a` only
  * ever touches dangling images, unused (i.e. not attached to any
  * container, running or stopped) build cache and networks, and stopped
  * containers — an image or cache layer backing a currently running build's
- * container is never a candidate, which is what gives REQ-04 its Docker-side
- * guarantee for free, from Docker's own semantics, rather than something
- * this script has to reimplement.
+ * container is never a candidate, which is what gives the in-progress-build
+ * guarantee its Docker-side coverage for free, from Docker's own semantics,
+ * rather than something this script has to reimplement.
  *
  * @param {object} [opts]
  * @param {number} [opts.untilHours]
@@ -119,8 +118,8 @@ function parseDockerReclaimedBytes(stdout) {
 }
 
 /**
- * REQ-03's hysteresis: start (or continue) an out-of-band sweep once usage
- * reaches the high watermark, and keep sweeping — across repeated
+ * The threshold sweep's hysteresis: start (or continue) an out-of-band
+ * sweep once usage reaches the high watermark, and keep sweeping — across repeated
  * evaluations — until it drops back below the low watermark. Exposed as a
  * pure state-transition function: caller supplies the current reading and
  * whether a sweep is already in progress, gets back whether a sweep should

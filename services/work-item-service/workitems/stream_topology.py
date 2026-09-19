@@ -1,14 +1,14 @@
 """
 Stream naming for this service — a direct port of the Node service's
 src/streamTopology.js, following the same `aigang:...:{project}` topology
-redis-streams.md/registry.js already establish
-(internal-work-item-service.md §"Reuse of existing Streams topology").
+the Streams layer/registry.js already establish, reusing the existing
+Streams topology.
 
-Command channel (REQ-03, writes in): aigang:workitems:{project}, one shared
+Command channel (writes in): aigang:workitems:{project}, one shared
   consumer group "workitemservice".
-Event stream (REQ-05/REQ-06, writes out): aigang:workitems:{project}:events
+Event stream (writes out): aigang:workitems:{project}:events
   — no single fixed group; every interested subscriber creates its own
-  group when it starts consuming (REQ-05's "any interested subscriber").
+  group when it starts consuming, so any interested subscriber can read it.
 Webhook ingestion: reuses scrummaster's own aigang:webhooks:{project}
   stream (registry.webhook_stream_name) rather than a second stream — see
   webhook_consumer.py's module comment for why.

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const registry = require('../src/registry');
 
-// --- parseCatalog: pure-function contract tests (agent-assignment.md REQ-01) ---
+// --- parseCatalog: pure-function contract tests ---
 
 test('parseCatalog accepts a well-formed catalog', () => {
   const result = registry.parseCatalog({
@@ -62,7 +62,7 @@ test('parseCatalog rejects a non-array "agents"', () => {
   assert.throws(() => registry.parseCatalog({ agents: 'nope' }, 'test.json'), /must be a non-empty array/);
 });
 
-// --- parseProjects: pure-function contract tests (agent-assignment.md REQ-02) ---
+// --- parseProjects: pure-function contract tests ---
 
 const validCatalog = registry.parseCatalog({
   agents: [
@@ -119,8 +119,8 @@ test('load() reads the fixture catalog and project config; getEffectiveAgents/ge
   assert.equal(freshRegistry.getEffectiveAgents('no-such-project').length, 0);
 
   // projectChannel/gatewayChannel (Pub/Sub channel naming) were removed when
-  // ScrumMaster<->agent messaging migrated to Redis Streams — see
-  // the redis-streams design. agentStreamName/gatewayStreamName
+  // ScrumMaster<->agent messaging migrated to Redis Streams.
+  // agentStreamName/gatewayStreamName
   // are the replacement, keyed by the same routing.channelSuffix.
   assert.equal(
     freshRegistry.agentStreamName('test-project', 'backend'),

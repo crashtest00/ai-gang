@@ -1,4 +1,4 @@
-# Cloudflare setup pilot graph (graph-process-engine.md REQ-10, REQ-11).
+# Cloudflare setup pilot graph.
 #
 # Covers the four documented branch points:
 #   1. Cloudflare account/token presence          (cf-token-present)
@@ -9,7 +9,7 @@
 #
 # Tunnel creation (create-tunnel-api) uses Cloudflare's account-scoped
 # Tunnel REST API with config_src: "local", authenticated by CF_API_KEY —
-# no interactive `cloudflared tunnel login` browser step (REQ-11). See
+# no interactive `cloudflared tunnel login` browser step. See
 # scripts/setup-cloudflare-tunnel.sh for the implementation this node's
 # `procedure` describes.
 #
@@ -84,7 +84,7 @@ nodes:
       Create the tunnel via Cloudflare's account-scoped Tunnel API
       (POST /accounts/{CF_ACCOUNT_ID}/cfd_tunnel), authenticated by
       CF_API_KEY, with config_src: "local" and a locally-generated
-      tunnel_secret (REQ-11). Write the resulting credentials to
+      tunnel_secret. Write the resulting credentials to
       ~/.cloudflared/<tunnel_id>.json in cloudflared's own credentials-file
       format. No cloudflared tunnel login browser step is required.
     writes:

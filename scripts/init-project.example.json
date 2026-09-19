@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "acceptance-project",
+    "type": "web",
+    "stack": "node-express"
+  }
+}

@@ -1,12 +1,12 @@
 """
-canonical-work-item-schema.md §3 as Django models. Table names, column
+The canonical work-item schema as Django models. Table names, column
 names, and constraints mirror the Node implementation's migrations/001-010
 exactly (same `db_table`/`db_column` throughout) so the physical schema
 this service stands up is unchanged from the reference implementation —
-only the framework/ORM producing it is different (REQ-02: the datastore
+only the framework/ORM producing it is different (the datastore
 engine and its exact table shape were never a cross-service contract, but
 matching it anyway keeps this port auditable column-for-column against the
-schema doc and the Node migrations it replaces).
+schema and the Node migrations it replaces).
 """
 
 from __future__ import annotations
@@ -19,28 +19,28 @@ from django.utils import timezone
 
 
 class WorkItem(models.Model):
-    """§3.1 — REQ-01 canonical identity, REQ-02 status, REQ-03 assignment,
-    REQ-16 write-scope. `id` is NEVER minted by this service — it is the
+    """Canonical identity, status, assignment,
+    and write-scope. `id` is NEVER minted by this service — it is the
     Refinement Agent's own proposal UUID (or any other AI-Gang-issued id),
-    per REQ-01's "issued and owned by AI Gang"."""
+    issued and owned by AI Gang."""
 
     # editable (with a generated default) rather than editable=False: every
     # non-admin caller (Streams commands, the Jira webhook consumer) still
     # goes through store.create_work_item, which requires the caller to
-    # supply an id explicitly (REQ-01 — "never minted by this service on a
-    # caller's behalf") and ignores this default entirely. The default only
+    # supply an id explicitly — never minted by this service on a
+    # caller's behalf — and ignores this default entirely. The default only
     # matters for the one interface where a human, not an upstream agent,
-    # is the id's origin: the Django admin "Add work item" form (REQ-08) —
+    # is the id's origin: the Django admin "Add work item" form —
     # letting it pre-fill a fresh UUID there is a human-admin UX convenience,
-    # not a relaxation of REQ-01 for any agent-facing path.
+    # not a relaxation of that rule for any agent-facing path.
     id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     external_key = models.TextField(unique=True, null=True, blank=True)
     type = models.TextField()
     display_name = models.TextField()
     description = models.TextField(null=True, blank=True)
-    # No literal CHECK constraint (canonical-work-model.md REQ-02 requires
-    # validation against per-project status configuration at write time
-    # instead — see status_vocabulary.py / ProjectStatusConfig).
+    # No literal CHECK constraint (status is validated against per-project
+    # status configuration at write time instead — see status_vocabulary.py
+    # / ProjectStatusConfig).
     status = models.TextField()
     assignee_agent_id = models.TextField(null=True, blank=True, db_column='assignee_agent_id')
     priority = models.SmallIntegerField(default=0)
@@ -50,7 +50,7 @@ class WorkItem(models.Model):
         'self', null=True, blank=True, on_delete=models.DO_NOTHING,
         db_column='parent_id', related_name='children',
     )
-    # Not in canonical-work-item-schema.md's own column list — a necessary,
+    # Not in the canonical schema's own column list — a necessary,
     # non-speculative addition documented the same way the Node migration
     # documented it: every other table is scoped to a project only
     # indirectly (via work_item), and mode/status-vocabulary/dependency
@@ -76,9 +76,23 @@ class WorkItem(models.Model):
     def __str__(self) -> str:
         return f'{self.display_name} ({self.id})'
 
+    def save(self, *args, **kwargs):
+        # A blank External key must be stored as NULL, never as ''. The
+        # unique constraint on this column treats '' as a value like any
+        # other, so two work items both left without an external key would
+        # collide on the second one — NULL is the only value a unique
+        # constraint never matches against another row, including another
+        # NULL. Normalized here (not only on the admin form, see
+        # WorkItemAdminForm.clean_external_key) so every writer that builds
+        # a WorkItem directly, not through that form, gets the same
+        # guarantee.
+        if self.external_key == '':
+            self.external_key = None
+        super().save(*args, **kwargs)
+
 
 class WorkItemStoryDetail(models.Model):
-    """§3.2 — REQ-17 Story schema field contract. 1:1 optional child table
+    """Story schema field contract. 1:1 optional child table
     (class-table inheritance): a row exists only for `type = 'story'`."""
 
     work_item = models.OneToOneField(
@@ -101,15 +115,14 @@ class WorkItemStoryDetail(models.Model):
 
 
 class WorkItemReleaseDetail(models.Model):
-    """§3.2b — canonical-release-workflow.md REQ-01 Release schema field
+    """Release schema field
     contract. 1:1 optional child table (class-table inheritance): a row
     exists only for `type = 'release'`, same pattern as
-    WorkItemStoryDetail. Target Project is NOT a column here — REQ-01 maps
-    it onto the work item's own `project` (§3.1), the same field every
+    WorkItemStoryDetail. Target Project is NOT a column here — it maps
+    onto the work item's own `project`, the same field every
     other type already carries. `candidate_sha`/`build_identifier`/
-    `preview_url` are automation-populated and empty until candidate cut
-    (REQ-04); write-once-per-candidate, not appended
-    (features/canonical-release-workflow.md §4)."""
+    `preview_url` are automation-populated and empty until candidate cut;
+    write-once-per-candidate, not appended."""
 
     work_item = models.OneToOneField(
         WorkItem, primary_key=True, on_delete=models.CASCADE,
@@ -128,7 +141,7 @@ class WorkItemReleaseDetail(models.Model):
 
 
 class WorkItemLink(models.Model):
-    """§3.3 — REQ-04 dependency graph. Directional typed edge."""
+    """Dependency graph. Directional typed edge."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     from_work_item = models.ForeignKey(
@@ -148,8 +161,8 @@ class WorkItemLink(models.Model):
             models.Index(fields=['to_work_item', 'link_type'], name='idx_work_item_link_to'),
         ]
         constraints = [
-            # Not in the schema doc's column list, but createLink (REQ-04/
-            # REQ-07's idempotent-redelivery requirement) must be able to
+            # Not in the canonical schema's column list, but createLink's
+            # idempotent-redelivery requirement must be able to
             # avoid creating a duplicate identical link on retry/redelivery.
             models.UniqueConstraint(
                 fields=['from_work_item', 'to_work_item', 'link_type'],
@@ -162,7 +175,7 @@ class WorkItemLink(models.Model):
 
 
 class WorkItemHistory(models.Model):
-    """§3.4 — REQ-05 append-only history. Rows are append-only: store.py
+    """Append-only history. Rows are append-only: store.py
     never issues an UPDATE/DELETE against this table, and as of migration
     0002 that's also enforced at the database level — a trigger rejects
     any UPDATE/DELETE against work_item_history regardless of caller,
@@ -189,14 +202,14 @@ class WorkItemHistory(models.Model):
 
 
 class WorkItemArtifact(models.Model):
-    """§3.5 — REQ-06 artifact association."""
+    """Artifact association."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     work_item = models.ForeignKey(
         WorkItem, on_delete=models.DO_NOTHING, db_column='work_item_id', related_name='artifacts',
     )
     # 'commit', 'pull_request', 'ci_build', 'deployment' at minimum; also
-    # reused as REQ-19's per-item completion-marker "stepKey" (store.py).
+    # reused as the per-item completion-marker "stepKey" (store.py).
     artifact_type = models.TextField()
     reference = models.TextField()
     created_at = models.DateTimeField(default=timezone.now)
@@ -212,7 +225,7 @@ class WorkItemArtifact(models.Model):
 
 
 class WorkItemComment(models.Model):
-    """§3.6 — REQ-18 comment-thread communication contract.
+    """Comment-thread communication contract.
     `source_message_id` is the idempotency key for redelivered
     comment-producing messages."""
 
@@ -238,7 +251,7 @@ class WorkItemComment(models.Model):
 
 
 class ProjectConfig(models.Model):
-    """canonical-work-model.md REQ-14 — explicit, reversible, per-project
+    """Explicit, reversible, per-project
     mode selection. local mode is the unconditional default (a project
     with no row here is treated as local mode — see project_config.py); a
     row is written the first time a project is touched or its mode
@@ -265,7 +278,7 @@ class ProjectConfig(models.Model):
 
 
 class ProjectStatusConfig(models.Model):
-    """canonical-work-model.md REQ-02 — a project's *additional* declared
+    """A project's *additional* declared
     custom statuses and their required baseline-status refinement and Jira
     status-name mapping. The minimum ten canonical statuses are fixed and
     never stored here (status_vocabulary.py hardcodes them)."""
@@ -286,7 +299,7 @@ class ProjectStatusConfig(models.Model):
 
 
 class OutboxEvent(models.Model):
-    """internal-work-item-service.md REQ-06 — transactional outbox. Written
+    """Transactional outbox. Written
     in the SAME transaction as the datastore write it describes; relayed
     to Redis Streams by a separate process (workitems/management/commands/
     relay.py) that marks each row published_at once XADD has durably
@@ -315,8 +328,8 @@ class OutboxEvent(models.Model):
 
 
 class AccessLog(models.Model):
-    """internal-work-item-service.md REQ-04 — "Read access MUST be
-    recorded in the service's own API/access logs, not in Streams." A
+    """Read access MUST be
+    recorded in the service's own API/access logs, not in Streams. A
     dedicated table rather than an application log file: queryable,
     survives container recreation."""
 
@@ -338,10 +351,10 @@ class AccessLog(models.Model):
 
 
 class WebhookFailure(models.Model):
-    """canonical-work-model.md REQ-09/REQ-11 — a durable, operator-visible
+    """A durable, operator-visible
     failure record for a Jira-originated webhook event that either
     exhausted Streams' own retry/dead-letter handling, or was rejected by
-    REQ-11 validation against internal canonical rules."""
+    validation against internal canonical rules."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.TextField()

@@ -6,10 +6,10 @@
 #   URL=<github actions run url, or empty>
 # for the calling Jenkins pipeline stage to capture via `sh(returnStdout: true)`.
 #
-# Native validation is supplementary (see the desktop-app-support design
-# REQ-03, REQ-06 and release-workflow.md's web-beta-is-default-acceptance-surface
-# design) — this script always exits 0 so a native build failure never fails the
-# release-candidate job itself; only its reported STATUS reflects the outcome.
+# Native validation is supplementary — the web/Beta preview is the default
+# acceptance surface — so this script always exits 0 so a native build
+# failure never fails the release-candidate job itself; only its reported
+# STATUS reflects the outcome.
 #
 # Requires: gh (authenticated via GITHUB_TOKEN in the environment), run from
 # inside the project's checked-out repository, CANDIDATE_SHA set in the

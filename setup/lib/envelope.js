@@ -4,7 +4,7 @@
 // (mounted read-only into every project container at /agent-docs/lib) so
 // subscriber.js and gateway-publish.js can require it without depending on
 // the scrummaster package. Schema must stay identical to the ScrumMaster
-// copy — see the redis-streams design §4.
+// copy.
 
 const crypto = require('crypto');
 

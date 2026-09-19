@@ -1,5 +1,5 @@
 # AI Gang Internal Work-Item Service — production/deployment image.
-# (the internal-work-item-service design — Django + PostgreSQL.)
+# (Django + PostgreSQL.)
 #
 # Not to be confused with docker-compose.test.yml, which only stands up
 # ephemeral Postgres/Redis fixtures for `pytest`. This image runs the
@@ -9,8 +9,7 @@
 # (`manage.py relay`), and the Streams command/webhook consumers
 # (`manage.py run_consumers`) — kept as separate containers/processes so
 # the relay can be killed and restarted independently of the API and
-# consumers (REQ-06 Open Question 1; also what AC-02's mid-batch-kill test
-# in the V2-E2E-TEST-PLAN design exercises).
+# consumers — this is also what the mid-batch-kill test suite exercises.
 
 FROM python:3.12-slim
 

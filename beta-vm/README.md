@@ -1,15 +1,14 @@
 # Beta VM
 
-Config-as-code for the Beta VM described in `docs/release-strategy.md` and
-the release-workflow design. This is a separate machine from the
+Config-as-code for the Beta VM described in `docs/release-strategy.md`.
+This is a separate machine from the
 Development VM (which runs `ai-gang`, ScrumMaster, Redis, Jenkins, and agent
 containers) — separate secrets, separate data, and it's the only environment
 that runs release-candidate preview containers.
 
 Provisioning an actual Beta VM (the droplet/instance itself, DNS, firewall)
 is a Cloud Engineer / operator bootstrap concern, not something this repo's
-scripts do — see release-workflow.md's Dependencies section. What lives
-here is what runs *on* that VM once it exists.
+scripts do. What lives here is what runs *on* that VM once it exists.
 
 **Container topology is operator-defined.** Dev, beta, and prod can run as
 containers on this one VM, be split across several, or each get its own
@@ -92,5 +91,5 @@ Exposing the Docker API (even over TLS) to Jenkins would let a compromised
 Jenkins credential run arbitrary containers on this VM. A forced SSH command
 scoped to five named operations (`deploy`, `preview-deploy`,
 `preview-teardown`, `preview-teardown-by-issue`) with regex-validated
-arguments is a much smaller blast radius, and it's what
-release-workflow.md's Beta VM remote-deploy mechanism dependency specifies.
+arguments is a much smaller blast radius, matching what the release process
+requires of the Beta VM's remote-deploy mechanism.

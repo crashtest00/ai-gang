@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # preview-teardown.sh <project> <sha>
 #
-# Torn down after the Release ticket resolves (approved or abandoned) — see
-# the release-workflow design step 15. Called by the
-# production-promote job once it has redeployed the same artifact to prod.
+# Torn down after the Release ticket resolves (approved or abandoned).
+# Called by the production-promote job once it has redeployed the same
+# artifact to prod.
 
 set -euo pipefail
 PROJECT="$1"

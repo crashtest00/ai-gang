@@ -24,7 +24,6 @@ async function walkAgainst(templateName) {
   return walkGraph(doc, { evaluateCheck: async () => detectBaseImageFamily(content) });
 }
 
-// REQ-12 acceptance
 test('Dockerfile-node.template (node:22-alpine) reaches the alpine-busybox branch', async () => {
   const result = await walkAgainst('Dockerfile-node.template');
   const refs = result.transcript.map((t) => t.ref);
@@ -39,7 +38,7 @@ test('Dockerfile-python.template (python:3.11-slim) reaches the debian-ubuntu br
   assert.equal(result.outcome, 'success');
 });
 
-test('Dockerfile-tauri.template (REQ-14) reaches the debian-ubuntu branch', async () => {
+test('Dockerfile-tauri.template reaches the debian-ubuntu branch', async () => {
   const result = await walkAgainst('Dockerfile-tauri.template');
   const refs = result.transcript.map((t) => t.ref);
   assert.ok(refs.includes('base-image-family#detect-base-image:debian-ubuntu'));

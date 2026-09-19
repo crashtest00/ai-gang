@@ -1,7 +1,6 @@
-# canonical-work-item-schema.md REQ-05 / internal-work-item-service.md REQ-07:
-# "This table has no UPDATE/DELETE grant in the persistence layer... enforced
-# there, not merely by convention." A trigger enforces this at the database
-# level regardless of which role connects (PGUSER is env-configurable, so a
+# The work_item_history table must be append-only, enforced at the
+# database level itself, not merely by convention. A trigger enforces this
+# regardless of which role connects (PGUSER is env-configurable, so a
 # role-specific REVOKE would not be portable across environments the way this
 # is) and regardless of caller — including a future code path in store.py
 # that might otherwise try to mutate a history row by mistake.

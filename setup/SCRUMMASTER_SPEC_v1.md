@@ -273,9 +273,7 @@ Creates a subtask under a specified parent ticket. Used by the Refinement Agent 
 
 All four operations above are now carried as canonical A2A envelopes rather
 than bare `{"type": ...}` messages — see [Redis Message
-Contract](#redis-message-contract) below and
-a2a-messaging.md for the full
-contract.
+Contract](#redis-message-contract) below for the full contract.
 
 ### Agent Comment Standard
 
@@ -349,7 +347,7 @@ and instructions are all embedded in that prompt text. The container-side
 --dangerously-skip-permissions -` via stdin; it does not otherwise parse the
 message. On completion, `subscriber.js` durably publishes a terminal
 `task_status` envelope (`completed` or, after retries are exhausted,
-`failed`) back on the gateway stream — see redis-streams.md REQ-07; this is a
+`failed`) back on the gateway stream; this is a
 Streams-level execution-outcome signal, not agent-authored A2A content.
 
 ### Outbound: Agent → ScrumMaster (`aigang:gateway:{project-name}`)
@@ -405,23 +403,41 @@ what to do:
 | `state` | `data.operation` | Behavior |
 | --- | --- | --- |
 | `working` | `comment` | Post comment |
-| `working` | `reassign` (`data.agentFieldValue`) | Set Agent field (agent-assignment.md-validated) |
-| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue`) | Create subtask under the sending Task's own ticket (agent-assignment.md-validated), then dispatch it |
+| `working` | `reassign` (`data.agentFieldValue`) | Set Agent field (validated against the agent roster) |
+| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue` — all required) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
 | `working` | *(none)* | Plain progress comment (the text Part is posted as-is) |
+| `working` | any other value | Refused: a comment naming the unsupported operation and the ones that are supported, and the ticket is left Blocked |
 | `input-required` / `auth-required` | *(none — state carries the meaning)* | Set Blocked field + comment |
-| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — ticket stays In Progress; Jenkins owns the In Review transition (release-workflow.md REQ-10) |
+| `completed` with a `pull-request` artifact | — | Post PR-opened comment only — no transition is made here, and the log reports the status the ticket actually holds; Jenkins owns the In Review transition |
 | `completed` without an artifact | — | Post the closing comment, if any |
 | `failed` / `canceled` / `rejected` | — | Set Blocked field + comment identifying the terminal failure |
 
 An optional `data.reference: { "file": "...", "function": "..." }` sibling
 field is supported on any operation.
 
+A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
+ScrumMaster first tries to recover the id from the summary's own
+`<Role>: ...` prefix, and uses it only when that prefix names exactly one
+agent the project has, other than the agent that sent the request — never a
+default, and never the requester itself, which would route the subtask
+straight back to the agent that asked for it. If it cannot, nothing is created and
+the parent ticket receives a comment naming the missing field, the requested
+summary, and the project's permitted agent ids.
+
+Every request ScrumMaster refuses to act on — a missing field, an agent that
+failed catalog validation, an operation it has no handler for — also leaves
+the ticket Blocked (canonically, `needs-clarification`). A refused request
+leaves the parent with no subtask and no reassignment, so it must not go on
+reading as ready to work on, and the refusal must not leave the ticket in a
+different state depending on which refusal it was. Either way the outcome is
+visible: a Task with a rejected submission is recorded and logged as failed,
+even when the agent's own container reports that it exited cleanly.
+
 `materializeDecomposition`
-(dependency-handling.md)
-and `pipeline_retry` (Jenkins-originated, release-workflow.md REQ-11) are
+and `pipeline_retry` (Jenkins-originated) are
 separate, non-A2A payload shapes carried on this same gateway stream — the
 former owns its own structured-data contract and the latter is not
-agent-authored, so both are out of a2a-messaging.md's scope.
+agent-authored, so neither follows the A2A envelope contract described above.
 
 ---
 
@@ -533,8 +549,7 @@ failing fast if either is malformed (`src/registry.js`):
 
 Each registry entry also carries a nested `agentCard` block (name, description,
 version, skills, and so on) from which ScrumMaster derives an A2A AgentCard —
-see `services/scrummaster/src/a2a/agentCard.js` and A2A
-Messaging REQ-08. Registry load
+see `services/scrummaster/src/a2a/agentCard.js`. Registry load
 fails fast if any entry cannot produce a valid AgentCard, or if the catalog or
 project configuration itself is malformed.
 
@@ -614,7 +629,7 @@ AGENTS_CATALOG_PATH   # Path to agents.json (canonical agent catalog)
 PROJECTS_CONFIG_PATH  # Path to projects.json (per-project allowed-agent set)
 PROJECTS_BASE_PATH    # Path to ~/ai-gang/projects/ for BLOCKED marker search
 
-# Redis Streams tuning — see redis-streams.md for the full contract
+# Redis Streams tuning
 STREAM_RETENTION_DAYS      # Default 7 — acknowledged stream history retention
 DEAD_LETTER_RETENTION_DAYS # Default 30 — dead-letter entry retention
 ```

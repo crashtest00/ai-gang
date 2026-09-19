@@ -1,14 +1,13 @@
 'use strict';
 
-// Stable node/branch addressing scheme (graph-process-engine.md REQ-06):
+// Stable node/branch addressing scheme:
 //
 //   <graph_id>#<node_id>                      — a node
 //   <graph_id>#<node_id>:<when_key>            — a decision or escalation
-//                                                 node's branch edge (REQ-17)
+//                                                 node's branch edge
 //   <graph_id>#<node_id>:next                  — an action/remediation/fan-in
 //                                                 node's sole outgoing edge
 //   <graph_id>#<node_id>:<branch_id>           — a fan-out node's branch edge
-//                                                 (REQ-16)
 //
 // This module only knows the string shape. Whether a given edge key is
 // actually valid for a given node's kind is a schema-level question
@@ -28,7 +27,7 @@ function formatNodeRef(graphId, nodeId) {
 
 /**
  * Format an edge reference: `<graph_id>#<node_id>:<edgeKey>`.
- * edgeKey is a decision or escalation node's `when` value (REQ-17), the
+ * edgeKey is a decision or escalation node's `when` value, the
  * literal string "next" for an action/remediation/fan-in node, or a
  * fan-out node's `branch_id`.
  */
@@ -61,8 +60,8 @@ function parseRef(ref) {
  * Returns { node, edgeKey, target } where target is the resolved node id
  * the edge points to (undefined for a bare node reference).
  * Throws if the reference does not resolve to exactly one node/edge in this
- * document (REQ-06 acceptance: "a reference of any form resolves to exactly
- * one node or edge in exactly one graph document").
+ * document: a reference of any form must resolve to exactly
+ * one node or edge in exactly one graph document.
  */
 function resolveRef(graphDoc, ref) {
   const { graphId, nodeId, edgeKey } = parseRef(ref);

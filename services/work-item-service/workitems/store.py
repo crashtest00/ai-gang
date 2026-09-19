@@ -1,19 +1,18 @@
 """
-The internal work-item API's write path
-(internal-work-item-service.md §"Resolving 'the internal API'"). Every
-function here is the ONLY place canonical state is mutated (REQ-01: sole
-owner of the datastore) — every caller (Streams command consumer, Jira
+This service's internal work-item write path. Every
+function here is the ONLY place canonical state is mutated — sole
+owner of the datastore — every caller (Streams command consumer, Jira
 webhook consumer, admin UI) goes through this module, never the ORM
 directly.
 
 Direct, function-for-function port of the Node implementation's src/store.js
 onto Django's ORM + transaction.atomic(). Every mutating function:
  1. Opens one transaction (transaction.atomic()) covering the datastore
-    change, its WorkItemHistory row(s), and its OutboxEvent row(s) — REQ-05
-    and REQ-06 are therefore always atomic with the change itself.
- 2. Applies the REQ-10 write-gate before touching a gated field (status,
+    change, its WorkItemHistory row(s), and its OutboxEvent row(s), which
+    are therefore always atomic with the change itself.
+ 2. Applies the write-gate before touching a gated field (status,
     assignment, dependency link).
- 3. Recomputes REQ-20 parent rollup synchronously, in the same
+ 3. Recomputes the parent rollup synchronously, in the same
     transaction, when a status transition lands on a work item with a
     non-null parent_id.
 
@@ -60,7 +59,7 @@ class AssignmentRejectedError(Exception):
 
 
 class ReleaseGateError(Exception):
-    """canonical-release-workflow.md REQ-03 — a release work item's
+    """A release work item's
     `proposed` -> `in-review` transition (candidate cut) is rejected
     because the target project's beta queue is not clean."""
     code = 'RELEASE_GATE_REJECTED'
@@ -71,7 +70,7 @@ class ReleaseGateError(Exception):
 
 
 def write_outbox_event(*, project: str, event_type: str, work_item_id: Optional[str], payload: dict) -> str:
-    """REQ-06 — write an outbox row in the SAME transaction as the
+    """Write an outbox row in the SAME transaction as the
     datastore change it describes. Callers MUST already be inside a
     transaction.atomic() block. Public: reused directly by catchup.py and
     admin.py (both need to emit an outbound event for a write that isn't
@@ -98,7 +97,7 @@ def get_work_item(work_item_id) -> Optional[WorkItem]:
 
 
 # ---------------------------------------------------------------------------
-# REQ-01 canonical identity + create (REQ-07: full local-mode lifecycle)
+# Canonical identity + create (full local-mode lifecycle)
 # ---------------------------------------------------------------------------
 
 def _assert_story_fields_present(detail: Optional[dict]) -> None:
@@ -106,7 +105,7 @@ def _assert_story_fields_present(detail: Optional[dict]) -> None:
     missing = [f for f in required if not (detail and str(detail.get(f) or '').strip())]
     if missing:
         raise ValidationError(
-            f'Story is missing required fields and cannot leave \'proposed\' status: {", ".join(missing)} (REQ-17)'
+            f'Story is missing required fields and cannot leave \'proposed\' status: {", ".join(missing)}'
         )
 
 
@@ -115,9 +114,9 @@ def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = 
     """input: { id (REQUIRED), project, type, displayName, description,
     status, priority, parentId, writesFiles, writesServices,
     storyDetail: {...} (required if type === 'story' and status is leaving
-    'proposed' — REQ-17) }"""
+    'proposed') }"""
     if not input or not input.get('id'):
-        raise ValidationError('createWorkItem requires an id (canonical identity, REQ-01)')
+        raise ValidationError('createWorkItem requires an id (canonical identity)')
     if not input.get('project'):
         raise ValidationError('createWorkItem requires a project')
     if not input.get('type'):
@@ -181,7 +180,7 @@ def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = 
 
 
 # ---------------------------------------------------------------------------
-# REQ-03 canonical assignment authority
+# Canonical assignment authority
 # ---------------------------------------------------------------------------
 
 @transaction.atomic
@@ -214,7 +213,7 @@ def assign_work_item(work_item_id, agent_id: str, *, actor: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# REQ-02 status lifecycle + REQ-04 dependency gating + REQ-20 parent rollup
+# Status lifecycle + dependency gating + parent rollup
 # ---------------------------------------------------------------------------
 
 def _blockers_of(work_item_id) -> list[dict]:
@@ -231,7 +230,7 @@ def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str]) 
     SAME transaction."""
     old_status = item.status
     if old_status == new_status:
-        return None  # no-op: REQ-20 "if a change" — nothing to record or publish.
+        return None  # no-op: if there's no change, nothing to record or publish.
 
     item.status = new_status
     item.updated_at = timezone.now()
@@ -245,7 +244,7 @@ def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str]) 
 
 
 def _recompute_parent_rollup(parent_id, actor: Optional[str]) -> None:
-    """REQ-20 — recompute a parent's canonical status against its
+    """Recompute a parent's canonical status against its
     children's CURRENT states, synchronously, in the same transaction as
     the triggering child transition. Default policy: all children done =>
     parent done. Any child cancelled/failed => parent holds its last
@@ -282,12 +281,12 @@ _RELEASE_EVENT_KIND_BY_STATUS = {'in-review': 'requested', 'done': 'done', 'canc
 
 
 def _release_beta_queue_outstanding(project: str) -> list[WorkItem]:
-    """canonical-release-workflow.md REQ-03 — local-mode equivalent of
+    """Local-mode equivalent of
     `services/scrummaster/src/handlers.js`'s `handleReleaseRequested` JQL check
     (`issuetype != Release AND status = "In Review"`): any non-release work
     item on the target project still sitting in tester-acceptance review.
     Literal status comparison rather than baseline resolution, matching
-    `_blockers_of`'s precedent elsewhere in this module — REQ-03 doesn't
+    `_blockers_of`'s precedent elsewhere in this module — this check doesn't
     ask for baseline resolution and the Jira-mode check it mirrors doesn't
     do it either."""
     return list(WorkItem.objects.filter(project=project, status='in-review').exclude(type='release'))
@@ -303,10 +302,10 @@ def _publish_release_event(item: WorkItem, kind: str) -> None:
 def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = None,
                        origin: str = write_gate.Origins.DIRECT) -> WorkItem:
     """`origin` per write_gate.Origins — webhook_consumer.py passes
-    JIRA_WEBHOOK after its own REQ-11 pre-validation; direct callers
+    JIRA_WEBHOOK after its own pre-validation; direct callers
     (Streams commands, admin UI in local mode) pass DIRECT/ADMIN_UI.
 
-    canonical-release-workflow.md REQ-03: a `release` work item's
+    A `release` work item's
     `proposed` -> `in-review` transition (candidate cut) additionally
     requires the target project's beta queue to be clean. Checked and, if
     rejected, commented on HERE — outside `_transition_status_core`'s
@@ -364,7 +363,7 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
             'outOfScope': detail.out_of_scope,
         })
 
-    # REQ-04: a dependent MUST NOT reach 'ready' until every declared
+    # A dependent MUST NOT reach 'ready' until every declared
     # blocker has reached 'done'.
     if validity['baseline'] == 'ready':
         blockers = _blockers_of(work_item_id)
@@ -381,13 +380,13 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
     if changed and validity['baseline'] == 'done':
         _unblock_dependents(work_item_id, actor)
     if changed and item.type == 'release':
-        # canonical-release-workflow.md REQ-04/REQ-05/REQ-06 — publish the
+        # Publish the
         # SAME canonical event Jira-mode candidate-cut/production-promote/
         # abandonment already publish (webhook_consumer.py's
         # _handle_release_requested/_handle_release_done/
         # _handle_release_abandoned), so ScrumMaster's existing
         # dispatchConsumer.js consumer executes both modes through one
-        # code path (REQ-21) with no new Django-side handler. No
+        # code path, with no new Django-side handler. No
         # `jiraIssueKey` in the payload — dispatchConsumer.js/handlers.js
         # branch on its absence to read canonical fields instead of
         # calling Jira.
@@ -399,7 +398,7 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
 
 
 # ---------------------------------------------------------------------------
-# canonical-release-workflow.md REQ-04 — release-candidate writeback
+# Release-candidate writeback
 # ---------------------------------------------------------------------------
 
 @transaction.atomic
@@ -409,9 +408,8 @@ def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
     release work item's canonical fields once the candidate is cut, and
     posts a comment recording it — the local-mode equivalent of what
     Jenkins already does directly to a Jira Release ticket's custom fields
-    today (`scripts/create-release-fields.sh`). Write-once-per-candidate
-    (features/canonical-release-workflow.md §4): a new candidate cut
-    replaces these three fields, it does not append."""
+    today (`scripts/create-release-fields.sh`). Write-once-per-candidate: a
+    new candidate cut replaces these three fields, it does not append."""
     item = get_work_item(work_item_id)
     if not item or item.type != 'release':
         raise ValidationError(f'recordReleaseCandidate: no release work item {work_item_id}')
@@ -439,7 +437,7 @@ def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
 
 
 def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
-    """dependency-handling.md's "Done Handler", ported to operate against
+    """The dependency graph's "Done Handler" logic, ported to operate against
     this service's own graph instead of Jira issue links. Stateless and
     idempotent: a dependent only moves if it is CURRENTLY
     'waiting-on-dependency' with every blocker done, which becomes false
@@ -464,7 +462,7 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# REQ-06 artifact association (not gated by REQ-10)
+# Artifact association (not subject to the write-gate)
 # ---------------------------------------------------------------------------
 
 @transaction.atomic
@@ -483,7 +481,7 @@ def attach_artifact(work_item_id, artifact_type: str, reference: str, *, actor: 
     return {'id': str(artifact.id), 'workItemId': str(work_item_id), 'artifactType': artifact_type, 'reference': reference}
 
 
-# REQ-19 — durable per-item completion marker check, so an evidence-posting
+# Durable per-item completion marker check, so an evidence-posting
 # step determines completion from this service's own durable record
 # instead of a before/after comparison of external state.
 def has_completion_marker(work_item_id, step_key: str) -> bool:
@@ -498,7 +496,7 @@ def record_completion_marker(work_item_id, step_key: str, reference: str, *, act
 
 
 # ---------------------------------------------------------------------------
-# REQ-18 comment-thread communication contract (not gated by REQ-10)
+# Comment-thread communication contract (not subject to the write-gate)
 # ---------------------------------------------------------------------------
 
 def _row_to_comment(row: WorkItemComment) -> dict:
@@ -534,7 +532,7 @@ def append_comment(work_item_id, author: str, body: str, *, reference_file: Opti
 
 
 # ---------------------------------------------------------------------------
-# REQ-04 dependency graph (link create) — gated by REQ-10 like status/assignment.
+# Dependency graph (link create) — gated by the write-gate like status/assignment.
 # ---------------------------------------------------------------------------
 
 @transaction.atomic
@@ -554,7 +552,7 @@ def create_link(from_work_item_id, to_work_item_id, link_type: str, *, actor: Op
         from_work_item_id=from_work_item_id, to_work_item_id=to_work_item_id, link_type=link_type,
     ).first()
     if existing:
-        # Idempotent redelivery — dependency-handling.md REQ-04/REQ-07: a
+        # Idempotent redelivery: a
         # retry never creates a duplicate edge.
         return {'id': str(existing.id), 'deduped': True}
 

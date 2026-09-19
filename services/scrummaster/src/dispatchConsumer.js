@@ -1,18 +1,17 @@
 'use strict';
 
-// canonical-work-model.md REQ-21 — dispatch is triggered by canonical
-// domain events, not by ingestion path. A work item's transition into a
-// dispatch-eligible state MUST trigger agent dispatch via the SAME
-// mechanism regardless of which mode or ingress produced that transition
-// — a Jira-originated event validated by work-item-service (REQ-11), a
-// Django Admin Panel write (local mode), or any future ingress. This is
-// that single mechanism: one durable Streams consumer on
-// work-item-service's outbound canonical-event stream
+// Dispatch is triggered by canonical domain events, not by ingestion path.
+// A work item's transition into a dispatch-eligible state MUST trigger
+// agent dispatch via the SAME mechanism regardless of which mode or
+// ingress produced that transition — a Jira-originated event validated by
+// work-item-service, a Django Admin Panel write (local mode), or any
+// future ingress. This is that single mechanism: one durable Streams
+// consumer on work-item-service's outbound canonical-event stream
 // (aigang:workitems:{project}:events — the same stream
 // jiraCatchupConsumer.js already consumes, for a different purpose; this
 // is a second, independent consumer group, Streams' normal fan-out).
 //
-// REQ-22 — this is ALSO where ScrumMaster's now-deleted `routeWebhookEvent`
+// This is ALSO where ScrumMaster's now-deleted `routeWebhookEvent`
 // Jira-mode side effects (posting a comment, setting the Agent/Blocked
 // custom fields, mirroring a dispatch to Jira's "In Progress" status,
 // triggering the Release Jenkins jobs) are re-homed, driven by the small,
@@ -24,9 +23,9 @@
 //
 // Known simplification (flagged in the final report): dispatch-eligibility
 // below checks `status === 'ready'` literally rather than resolving a
-// project's custom status configuration to its baseline
-// (canonical-work-model.md REQ-02) — ScrumMaster has no local copy of
-// ProjectStatusConfig and no HTTP endpoint currently exposes it. A project
+// project's custom status configuration to its baseline — ScrumMaster has
+// no local copy of ProjectStatusConfig and no HTTP endpoint currently
+// exposes it. A project
 // using ONLY the ten fixed minimum-vocabulary statuses (the common case,
 // and the only case any test in this repo exercises) is unaffected; a
 // project that renames 'ready' via a custom status would not dispatch
@@ -69,8 +68,8 @@ async function stopDispatchConsumers() {
 // serializers.serialize_work_item_full) into the same "issue"-shaped
 // object jira.getIssue() returns, so the existing dispatchTask/
 // buildTaskPrompt/buildUnblockPrompt/buildRetryPrompt pipeline needs no
-// local-mode-specific branch of its own (REQ-21's acceptance: "no
-// local-mode-specific dispatch code path").
+// local-mode-specific branch of its own — dispatch deliberately has no
+// local-mode-specific code path.
 function issueLikeFromCanonical(full) {
   const detail = full.storyDetail || {};
   return {
@@ -94,15 +93,59 @@ function issueLikeFromCanonical(full) {
 
 // Jira-mode: always fetch the live issue for full fidelity, exactly as
 // every dispatch before this change did — the canonical mirror is
-// authoritative for status/assignment (REQ-01) but does not project every
+// authoritative for status/assignment but does not project every
 // Jira-only field (summary/description text formatting, live comment
 // authorship) into canonical events. Local mode: no Jira issue exists at
 // all, so the canonical record IS the full record.
+//
+// `external_key` only means something when this project actually has a live
+// Jira integration to resolve it against — a local-mode project's supported
+// path is the one the UserGuide documents, leaving it blank. A work item
+// that carries one anyway (typed in believing it was optional metadata, say)
+// would otherwise reach jira.getIssue() below and get a 404 that reads as a
+// transient failure — retried to exhaustion with no subtask, no agent
+// dispatch, and no pull request, and nothing telling the operator why.
+// Caught here, before ever calling Jira: explained on the item itself (the
+// only place an operator watching Django admin will see it — there is no
+// Jira ticket to comment on) and refused permanently, so it dead-letters
+// once instead of burning its retry budget on something a retry can never
+// fix.
 async function issueLikeFor(full) {
   if (full.external_key) {
+    const mode = await canonicalWorkItems.getMode(full.project);
+    if (mode.mode !== 'jira') {
+      await explainUnsupportedExternalKey(full);
+      const err = new Error(
+        `Work item ${full.id} has an External key ("${full.external_key}") but project "${full.project}" has no Jira integration configured`
+      );
+      err.permanent = true;
+      throw err;
+    }
     return jira.getIssue(full.external_key);
   }
   return issueLikeFromCanonical(full);
+}
+
+async function explainUnsupportedExternalKey(full) {
+  const body =
+    `[system] Cannot dispatch this item — it has an External key ("${full.external_key}") set, but this ` +
+    `project has no Jira integration configured. External key must stay blank until one is set up; clear ` +
+    `it and save to retry.`;
+
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'appendComment',
+    actor: 'system',
+    workItemId: full.id,
+    author: 'system',
+    body,
+    referenceFile: null,
+    referenceFunction: null,
+    sourceMessageId: null,
+  });
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'transitionStatus', actor: 'system', workItemId: full.id, status: 'needs-clarification',
+  });
+  console.error(`[dispatch] Work item ${full.id} has an unsupported External key ("${full.external_key}") for a local-mode project — refusing dispatch`);
 }
 
 async function maybeDispatch(workItemId, envelope) {
@@ -145,17 +188,50 @@ async function maybeDispatch(workItemId, envelope) {
 
   await handlers.dispatchTask(issueLike, agent, { dispatchId: envelope.messageId, promptFactory });
 
-  // handleShovelReady's own post-dispatch side effect, preserved: mirror a
-  // dev-agent dispatch to Jira's "In Progress" status. Not applicable to a
-  // refinement-agent dispatch (handleStoryCreated never did this) or to a
-  // local-mode item (no Jira issue to transition).
-  if (!isRefinement && full.external_key) {
-    await jira.transitionIssue(full.external_key, 'In Progress');
+  // Post-dispatch, the work item must stop reading as merely waiting to be
+  // picked up: an agent now has it, and the only place an operator can see
+  // that is the item's own status.
+  //
+  // With a Jira integration, that is the linked issue's "In Progress"
+  // status, mirrored exactly as it always has been for a dev-agent dispatch
+  // — and, as before, not for a refinement dispatch, whose ticket a human
+  // moves on the Jira board. An external key can only be present at all
+  // when the project has a live Jira integration (issueLikeFor above
+  // refuses it otherwise), so it is the whole condition for that branch.
+  //
+  // Without a Jira integration there is no issue to mirror onto, and the
+  // canonical record is the only thing anyone can look at. So the item
+  // itself is moved to 'in-progress' — for every dispatch made here,
+  // refinement included: nothing else ever moves it off 'ready', and an
+  // item being decomposed is being worked just as much as one being
+  // implemented. Until this, an item could be dispatched, worked, and have
+  // a pull request opened on it while still displaying as ready to pick up.
+  //
+  // That transition echoes back as a status-changed event this same
+  // consumer reads. It costs nothing and repeats nothing: maybeDispatch's
+  // own `status !== 'ready'` guard above rejects the echo, and
+  // maybeRedispatchForRework acts only on an 'in-review' -> 'in-progress'
+  // history entry, which this is not.
+  if (full.external_key) {
+    if (!isRefinement) await jira.transitionIssue(full.external_key, 'In Progress');
+    return;
   }
+
+  // An item with no external key in a Jira-mode project has no issue to
+  // mirror onto AND no accepted direct-write path either — the internal API
+  // accepts a status write only from a validated Jira-originated event
+  // while a project is in Jira mode — so there is nothing this can do but
+  // leave it alone.
+  const mode = await canonicalWorkItems.getMode(full.project);
+  if (mode.mode === 'jira') return;
+
+  await canonicalWorkItems.publishCommand(full.project, {
+    command: 'transitionStatus', actor: full.assignee_agent_id, workItemId: full.id, status: 'in-progress',
+  });
 }
 
 // handleReworkRequested's trigger: a human moved a ticket from "In Review"
-// back to "In Progress" (release-workflow.md REQ-11). Detected from the
+// back to "In Progress". Detected from the
 // item's own append-only history rather than from any Jira-specific
 // string — the canonical status_changed event and the history row behind
 // it are all this needs.
@@ -257,8 +333,8 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
   }
 
   if (eventType === 'work_item.jira_release_event') {
-    // canonical-release-workflow.md V2.1 — the same event type now also
-    // carries a local-mode-originated candidate-cut/abandon/done, keyed by
+    // The same event type now also carries a local-mode-originated
+    // candidate-cut/abandon/done, keyed by
     // `workItemId`/`project` instead of `jiraIssueKey` (work-item-service's
     // store.py `_publish_release_event`, no jiraIssueKey in the payload).
     // handlers.js branches on which one is present; this routing is

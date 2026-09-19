@@ -257,8 +257,7 @@ options are generated and reconciled from that catalog by
 audited for drift by ScrumMaster at startup and every 24 hours. Jira is never
 consulted to decide whether an agent identity is valid for runtime
 assignment — that is decided solely by the catalog plus each project's
-`services/scrummaster/config/projects.json` entry. See
-the agent-assignment design.
+`services/scrummaster/config/projects.json` entry.
 
 New agents added to the system require: (1) a new entry in
 `services/scrummaster/config/agents.json`, (2) a definition file in `setup/`, (3) the

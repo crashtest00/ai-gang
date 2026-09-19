@@ -122,10 +122,9 @@ echo "Checking Jira custom fields..."
 echo ""
 
 # Agent field — options are derived from the canonical catalog
-# (services/scrummaster/config/agents.json), never hardcoded here. See
-# the agent-assignment design REQ-01/REQ-06. Once the field
-# exists, scripts/reconcile-agent-field.sh keeps its options in sync with
-# later catalog changes.
+# (services/scrummaster/config/agents.json), never hardcoded here. Once the
+# field exists, scripts/reconcile-agent-field.sh keeps its options in sync
+# with later catalog changes.
 CATALOG_PATH="$REPO_ROOT/services/scrummaster/config/agents.json"
 AGENT_ID=$(get_existing_field_id "Agent")
 if [[ -n "$AGENT_ID" ]]; then

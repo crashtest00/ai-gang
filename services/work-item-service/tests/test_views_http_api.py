@@ -36,7 +36,7 @@ def test_get_work_item_404_then_200_with_full_record(clean_db):
     assert isinstance(body['history'], list)
 
     rows = AccessLog.objects.filter(work_item_id=item_id)
-    assert rows.count() >= 1, 'REQ-04: the HTTP read must be recorded in access_log'
+    assert rows.count() >= 1, 'the HTTP read must be recorded in access_log'
 
 
 def test_get_project_mode_reports_local_by_default(clean_db):
@@ -60,7 +60,7 @@ def test_admin_transition_rejected_for_jira_mode_project(clean_db):
 
 
 def test_admin_create_endpoint_uses_external_api_origin(clean_db, monkeypatch):
-    """REQ-08 origin split: views.py's unauthenticated HTTP handler must
+    """Origin split: views.py's unauthenticated HTTP handler must
     reach store.py as Origins.EXTERNAL_API, never Origins.ADMIN_UI (reserved
     for admin.py's session-authenticated writes) — the write-gate/audit
     trail must not mistake an anonymous HTTP POST for an authenticated
@@ -96,7 +96,7 @@ def test_admin_created_item_visible_via_read_interface_and_produces_outbound_eve
     assert body['display_name'] == 'Admin created'
 
     rows = OutboxEvent.objects.filter(work_item_id=item_id)
-    assert rows.count() == 1, 'an admin-UI write still produces an outbound event (REQ-08)'
+    assert rows.count() == 1, 'an admin-UI write still produces an outbound event'
 
 
 def _create_release(client, project=PROJECT):
@@ -146,7 +146,7 @@ def test_admin_record_release_candidate_unknown_item_rejected(clean_db):
 
 
 def test_get_work_item_full_includes_release_detail(clean_db):
-    """REQ-01 — releaseDetail must round-trip through the same full-record
+    """releaseDetail must round-trip through the same full-record
     read path canonicalWorkItems.js's getWorkItem(..., {full: true}) uses,
     the same way storyDetail already does."""
     client = Client()
@@ -154,7 +154,7 @@ def test_get_work_item_full_includes_release_detail(clean_db):
 
     # No row at all until something is actually written to it — same as
     # storyDetail: store.create_work_item only creates the child row when
-    # explicit detail data is passed in, and REQ-01's internal-API create
+    # explicit detail data is passed in, and the internal-API create
     # path (admin_create_work_item) has no way to do that for a release
     # today (only release_notes could conceivably be set at creation, and
     # nothing currently plumbs it through) — candidate cut is the first

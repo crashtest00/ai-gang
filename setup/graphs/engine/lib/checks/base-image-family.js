@@ -1,11 +1,11 @@
 'use strict';
 
-// Detection logic for the base-image-family branch-point class
-// (graph-process-engine.md REQ-12): does a Dockerfile's base image use
+// Detection logic for the base-image-family branch-point class:
+// does a Dockerfile's base image use
 // Alpine/BusyBox (adduser/deluser) or Debian/Ubuntu (useradd) user-management
 // syntax? Pure text parsing — no shell-out, no external call — so this
 // check can never itself fail to execute, but the decision node still
-// declares a "probe-error" outcome for contract uniformity (REQ-02) and
+// declares a "probe-error" outcome for contract uniformity and
 // as a safety net if `dockerfileContent` isn't a string.
 //
 // Returns one of: "alpine-busybox" | "debian-ubuntu" | "unrecognized" | "probe-error"

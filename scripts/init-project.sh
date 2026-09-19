@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # init-project.sh
 #
-# Initialises a new AI Gang project in local mode (canonical-work-model.md
-# REQ-14: local mode is the unconditional default, Jira mode cannot be
-# chosen at init):
+# Initialises a new AI Gang project in local mode (local mode is the
+# unconditional default; Jira mode cannot be chosen at init):
 #   1. Prompts for project name
 #   2. Creates the project folder under ~/ai-gang/projects/
 #   3. Registers the project (local mode, no Jira project/workflow)
 #
 # Pass --connect-jira to additionally perform one-time Jira-instance
-# bootstrapping for this project (REQ-14/REQ-15: connecting Jira is always a
-# separate, later, explicitly-requested operation — never offered as part of
-# the default interactive flow above):
+# bootstrapping for this project (connecting Jira is always a separate,
+# later, explicitly-requested operation — never offered as part of the
+# default interactive flow above):
 #   4. Prompts for a Jira project key
 #   5. Runs create-jira-fields.sh (idempotent — creates missing fields, skips existing)
 #   6. Registers the Jira webhook
@@ -22,6 +21,50 @@
 #
 # Usage:
 #   ./scripts/init-project.sh [--deployment TYPE] [--desktop-framework tauri|electron] [--connect-jira]
+#   ./scripts/init-project.sh --config <file.json> [--connect-jira]
+#
+# --config <file>: read the project name, deployment target, and stack
+# profile from a UTF-8 JSON file (schemaVersion 1; a "project" object with
+# nonempty string fields "name", "type", "stack" — see
+# setup/graphs/engine/lib/config/) instead of the interactive prompts and
+# --deployment flag below. The file is validated — and any invalid input
+# rejected, before this project's folder or any service is touched — by
+# setup/graphs/engine/lib/config/cli.js, the same validation path a
+# supported graph-workflow caller uses. A matching --deployment value is
+# accepted; a conflicting one is rejected. Retrying with the same file
+# resumes idempotently; retrying with a changed name/type/stack against an
+# already-initialised project folder is refused before any further change.
+#
+# --config also replaces the three questions this script would otherwise
+# ask, so an unattended run has nothing to type:
+#   - The GitHub repository URL comes from the same file's optional
+#     "repository" object ("url"), not from the prompt. With no
+#     "repository" object and no terminal, the remote is skipped rather
+#     than asked for.
+#   - The fine-grained PAT comes from GH_TOKEN in the environment file
+#     ($HQ_ENV, read as data — never executed) or from the environment
+#     itself, not from the prompt. Without --config an exported GH_TOKEN
+#     is deliberately ignored and the prompt is unchanged. With no
+#     GH_TOKEN and no terminal, the remote is configured and nothing is
+#     pushed.
+#   - The final "Continue? [y/N]" confirmation is suppressed when there is
+#     no terminal, so an EOF on stdin cannot be read as a refusal. Every
+#     decision it covers came from the file and was validated first.
+# The "next steps" list printed at the end likewise leaves out the steps
+# --config's caller performs itself.
+#
+# A runnable example lives at scripts/init-project.example.json — copy it
+# and edit "name" to try --config directly:
+#   ./scripts/init-project.sh --config scripts/init-project.example.json
+#
+# "type" and "stack" are each one of a fixed, discrete set of identifiers —
+# not free text — from the shipped target/stack compatibility catalog
+# (setup/graphs/engine/lib/config/catalog.js). Today that catalog supports
+# exactly one target and one stack for it:
+#   "type":  "web"
+#   "stack": "node-express" (the only stack profile supported for "web")
+# catalog.js is the authoritative list as it grows — an unsupported value
+# for either field is rejected with the current supported choices listed.
 #
 # Prerequisites:
 #   - With --connect-jira: ~/ai-gang/.env contains JIRA_URL, JIRA_EMAIL, JIRA_TOKEN, HQ_URL
@@ -38,23 +81,107 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 HQ_ENV="${HQ_ENV:-$HOME/ai-gang/.env}"
 SM_ENV="$REPO_ROOT/services/scrummaster/.env"
-PROJECTS_DIR="$REPO_ROOT/projects"
+# Overridable so tests can point this at a temp directory instead of the
+# real projects/ tree — see setup/graphs/engine/test/config-init-cli.test.js.
+PROJECTS_DIR="${AIGANG_PROJECTS_DIR:-$REPO_ROOT/projects}"
 DEPLOYMENT=""
 DESKTOP_FRAMEWORK=""
 CONNECT_JIRA=false
+CONFIG_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --deployment) DEPLOYMENT="${2:?missing value for --deployment}"; shift 2 ;;
     --desktop-framework) DESKTOP_FRAMEWORK="${2:?missing value for --desktop-framework}"; shift 2 ;;
     --connect-jira) CONNECT_JIRA=true; shift ;;
+    --config) CONFIG_FILE="${2:?missing value for --config}"; shift 2 ;;
     -h|--help)
       echo "Usage: $0 [--deployment TYPE] [--desktop-framework tauri|electron] [--connect-jira]"
+      echo "       $0 --config <file.json> [--connect-jira]"
       exit 0
       ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+CONFIG_PROJECT_NAME=""
+CONFIG_PROJECT_TYPE=""
+CONFIG_PROJECT_STACK=""
+CONFIG_REPOSITORY_URL=""
+
+# Whether this run has a terminal to ask questions of. A --config run with
+# no terminal (platform startup, a pipeline) must never block on a prompt,
+# and must never read an EOF on stdin as an answer.
+if [[ -t 0 ]]; then
+  INTERACTIVE=true
+else
+  INTERACTIVE=false
+fi
+
+if [[ -n "$CONFIG_FILE" ]]; then
+  # Validate before anything below can create the project folder or mutate
+  # any service — this whole block runs ahead of every prompt and every
+  # write. The Node validator is the single shared path used by both this
+  # CLI entrypoint and the Initialization Agent's graph workflow
+  # (setup/graphs/engine/lib/config/validate.js + catalog.js) — one
+  # implementation of "what counts as valid," not two that could drift.
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Error: --config file not found: $CONFIG_FILE" >&2
+    exit 1
+  fi
+
+  # An unmet dependency this path needs (jq, for the config-identity check
+  # below) is reported as a clear diagnostic before any mutation, rather
+  # than failing confusingly partway through.
+  if ! command -v jq &> /dev/null; then
+    echo "Error: --config requires 'jq' (used to record and check the project's configuration identity), but it was not found on PATH." >&2
+    exit 1
+  fi
+
+  CONFIG_CLI="$REPO_ROOT/setup/graphs/engine/lib/config/cli.js"
+  CONFIG_STDERR_FILE=$(mktemp)
+  if ! CONFIG_OUTPUT=$(node "$CONFIG_CLI" "$CONFIG_FILE" 2>"$CONFIG_STDERR_FILE"); then
+    cat "$CONFIG_STDERR_FILE" >&2
+    rm -f "$CONFIG_STDERR_FILE"
+    exit 1
+  fi
+  rm -f "$CONFIG_STDERR_FILE"
+
+  while IFS='=' read -r config_key config_val; do
+    case "$config_key" in
+      PROJECT_NAME) CONFIG_PROJECT_NAME="$config_val" ;;
+      PROJECT_TYPE) CONFIG_PROJECT_TYPE="$config_val" ;;
+      PROJECT_STACK) CONFIG_PROJECT_STACK="$config_val" ;;
+      REPOSITORY_URL) CONFIG_REPOSITORY_URL="$config_val" ;;
+    esac
+  done <<< "$CONFIG_OUTPUT"
+
+  if [[ -z "$CONFIG_PROJECT_NAME" || -z "$CONFIG_PROJECT_TYPE" || -z "$CONFIG_PROJECT_STACK" ]]; then
+    echo "Error: config validation did not produce the expected project decisions." >&2
+    exit 1
+  fi
+
+  # A legacy --deployment/--desktop-framework value that matches the
+  # config is accepted; a conflicting one is rejected before any mutation.
+  # There is nothing else to reconcile here for these three decisions —
+  # DEPLOYMENT is otherwise only ever set by --deployment above or by the
+  # interactive prompt below, never by an environment variable, so there
+  # is no separate "environment variable override" path to guard against.
+  if [[ -n "$DEPLOYMENT" && "$DEPLOYMENT" != "$CONFIG_PROJECT_TYPE" ]]; then
+    echo "Error: --deployment \"$DEPLOYMENT\" conflicts with project.type \"$CONFIG_PROJECT_TYPE\" in $CONFIG_FILE." >&2
+    exit 1
+  fi
+  if [[ -n "$DESKTOP_FRAMEWORK" && "$CONFIG_PROJECT_TYPE" != "desktop" ]]; then
+    echo "Error: --desktop-framework \"$DESKTOP_FRAMEWORK\" conflicts with project.type \"$CONFIG_PROJECT_TYPE\" in $CONFIG_FILE (desktop-framework only applies to a desktop target)." >&2
+    exit 1
+  fi
+
+  # Bind the validated decisions in place of the interactive/--deployment
+  # inputs below — no prompt for these three inputs when a valid config is
+  # supplied.
+  PROJECT_NAME="$CONFIG_PROJECT_NAME"
+  DEPLOYMENT="$CONFIG_PROJECT_TYPE"
+fi
 
 if [[ -z "$DEPLOYMENT" ]]; then
   read -rp "Deployment target (web/mobile/desktop/extension/mcp/other): " DEPLOYMENT
@@ -68,10 +195,34 @@ if [[ "$DEPLOYMENT" == "desktop" && "$DESKTOP_FRAMEWORK" != "tauri" && "$DESKTOP
 fi
 
 # --- Load credentials ---
-if [[ -f "$HQ_ENV" ]]; then
-  # shellcheck source=/dev/null
-  source "$HQ_ENV"
-fi
+# An environment file is data, not a script. Executing one expands a $, a
+# backtick or a $(...) in any value — and one of these values is a
+# password somebody invented. So each variable this script uses is read
+# out of the file literally, and a value already in the environment wins,
+# which is how a caller that has read the file itself hands them over.
+#
+# This is the whole list: adding a use of a new variable from $HQ_ENV
+# means adding it here.
+read_env_value() {
+  local file="$1" name="$2" line value
+  [[ -f "$file" ]] || return 1
+  line="$(grep -E "^[[:space:]]*${name}=" "$file" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 1
+  value="${line#*=}"
+  if [[ ${#value} -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ ${#value} -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+for env_var in ANTHROPIC_API_KEY GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
+  if [[ -z "${!env_var:-}" ]]; then
+    printf -v "$env_var" '%s' "$(read_env_value "$HQ_ENV" "$env_var" || true)"
+  fi
+done
+unset env_var
 
 if [[ "$CONNECT_JIRA" == "true" ]]; then
   : "${JIRA_URL:?JIRA_URL is not set. Check $HQ_ENV}"
@@ -408,12 +559,17 @@ echo "AI Gang — New Project Initialisation"
 echo "====================================="
 echo ""
 
-read -rp "Project name (lowercase, hyphens OK — e.g. hello-world): " PROJECT_NAME
+if [[ -n "$CONFIG_FILE" ]]; then
+  # Already validated and bound above — no prompt.
+  PROJECT_NAME="$CONFIG_PROJECT_NAME"
+else
+  read -rp "Project name (lowercase, hyphens OK — e.g. hello-world): " PROJECT_NAME
 
-# Validate: lowercase letters, numbers, hyphens only
-if ! echo "$PROJECT_NAME" | grep -qE '^[a-z][a-z0-9-]+$'; then
-  echo "Error: project name must start with a letter and contain only lowercase letters, numbers, and hyphens."
-  exit 1
+  # Validate: lowercase letters, numbers, hyphens only
+  if ! echo "$PROJECT_NAME" | grep -qE '^[a-z][a-z0-9-]+$'; then
+    echo "Error: project name must start with a letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
+  fi
 fi
 
 PROJECT_KEY=""
@@ -431,22 +587,54 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
   fi
 fi
 
-# GitHub remote — must be created by the human before running this script
-echo ""
-echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
-echo "  Leave blank to skip (you can add the remote manually later)."
-read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+# GitHub remote — must be created by the human before running this script.
+# A config carrying a "repository" object supplies it instead of the
+# prompt; a --config run with no terminal and no configured URL leaves it
+# blank (the same as answering the prompt blank) rather than blocking or
+# reading an EOF as an answer.
+GITHUB_URL=""
+if [[ -n "$CONFIG_FILE" && -n "$CONFIG_REPOSITORY_URL" ]]; then
+  GITHUB_URL="$CONFIG_REPOSITORY_URL"
+  echo ""
+  echo "  GitHub repository (from $CONFIG_FILE): $GITHUB_URL"
+elif [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  echo ""
+  echo "  GitHub: no \"repository\" object in $CONFIG_FILE and no terminal to ask — skipping the remote."
+  echo "  Add it manually later with: git -C <project>/src remote add origin <url>"
+else
+  echo ""
+  echo "  GitHub: create the repository on GitHub first, then paste the HTTPS URL below."
+  echo "  Leave blank to skip (you can add the remote manually later)."
+  read -rp "GitHub repository HTTPS URL (e.g. https://github.com/org/repo.git): " GITHUB_URL
+fi
 
-# Fine-grained PAT for container git operations
-GH_TOKEN=""
-if [[ -n "$GITHUB_URL" ]]; then
-  echo ""
-  echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
-  echo "  Generate one at: https://github.com/settings/tokens?type=beta"
-  echo "  Repository access: this repo only"
-  echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
-  read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
-  echo ""
+# Fine-grained PAT for container git operations. Under --config it comes
+# from the environment — GH_TOKEN, read out of $HQ_ENV above — so an
+# unattended run has nothing to type. Without --config the prompt below is
+# unchanged, and an exported GH_TOKEN is deliberately ignored there.
+if [[ -n "$CONFIG_FILE" ]]; then
+  GH_TOKEN="${GH_TOKEN:-}"
+  if [[ -n "$GH_TOKEN" ]]; then
+    echo "  GitHub PAT: read from $HQ_ENV."
+  fi
+else
+  GH_TOKEN=""
+fi
+
+if [[ -n "$GITHUB_URL" && -z "$GH_TOKEN" ]]; then
+  if [[ "$INTERACTIVE" == "true" ]]; then
+    echo ""
+    echo "  A fine-grained GitHub PAT is required for agents to push branches and open PRs."
+    echo "  Generate one at: https://github.com/settings/tokens?type=beta"
+    echo "  Repository access: this repo only"
+    echo "  Required permissions: Contents (read/write), Pull requests (read/write), Metadata (read)"
+    read -rsp "GitHub fine-grained PAT (GH_TOKEN): " GH_TOKEN
+    echo ""
+  else
+    echo ""
+    echo "  GitHub PAT: GH_TOKEN is not set in $HQ_ENV and there is no terminal to ask —"
+    echo "  the remote will be configured but nothing will be pushed."
+  fi
 fi
 
 PROJECT_DIR="$PROJECTS_DIR/$PROJECT_NAME"
@@ -457,10 +645,18 @@ echo "  Mode         : $([[ "$CONNECT_JIRA" == "true" ]] && echo "Jira ($PROJECT
 echo "  Local path   : $PROJECT_DIR"
 [[ -n "$GITHUB_URL" ]] && echo "  GitHub       : $GITHUB_URL"
 echo ""
-read -rp "Continue? [y/N] " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  echo "Aborted."
-  exit 0
+if [[ -n "$CONFIG_FILE" && "$INTERACTIVE" != "true" ]]; then
+  # Every decision this confirmation covers came from the configuration
+  # and has already been validated, and there is no terminal to answer
+  # from. Prompting here would read the EOF on stdin as "N" and abort a
+  # run nobody declined.
+  echo "Continue? [y/N] y   (no terminal — proceeding from $CONFIG_FILE)"
+else
+  read -rp "Continue? [y/N] " CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+  fi
 fi
 
 echo ""
@@ -474,6 +670,34 @@ else
 fi
 
 SRC_DIR="$PROJECT_DIR/src"
+
+# --- Config identity ---
+# A normalized record of the configured decisions, written once, before any
+# further mutation below. A retry with the same --config resumes
+# idempotently (this file matches, and every step below is already
+# idempotent — see the existing "already exists — skipping" checks). A
+# retry with a changed name/type/stack against this same project folder is
+# refused here, before touching anything else, rather than merging
+# incompatible state.
+if [[ -n "$CONFIG_FILE" ]]; then
+  CONFIG_IDENTITY_FILE="$PROJECT_DIR/.aigang-config-identity.json"
+  if [[ -f "$CONFIG_IDENTITY_FILE" ]]; then
+    EXISTING_CONFIG_NAME=$(jq -r '.name' "$CONFIG_IDENTITY_FILE" 2>/dev/null || echo "")
+    EXISTING_CONFIG_TYPE=$(jq -r '.type' "$CONFIG_IDENTITY_FILE" 2>/dev/null || echo "")
+    EXISTING_CONFIG_STACK=$(jq -r '.stack' "$CONFIG_IDENTITY_FILE" 2>/dev/null || echo "")
+    if [[ "$EXISTING_CONFIG_NAME" != "$PROJECT_NAME" || "$EXISTING_CONFIG_TYPE" != "$DEPLOYMENT" || "$EXISTING_CONFIG_STACK" != "$CONFIG_PROJECT_STACK" ]]; then
+      echo "Error: $PROJECT_DIR was already initialised with a different configuration" >&2
+      echo "  (existing: name=$EXISTING_CONFIG_NAME type=$EXISTING_CONFIG_TYPE stack=$EXISTING_CONFIG_STACK)." >&2
+      echo "  Refusing to resume with different decisions (name=$PROJECT_NAME type=$DEPLOYMENT stack=$CONFIG_PROJECT_STACK)." >&2
+      exit 1
+    fi
+    echo "Existing project configuration matches $CONFIG_FILE — resuming idempotently."
+  else
+    printf '{"schemaVersion":1,"name":"%s","type":"%s","stack":"%s"}\n' \
+      "$PROJECT_NAME" "$DEPLOYMENT" "$CONFIG_PROJECT_STACK" > "$CONFIG_IDENTITY_FILE"
+    echo "Recorded project configuration identity: $CONFIG_IDENTITY_FILE"
+  fi
+fi
 
 # Install deployment-specific repository files before the initial commit.
 INIT_REPO_ARGS=(--target "$SRC_DIR" --deployment "$DEPLOYMENT")
@@ -508,13 +732,20 @@ COMPOSE
 fi
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  cat > "$PROJECT_DIR/.env" <<ENVFILE
+  # This file holds the Anthropic key and the GitHub PAT, so it is
+  # readable only by its owner — the same rule the platform's own derived
+  # environment files follow. Created 0600 rather than chmod-ed
+  # afterwards, so it is never briefly world-readable.
+  ( umask 077
+    cat > "$PROJECT_DIR/.env" <<ENVFILE
 PROJECT_NAME=${PROJECT_NAME}
 REDIS_HOST=ai-gang-redis
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 GITHUB_URL=${GITHUB_URL:-}
 GH_TOKEN=${GH_TOKEN:-}
 ENVFILE
+  )
+  chmod 600 "$PROJECT_DIR/.env"
   echo "Created: $PROJECT_DIR/.env"
   if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "  ** ANTHROPIC_API_KEY not found in $HQ_ENV — fill it in before building."
@@ -590,13 +821,24 @@ if [[ -n "$GITHUB_URL" ]]; then
   fi
 
   if [[ -n "$GH_TOKEN" ]]; then
+    # Pushes with the fine-grained PAT authenticating over HTTPS, without
+    # ever putting the token on git's own command line — an argument there
+    # sits in the host's process table, readable by any local user for as
+    # long as the call lasts, the same exposure create-admin.sh's
+    # --env-file fix closes for the admin password. The credential.helper
+    # value is single-quoted, so this command line expands nothing; the
+    # helper subshell reads GH_TOKEN from its own inherited environment
+    # when git actually invokes it, and GH_TOKEN is exported only to that
+    # one command.
+    git_push_with_token() {
+      GH_TOKEN="$GH_TOKEN" git -C "$SRC_DIR" \
+        -c 'credential.helper=!f() { echo username=oauth2; echo "password=$GH_TOKEN"; }; f' \
+        push "$@"
+    }
+
     echo "  Pushing to GitHub..."
-    git -C "$SRC_DIR" \
-      -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-      push --set-upstream origin main 2>/dev/null || \
-      git -C "$SRC_DIR" \
-        -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-        push --set-upstream origin master
+    git_push_with_token --set-upstream origin main 2>/dev/null || \
+      git_push_with_token --set-upstream origin master
     echo "  Pushed to GitHub."
 
     # --- Create dev/beta/prod branches + branch protection ---
@@ -622,9 +864,7 @@ if [[ -n "$GITHUB_URL" ]]; then
         if git -C "$SRC_DIR" ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
           echo "  Branch '$branch' already exists on origin — skipping creation."
         else
-          git -C "$SRC_DIR" \
-            -c "credential.helper=!f() { echo username=oauth2; echo password=${GH_TOKEN}; }; f" \
-            push origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
+          git_push_with_token origin "${DEFAULT_BRANCH}:refs/heads/${branch}" 2>/dev/null \
             && echo "  Created branch '$branch'." \
             || echo "  Warning: could not create branch '$branch' — create it manually from $DEFAULT_BRANCH."
         fi
@@ -769,7 +1009,9 @@ fi
 # forever, with no error anywhere. This step is what closes that gap.
 echo ""
 echo "Registering $PROJECT_NAME in services/scrummaster/config/projects.json..."
-PROJECTS_CONFIG="$REPO_ROOT/services/scrummaster/config/projects.json"
+# Overridable so tests can point this at a temp fixture instead of the
+# real registry — see setup/graphs/engine/test/config-init-cli.test.js.
+PROJECTS_CONFIG="${AIGANG_PROJECTS_CONFIG:-$REPO_ROOT/services/scrummaster/config/projects.json}"
 if jq -e --arg name "$PROJECT_NAME" '.projects[] | select(.name == $name)' "$PROJECTS_CONFIG" >/dev/null 2>&1; then
   echo "  Already registered — skipping."
 else
@@ -787,15 +1029,24 @@ echo ""
 echo "Done."
 echo ""
 if [[ "$CONNECT_JIRA" != "true" ]]; then
-  echo "  Initialised in local mode (default, REQ-14) — no Jira project or workflow was created."
+  echo "  Initialised in local mode (default) — no Jira project or workflow was created."
   echo "  To connect this project to Jira later, re-run with --connect-jira."
   echo ""
 fi
 echo "Next steps:"
 echo "  1. Fill in $SRC_DIR/CLAUDE.md (framework, key directories, entry points, conventions)"
-echo "  2. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
-echo "  3. docker compose build && docker compose up -d"
-echo "  4. docker compose exec dev node /agent-docs/subscriber.js &"
+next_step=2
+# Adding the Dockerfile by hand is the interactive path's step. A
+# --config caller installs it from the stack's template itself, straight
+# after this script returns, so telling it to write one here would be
+# telling it to do the very thing it must not do.
+if [[ -z "$CONFIG_FILE" ]]; then
+  echo "  $next_step. Add a Dockerfile to $PROJECT_DIR (see Dockerfile-node.template or Dockerfile-python.template)"
+  next_step=$((next_step + 1))
+fi
+echo "  $next_step. docker compose build && docker compose up -d"
+next_step=$((next_step + 1))
+echo "  $next_step. docker compose exec dev node /agent-docs/subscriber.js &"
 echo ""
 if [[ -z "${GITHUB_URL:-}" ]]; then
   echo "  Git: repository initialised locally. When you've created the GitHub repo:"

@@ -1,11 +1,11 @@
 """
-canonical-work-model.md REQ-09 (amended 2026-09-09) — the Jira webhook
+Amended 2026-09-09 — the Jira webhook
 ingestion endpoint moved here from services/scrummaster/src/server.js's deleted
 `POST /webhook/jira` route. Mirrors that route's own behavior exactly
 (secret check, envelope/dedupe-key shape) via Django's test Client against
 the real URL routing / view / streams.publish stack and the real test
 Redis container — the same rigor test_views_http_api.py already uses for
-the REQ-04/REQ-08 HTTP surface.
+the HTTP surface.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def test_jira_webhook_rejects_a_payload_missing_project(clean_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# REQ-09 acceptance: "Kill Django/work-item-service immediately after a
+# Acceptance: "Kill Django/work-item-service immediately after a
 # webhook is durably enqueued but before it's processed; on restart, the
 # event is processed exactly once, without requiring Jira to re-fire it."
 # Mirrors tests/test_relay_integration.py's rigor: a REAL child process,

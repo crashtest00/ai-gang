@@ -3,8 +3,7 @@ Envelope schema — a Python port of services/scrummaster/src/envelope.js's wire
 format, byte-for-byte compatible with it (same field names, same
 schemaVersion, same JSON shape under the stream entry's single `data`
 field). This is NOT a require()-style reuse (impossible cross-language);
-Redis Streams is a wire protocol, not a language-specific library
-(internal-work-item-service.md's own framing for this problem), so the
+Redis Streams is a wire protocol, not a language-specific library, so the
 envelope is reimplemented here against that shared wire contract instead.
 
 Kept deliberately narrow: only KIND.WORK_ITEM_COMMAND / WORK_ITEM_EVENT and

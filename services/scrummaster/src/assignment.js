@@ -1,11 +1,10 @@
 'use strict';
 
 // Catalog-backed agent-assignment validation — the sole acceptance boundary
-// for agent responsibility (the agent-assignment design
-// REQ-03..REQ-05). Every path that creates or changes agent responsibility
-// (initial refinement/decomposition, Shovel Ready dispatch, blocked-clear
-// redispatch, reassignment) MUST call this module rather than writing a
-// literal agent id to Jira or dispatching an agent directly.
+// for agent responsibility. Every path that creates or changes agent
+// responsibility (initial refinement/decomposition, Shovel Ready dispatch,
+// blocked-clear redispatch, reassignment) MUST call this module rather than
+// writing a literal agent id to Jira or dispatching an agent directly.
 //
 // Pure and transport-agnostic: no Jira or Redis calls, so callers on any
 // transport (pub/sub today, Redis Streams elsewhere) can use it identically.
@@ -45,8 +44,63 @@ function validateAssignment(projectName, agentId) {
   return { ok: true, agent: catalogAgent };
 }
 
+// Derive the agent a `create_subtask` request is for when the request carries
+// no explicit agent id. Subtask summaries follow a `<Role>: <what to do>`
+// convention, so that prefix is the one role signal the payload already
+// carries. Derivation succeeds only when the prefix names exactly one agent
+// the project actually has — an unrecognized, ambiguous, or absent prefix
+// returns null, leaving the caller to report the request rather than guess.
+// This never falls back to a default agent: it only recovers an id the
+// request itself already implies.
+//
+// `excludeAgentId` is the agent that made the request. It is never a
+// derivation candidate: handing the subtask back to its own requester routes
+// the work straight back to the agent that asked for it to be done by
+// someone else. An explicit id is the requester's stated intent and is
+// validated like any other; this is inference, and inference must not
+// produce that loop on its own.
+// Returns the catalog entry, or null.
+function deriveAgentFromSummary(projectName, summary, { excludeAgentId } = {}) {
+  const role = summaryRolePrefix(summary);
+  if (!role) return null;
+
+  const matches = registry
+    .getEffectiveAgents(projectName)
+    .filter(agent => agent.id !== excludeAgentId && roleAliases(agent).includes(role));
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Compare role names on their letters and digits alone, so "Backend",
+// "backend-agent" and "Backend Agent" are the same role.
+function normalizeRole(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function withoutAgentSuffix(token) {
+  return token.replace(/agent$/, '') || token;
+}
+
+function summaryRolePrefix(summary) {
+  const text = String(summary || '');
+  const colon = text.indexOf(':');
+  if (colon <= 0) return null;
+  return withoutAgentSuffix(normalizeRole(text.slice(0, colon))) || null;
+}
+
+// Every spelling of one agent's role that a summary prefix may legitimately
+// use: its catalog id, its stream routing suffix, and its display name, each
+// with and without a trailing "agent".
+function roleAliases(agent) {
+  const tokens = [agent.id, agent.routing && agent.routing.channelSuffix, agent.displayName]
+    .filter(Boolean)
+    .map(normalizeRole)
+    .filter(Boolean);
+  return Array.from(new Set(tokens.concat(tokens.map(withoutAgentSuffix))));
+}
+
 // Validate an entire proposed decomposition atomically: every subtask's
-// `agent` must be valid, or the whole batch is rejected together (REQ-04).
+// `agent` must be valid, or the whole batch is rejected together.
 // subtasks: [{ id, displayName, agent, ... }]
 // Returns { ok: true } or:
 //   { ok: false, errorCode: 'INVALID_AGENT_ASSIGNMENT',
@@ -74,4 +128,4 @@ function validateDecomposition(projectName, subtasks) {
   return { ok: true };
 }
 
-module.exports = { validateAssignment, validateDecomposition, ERROR_CODES };
+module.exports = { validateAssignment, validateDecomposition, deriveAgentFromSummary, ERROR_CODES };

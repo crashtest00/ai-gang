@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test"
+    "pretest": "node scripts/check-test-redis.js",
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "axios": "^1.7.0",

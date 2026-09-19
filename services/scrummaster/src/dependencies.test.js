@@ -246,7 +246,7 @@ test('rejects the whole decomposition and creates nothing when assignment valida
 test('fails closed when the assignment module is unavailable (explicit null override)', async () => {
   const jira = makeFakeJira('PROJ-8', 'PROJ');
 
-  // services/scrummaster/src/assignment.js now exists (landed by agent-assignment.md),
+  // services/scrummaster/src/assignment.js now exists,
   // so the default deps.assignment resolves to the real module — this
   // exercises the fail-closed branch directly by overriding it to null,
   // simulating the module being absent, rather than skipping catalog
@@ -265,8 +265,8 @@ test('fails closed when the assignment module is unavailable (explicit null over
 
 test('integrates with the real services/scrummaster/src/assignment.js against the fixture catalog', async () => {
   // No `assignment` override — exercises the real lazy require('./assignment'),
-  // now that agent-assignment.md has landed it, against the real registry.js
-  // and the fixture agents.json/projects.json shipped in services/scrummaster/config.
+  // against the real registry.js and the fixture agents.json/projects.json
+  // shipped in services/scrummaster/config.
   process.env.AGENTS_CATALOG_PATH = require('node:path').join(__dirname, '..', 'config', 'agents.json');
   process.env.PROJECTS_CONFIG_PATH = require('node:path').join(__dirname, '..', 'config', 'projects.json');
 
@@ -381,8 +381,8 @@ test('Done Handler ignores unrelated issue links', async () => {
   assert.equal(jira._status('PROJ-142'), 'Backlog');
 });
 
-// --- routeMaterialization (canonical-work-model.md mode-aware routing) ---
-// REQ-12: a Jira-mode project must go through the EXACT existing
+// --- routeMaterialization (mode-aware routing) ---
+// A Jira-mode project must go through the EXACT existing
 // materializeDecomposition path above, unmodified — these tests assert that
 // by reusing the same fakeJira harness the Jira-mode tests above already
 // use, not a separate mock.

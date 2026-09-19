@@ -5,22 +5,19 @@ const { formatNodeRef, formatEdgeRef } = require('./addressing');
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled', 'paused-for-human']);
 
 /**
- * Coordination mechanism (parallel-branch-execution.md).
+ * Coordination mechanism for parallel graph branches.
  *
  * This is a deterministic, non-decision-making mechanism — not an agent,
- * not a PRD §3 participating actor (§4, "Coordination mechanism role and
- * authority"). It:
- *   - decides collision-safety among already-independent candidates
- *     (REQ-02/REQ-03/REQ-04),
- *   - dispatches one local process/session per collision-safe branch
- *     (REQ-05/REQ-06),
+ * and not a participating actor in the canonical work-item lifecycle. It:
+ *   - decides collision-safety among already-independent candidates,
+ *   - dispatches one local process/session per collision-safe branch,
  *   - tracks each branch to a terminal or paused-for-human outcome in its
- *     own local record (REQ-07 through REQ-14),
+ *     own local record,
  * and nothing else. It deliberately has no method that calls out to
- * canonical-work-model.md, Jira, or Redis/Streams (REQ-11), and no method
- * that edits a graph document (REQ-01).
+ * the canonical work-item store, Jira, or Redis/Streams, and no method
+ * that edits a graph document.
  *
- * The local tracking record (REQ-12) lives only in this instance's memory
+ * The local tracking record lives only in this instance's memory
  * for the duration of a walk — it is not required to survive past it, and
  * is not a canonical work item.
  */
@@ -33,17 +30,17 @@ class Coordination {
   }
 
   // ---------------------------------------------------------------------
-  // Sourcing concurrency candidates (REQ-02): the only two allowed sources.
+  // Sourcing concurrency candidates: the only two allowed sources.
   // ---------------------------------------------------------------------
 
   /**
    * Source candidates from distinct, non-cross-referencing graph entry
-   * points (REQ-02(a)). Each input is { graphDoc, writes? } — graphDoc is
+   * points. Each input is { graphDoc, writes? } — graphDoc is
    * a full, already-validated graph document; its own `entry` node is the
    * candidate. Throws if any two candidates share a graph_id and one's
-   * entry node is reachable from another's (REQ-02 acceptance: "A graph
-   * entry point reachable from another candidate's walk never appears in
-   * the same candidate set as that candidate").
+   * entry node is reachable from another's: a graph
+   * entry point reachable from another candidate's walk must never appear in
+   * the same candidate set as that candidate.
    */
   static sourceEntryPointCandidates(entries) {
     const candidates = entries.map(({ graphDoc, writes }) => ({
@@ -59,9 +56,9 @@ class Coordination {
 
   /**
    * Source candidates from the branches declared together at one
-   * fan-out node (REQ-02(b)). `graphDoc` must contain `fanOutNodeId` as a
+   * fan-out node. `graphDoc` must contain `fanOutNodeId` as a
    * `fan-out` node; each of its declared branches becomes one candidate,
-   * addressed as `<graph_id>#<node_id>:<branch_id>` (REQ-05).
+   * addressed as `<graph_id>#<node_id>:<branch_id>`.
    */
   static sourceFanOutCandidates(graphDoc, fanOutNodeId, writesByBranchId = {}) {
     const fanOutNode = graphDoc.nodes.find((n) => n.id === fanOutNodeId);
@@ -81,13 +78,13 @@ class Coordination {
   }
 
   // ---------------------------------------------------------------------
-  // Collision-safety (REQ-03/REQ-04)
+  // Collision-safety
   // ---------------------------------------------------------------------
 
   /** Two candidates are collision-safe iff their declared write-scopes are
    * pairwise disjoint in files and services. A candidate with no declared
    * write-scope is never collision-safe with anything — it fails closed to
-   * the sequential path (REQ-03). */
+   * the sequential path. */
   static isCollisionSafe(a, b) {
     if (!hasWriteScope(a) || !hasWriteScope(b)) return false;
     const filesOverlap = a.writes.files.some((f) => b.writes.files.includes(f));
@@ -98,7 +95,7 @@ class Coordination {
   /**
    * Partition a candidate set into concurrent-eligible groups (each group
    * pairwise collision-safe internally) and a sequential list (candidates
-   * with no declared write-scope, per REQ-03). Two candidate groups never
+   * with no declared write-scope). Two candidate groups never
    * run concurrently with each other by construction — this method only
    * describes what's safe to run together within one dispatch, callers
    * dispatch each group independently, one after another, as needed.
@@ -120,7 +117,7 @@ class Coordination {
   }
 
   // ---------------------------------------------------------------------
-  // Dispatch and tracking (REQ-05 through REQ-14)
+  // Dispatch and tracking
   // ---------------------------------------------------------------------
 
   /**
@@ -128,11 +125,11 @@ class Coordination {
    * group id, running `runBranch(candidate)` for each. `runBranch` MUST
    * return a Promise resolving to one of:
    *   - { status: 'done' }
-   *   - { status: 'paused-for-human', reason }   (REQ-09)
-   *   - { status: 'failed', reason }              (REQ-08, second case)
-   * or reject (treated as an execution-layer failure, REQ-08 second case).
+   *   - { status: 'paused-for-human', reason }
+   *   - { status: 'failed', reason }
+   * or reject (treated as an execution-layer failure).
    *
-   * This is local-process dispatch (REQ-06): `runBranch` is supplied by the
+   * This is local-process dispatch: `runBranch` is supplied by the
    * caller and may spawn an actual OS process, an async agent session, or
    * (in tests) a scripted stand-in — this module has no Redis/Streams
    * dependency and makes no assumption about what `runBranch` is backed by.
@@ -141,10 +138,9 @@ class Coordination {
    * with a defined remediation node) is handled entirely inside `runBranch`
    * (typically a walkGraph call) before it ever resolves — this method only
    * ever sees the branch's final outcome, never a mid-walk remediation
-   * step, consistent with REQ-08's first case producing no failure record
-   * at all.
+   * step, so a remediation pause never produces a failure record here.
    *
-   * One branch's failure or timeout never aborts a sibling (REQ-07):
+   * One branch's failure or timeout never aborts a sibling:
    * failures are caught per-branch and never rethrown across `Promise.all`.
    */
   async dispatchGroup(groupId, candidates, runBranch, opts = {}) {
@@ -171,8 +167,8 @@ class Coordination {
             this._setStatus(groupId, candidate.address, 'done', { attempts: attempt });
             return;
           }
-          // Anything else (including {status:'failed'}) is a REQ-08
-          // second-case execution-layer failure, subject to retry.
+          // Anything else (including {status:'failed'}) is an
+          // execution-layer failure, subject to retry.
           if (attempt < maxAttempts) continue;
           this._setStatus(groupId, candidate.address, 'failed', {
             reason: (result && result.reason) || 'branch reported failure',
@@ -180,7 +176,7 @@ class Coordination {
           });
           return;
         } catch (err) {
-          // Timeout (REQ-13) or a thrown execution-layer error (REQ-08).
+          // Timeout or a thrown execution-layer error.
           if (attempt < maxAttempts) continue;
           this._setStatus(groupId, candidate.address, 'failed', {
             reason: err.message,
@@ -191,7 +187,7 @@ class Coordination {
       }
     };
 
-    // REQ-07 sibling isolation: runOne never rejects, so Promise.all never
+    // Sibling isolation: runOne never rejects, so Promise.all never
     // short-circuits on one branch's failure.
     await Promise.all(candidates.map(runOne));
     return this.getGroupStatus(groupId);
@@ -212,7 +208,7 @@ class Coordination {
     this._records.set(key, { ...existing, ...extra, status });
   }
 
-  /** REQ-10: a group is complete only when every dispatched branch has
+  /** A group is complete only when every dispatched branch has
    * reached a terminal or paused-for-human status. A group with no
    * dispatched branches yet is not complete. */
   isGroupComplete(groupId) {
@@ -225,7 +221,7 @@ class Coordination {
     return true;
   }
 
-  /** REQ-14: inspectable fan-out state — every branch's dispatched
+  /** Inspectable fan-out state — every branch's dispatched
    * address, current/terminal status, and (if paused/failed) its reason. */
   getGroupStatus(groupId) {
     const addresses = this._groups.get(groupId) || new Set();

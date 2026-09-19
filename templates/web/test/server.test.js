@@ -1,8 +1,8 @@
 'use strict';
 
-// REQ-01 acceptance: "The web boilerplate builds, runs, and deploys
-// without modification." This exercises "runs" directly (starts the real
-// server on an ephemeral port and makes real HTTP requests against it) —
+// Acceptance: the web boilerplate builds, runs, and deploys without
+// modification. This exercises "runs" directly (starts the real server on
+// an ephemeral port and makes real HTTP requests against it) —
 // build/deploy are exercised via `npm install`/`docker build`, not
 // meaningfully unit-testable here.
 

@@ -1,5 +1,5 @@
 """
-canonical-work-model.md REQ-14 — explicit, reversible, per-project mode
+Explicit, reversible, per-project mode
 selection. Direct port of the Node service's src/projectConfig.js. Mode is
 validated project configuration, never an implicit consequence of Jira
 credentials being present. A project with no row in ProjectConfig is local
@@ -28,9 +28,9 @@ def get_mode(project: str) -> dict:
 
 
 def set_mode(project: str, mode: str, *, jira_project_key: Optional[str] = None) -> None:
-    """REQ-14: "Jira mode MUST NOT be selectable during project
-    initialization; a project MUST complete initialization in local mode
-    and connect Jira, if at all, as a separate, later operation." This
+    """Jira mode must not be selectable during project
+    initialization; a project must complete initialization in local mode
+    and connect Jira, if at all, as a separate, later operation. This
     function does not enforce that ordering itself — the caller (the
     connect-Jira operation, catchup.py) is the only code path that ever
     sets mode='jira', and it is never invoked as part of project
@@ -52,8 +52,8 @@ def set_mode(project: str, mode: str, *, jira_project_key: Optional[str] = None)
 
 
 def revert_to_local(project: str) -> None:
-    """REQ-14: "Switching from Jira mode back to local mode MUST be
-    supported and MUST require no data reconciliation beyond re-enabling
+    """Switching from Jira mode back to local mode must be
+    supported and must require no data reconciliation beyond re-enabling
     direct writes."""
     set_mode(project, LOCAL)
 
