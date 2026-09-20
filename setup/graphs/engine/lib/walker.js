@@ -3,36 +3,33 @@
 const { formatNodeRef, formatEdgeRef } = require('./addressing');
 
 /**
- * Single-node-at-a-time graph walker (graph-process-engine.md REQ-07).
+ * Single-node-at-a-time graph walker.
  *
  * `handlers`:
  *   - evaluateCheck(node)      -> Promise<outcomeKey>  (decision nodes)
  *   - runAction(node)          -> Promise<void>         (action nodes, optional)
  *   - onRemediation(node)      -> Promise<void>         (remediation nodes, optional)
  *   - dispatchFanOut(node, ctx)-> Promise<{ summary }>   (fan-out nodes, optional —
- *       when omitted, the walker uses the fail-closed sequential fallback
- *       REQ-16 requires: one branch at a time, in listing order, never
+ *       when omitted, the walker uses the fail-closed sequential fallback:
+ *       one branch at a time, in listing order, never
  *       advancing to fan-in before every branch has completed)
- *   - resolveEscalation(node)  -> Promise<outcomeKey>  (escalation nodes,
- *       REQ-17 — the human's chosen `when` key; unlike evaluateCheck this is
+ *   - resolveEscalation(node)  -> Promise<outcomeKey>  (escalation nodes —
+ *       the human's chosen `when` key; unlike evaluateCheck this is
  *       never derived from a probe. Omitting this handler means the walker
- *       cannot proceed past an escalation node at all, consistent with
- *       REQ-17's "reaching it always halts the walk pending a human's
- *       choice" — a caller with no way to ask a human simply cannot resolve
- *       one.)
+ *       cannot proceed past an escalation node at all — reaching one always
+ *       halts the walk pending a human's choice, and a caller with no way
+ *       to ask a human simply cannot resolve one.)
  *
  * Returns { transcript, outcome, node }. `transcript` is an ordered list of
- * fully-qualified references (REQ-06) visited, satisfying REQ-07's
- * acceptance: "a transcript... lists the fully-qualified node reference for
- * every node visited, in the order visited, with no more than one node
- * reference recorded as 'current' at any point in time for a given walker
- * instance."
+ * fully-qualified references visited: it lists the fully-qualified node
+ * reference for every node visited, in the order visited, with no more than
+ * one node reference recorded as 'current' at any point in time for a given
+ * walker instance.
  *
  * A `fan-out` node's sequential fallback recursively calls walkGraph once
  * per branch — each such call is its own independent walker instance and
- * produces its own transcript, individually satisfying REQ-07, exactly as
- * REQ-16 requires ("each spawned instance individually continues to
- * satisfy this requirement").
+ * produces its own transcript, so each spawned instance individually
+ * continues to satisfy that same single-node-at-a-time guarantee.
  */
 async function walkGraph(graphDoc, handlers = {}, opts = {}) {
   const nodesById = new Map(graphDoc.nodes.map((n) => [n.id, n]));
@@ -106,7 +103,7 @@ async function walkGraph(graphDoc, handlers = {}, opts = {}) {
             result: result && result.summary,
           });
         } else {
-          // REQ-16 fail-closed fallback: sequential, one at a time, in
+          // Fail-closed fallback: sequential, one at a time, in
           // listing order — never partially, never advancing to fan-in
           // before every branch has completed.
           const branchResults = [];
@@ -128,14 +125,14 @@ async function walkGraph(graphDoc, handlers = {}, opts = {}) {
       case 'escalation': {
         if (!handlers.resolveEscalation) {
           throw new Error(
-            `walkGraph: escalation "${node.id}" halts the walk pending a human choice (REQ-17), but no resolveEscalation handler was provided`
+            `walkGraph: escalation "${node.id}" halts the walk pending a human choice, but no resolveEscalation handler was provided`
           );
         }
         const outcomeKey = await handlers.resolveEscalation(node);
         const branch = (node.branches || []).find((b) => b.when === outcomeKey);
         if (!branch) {
           throw new Error(
-            `walkGraph: escalation "${node.id}" resolved to "${outcomeKey}", which is not one of its declared "when" keys (REQ-17: rejected)`
+            `walkGraph: escalation "${node.id}" resolved to "${outcomeKey}", which is not one of its declared "when" keys`
           );
         }
         transcript.push({

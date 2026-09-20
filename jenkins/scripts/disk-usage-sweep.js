@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// Disk-usage-triggered safety sweep (REQ-03). Invoked on a >=30-minute
+// Disk-usage-triggered safety sweep. Invoked on a >=30-minute
 // cadence by the jenkins-disk-usage-sweep job (jenkins/jenkins.yaml).
 // Checks current disk usage on the jenkins-data mount; if it's at or above
 // the high watermark (default 85%), repeatedly re-runs the same
-// prune-workspaces / prune-docker-cache logic REQ-01/REQ-02 use on their
-// nightly schedule, until usage drops back below the low watermark
+// prune-workspaces / prune-docker-cache logic used on their nightly
+// schedule, until usage drops back below the low watermark
 // (default 70%) or a small iteration cap is hit.
 //
 // This is deliberately the SAME pruning logic as the nightly job, just
-// invoked out of band — per the spec (§4, "one policy, two triggers"),
-// REQ-03 is a safety net on top of REQ-01/REQ-02, not a separate policy.
+// invoked out of band — one policy, two triggers: this sweep is a safety
+// net on top of the nightly workspace/Docker-cache pruning, not a separate
+// policy.
 //
 // Usage: node disk-usage-sweep.js
 // Env: JENKINS_DATA_MOUNT default /var/jenkins_home

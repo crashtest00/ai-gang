@@ -8,7 +8,7 @@
 #   1. Installs cloudflared (if not already installed)
 #   2. Creates a named tunnel "ai-gang" via Cloudflare's account-scoped
 #      Tunnel REST API (idempotent) — see "Token-based tunnel creation"
-#      below (the graph-process-engine design REQ-11)
+#      below
 #   3. Writes /etc/cloudflared/config.yml (HQ always; Jenkins, the preview
 #      wildcard, and the beta-app wildcard if their subdomain vars are set)
 #   4. Creates CNAME DNS record(s) via the Cloudflare API
@@ -22,7 +22,7 @@
 # Safe to re-run: the config is regenerated from .env each time, preserving all
 # ingress entries defined by the variables below.
 #
-# Token-based tunnel creation (REQ-11):
+# Token-based tunnel creation:
 #   This script no longer requires the interactive `cloudflared tunnel
 #   login` browser step. Instead it creates the tunnel directly via
 #   `POST /accounts/{CF_ACCOUNT_ID}/cfd_tunnel`, authenticated by
@@ -33,8 +33,7 @@
 #   against a real account (scripts/spike-cloudflare-tunnel-api.sh),
 #   `"cloudflare"` fails with a generic authentication error regardless of
 #   token permissions, while `"local"` succeeds with the existing token and
-#   no Zero Trust onboarding — see graph-process-engine.md's Open Questions
-#   for the full writeup.
+#   no Zero Trust onboarding.
 #
 #   A locally-managed tunnel's credentials file
 #   (~/.cloudflared/<tunnel_id>.json, cloudflared's own format:
@@ -66,8 +65,7 @@
 #                                                    # for every call, not only Access
 #        HQ_SUBDOMAIN=hq.yourdomain.com
 #        JENKINS_SUBDOMAIN=jenkins.yourdomain.com   # optional — omit if not using Jenkins
-#        PREVIEW_SUBDOMAIN=*.preview.yourdomain.com # optional — release-candidate previews
-#                                                    # (see the release-workflow design).
+#        PREVIEW_SUBDOMAIN=*.preview.yourdomain.com # optional — release-candidate previews.
 #                                                    # Routes to Traefik on the Beta VM, which
 #                                                    # picks per-container routes from Docker
 #                                                    # labels — this hostname is registered once.
@@ -91,8 +89,7 @@
 # The branch points this script's manual prerequisites used to leave as
 # silent dead ends (token/account missing, tunnel already existing, which
 # subdomain vars are set) are now also modeled as a graph, walkable without
-# running this script at all:
-# setup/graphs/cloudflare-setup.graph.yaml (graph-process-engine.md REQ-10).
+# running this script at all: setup/graphs/cloudflare-setup.graph.yaml.
 #
 # Usage:
 #   ./scripts/setup-cloudflare-tunnel.sh
@@ -113,7 +110,7 @@ fi
 
 : "${CF_API_KEY:?CF_API_KEY is not set. Check $HQ_ENV}"
 : "${CF_ZONE_ID:?CF_ZONE_ID is not set. Check $HQ_ENV}"
-: "${CF_ACCOUNT_ID:?CF_ACCOUNT_ID is not set. Check $HQ_ENV (Cloudflare dashboard -> right sidebar) — required for the account-scoped Tunnel API (REQ-11), not only Access}"
+: "${CF_ACCOUNT_ID:?CF_ACCOUNT_ID is not set. Check $HQ_ENV (Cloudflare dashboard -> right sidebar) — required for the account-scoped Tunnel API, not only Access}"
 : "${HQ_SUBDOMAIN:?HQ_SUBDOMAIN is not set. Check $HQ_ENV (e.g. hq.yourdomain.com)}"
 # Optional — include Jenkins ingress when set
 JENKINS_SUBDOMAIN="${JENKINS_SUBDOMAIN:-}"
@@ -135,7 +132,7 @@ cf_curl() {
 # --- Step 1: Install cloudflared ---
 # Still needed: cloudflared itself is what runs the tunnel connector as a
 # systemd service (Step 6) — only *creating* the tunnel and authenticating
-# to do so no longer needs it (REQ-11).
+# to do so no longer needs it.
 if command -v cloudflared &> /dev/null; then
   echo "cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
 else
@@ -148,7 +145,7 @@ else
 fi
 
 # --- Step 2/3: Create tunnel via the account-scoped Tunnel API (idempotent) ---
-# REQ-11: no `cloudflared tunnel login` browser step — CF_API_KEY plus
+# No `cloudflared tunnel login` browser step — CF_API_KEY plus
 # CF_ACCOUNT_ID (both environment-supplied) and network access to the
 # Cloudflare API are sufficient. See setup/graphs/cloudflare-setup.graph.yaml
 # for this as a walkable decision node instead of this script's own
@@ -229,7 +226,7 @@ fi
 # Docker labels deploy.sh/preview-deploy.sh set, so no config file edits or
 # tunnel restarts per release or per deploy. This script normally runs on
 # the Dev VM, so the origin must be BETA_VM_HOST, not localhost — Traefik's
-# port isn't on this machine. See release-workflow.md and beta-vm/README.md.
+# port isn't on this machine. See beta-vm/README.md.
 #
 # Hostnames are quoted: a leading "*" (both wildcards start with one) is a
 # YAML alias character unquoted, and would fail to parse otherwise.

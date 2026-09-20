@@ -1,5 +1,5 @@
-# Branch-tracking / stale-ref branch-point class (graph-process-engine.md
-# REQ-13). Compares a local branch's upstream tracking ref against the
+# Branch-tracking / stale-ref branch-point class. Compares a local branch's
+# upstream tracking ref against the
 # remote's actual current default branch, catching the case a server-side
 # default-branch rename leaves stale: the local branch still tracks the old
 # name, and a naive push/PR silently targets the wrong ref.

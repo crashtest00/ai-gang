@@ -16,7 +16,7 @@ function baseMessage(overrides = {}) {
   });
 }
 
-// REQ-05 — Parts and artifacts
+// Parts and artifacts
 
 test('validatePart accepts text, data, and file parts', () => {
   schema.validatePart(buildTextPart('hi'));
@@ -37,7 +37,7 @@ test('validateMessage requires a non-empty parts array', () => {
   assert.throws(() => schema.validateMessage(baseMessage({ parts: [] })), schema.A2AValidationError);
 });
 
-// REQ-03 — symmetric content model, no from/to, role required
+// Symmetric content model, no from/to, role required
 
 test('validateMessage accepts both client and agent roles with the same shape', () => {
   schema.validateMessage(baseMessage({ role: 'client' }));
@@ -58,7 +58,7 @@ test('validateMessage rejects "from"/"to" as top-level content fields', () => {
   assert.throws(() => schema.validateMessage(message2), schema.A2AValidationError);
 });
 
-// REQ-04 — AI Gang integration metadata must live in `metadata`
+// AI Gang integration metadata must live in `metadata`
 
 test('validateTask accepts a Jira issue key inside metadata', () => {
   schema.validateTask(buildTask({
@@ -79,7 +79,7 @@ test('validateTask rejects a Jira issue key at the top level', () => {
   assert.throws(() => schema.validateTask(task), schema.A2AValidationError);
 });
 
-// REQ-02 — lifecycle states
+// Lifecycle states
 
 test('validateTask accepts every adopted lifecycle state', () => {
   for (const state of schema.TASK_STATES) {
@@ -113,7 +113,7 @@ test('validateArtifact accepts a file part and a text part together', () => {
   }));
 });
 
-// REQ-08 — AgentCard
+// AgentCard
 
 test('validateAgentCard requires at least one advertised skill', () => {
   assert.throws(() => schema.validateAgentCard({
@@ -143,7 +143,7 @@ test('validateAgentCard accepts a complete card', () => {
   });
 });
 
-// REQ-01 — envelope wraps the canonical objects, nothing else
+// Envelope wraps the canonical objects, nothing else
 
 test('validateEnvelope rejects an unknown top-level key', () => {
   const envelope = {

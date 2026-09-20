@@ -1,4 +1,4 @@
-# canonical-release-workflow.md REQ-01 — the `work_item_release_detail`
+# The `work_item_release_detail`
 # table, following 0001_initial's WorkItemStoryDetail pattern exactly.
 
 import django.db.models.deletion

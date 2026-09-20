@@ -15,7 +15,6 @@ test('the checked-in deployment-target-boilerplate graph is structurally valid',
   assert.equal(result.valid, true);
 });
 
-// deployment-target-boilerplate.md REQ-02
 test('selecting "web" scaffolds the web boilerplate and terminates success', async () => {
   const doc = loadGraphFile(GRAPH_PATH);
   const actionsRun = [];
@@ -27,7 +26,6 @@ test('selecting "web" scaffolds the web boilerplate and terminates success', asy
   assert.equal(result.outcome, 'success');
 });
 
-// deployment-target-boilerplate.md REQ-03
 test('selecting an unsupported target reaches remediation naming the gap, not a dead end', async () => {
   const doc = loadGraphFile(GRAPH_PATH);
   let fixed = false;

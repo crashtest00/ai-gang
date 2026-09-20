@@ -1,11 +1,10 @@
 """
-internal-work-item-service.md REQ-06's own acceptance criterion, verified
-for real rather than simulated in-process — mirrors
+Verified for real rather than simulated in-process — mirrors
 services/work-item-service/test/relay.integration.test.js exactly, at the same
-rigor: "Kill the outbox relay process mid-run after several datastore
-writes have committed. On restart, every committed write's event is
+rigor: kill the outbox relay process mid-run after several datastore
+writes have committed. On restart, every committed write's event must be
 eventually published exactly once — none missing, none duplicated as a
-distinct logical event."
+distinct logical event.
 
 This spawns `python manage.py relay` as a REAL child process (not a
 mocked timer or an in-process function call), SIGKILLs it while it is

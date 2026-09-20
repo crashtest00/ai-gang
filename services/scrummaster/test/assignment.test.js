@@ -6,7 +6,7 @@ const path = require('node:path');
 
 // Point the singleton registry at the fixture catalog/project config before
 // requiring assignment.js (which requires registry.js internally) —
-// agent-assignment.md REQ-03..REQ-05: this is the sole validator every
+// this is the sole validator every
 // assignment-producing path must call.
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, 'fixtures', 'agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, 'fixtures', 'projects.json');
@@ -64,4 +64,35 @@ test('validateDecomposition rejects the whole batch atomically when any subtask 
     { subtaskId: '3', displayName: 'Ghost work', requestedAgent: 'ghost-agent' },
   ]);
   assert.deepEqual(result.permittedAgents, ['refinement-agent', 'backend-agent']);
+});
+
+// deriveAgentFromSummary — the recovery path for a create_subtask request
+// that names its role in the summary but omits the agent id itself.
+
+test('deriveAgentFromSummary derives the agent from a role prefix the project has', () => {
+  const agent = assignment.deriveAgentFromSummary('test-project', 'Backend: add the /health endpoint');
+  assert.equal(agent.id, 'backend-agent');
+});
+
+test('deriveAgentFromSummary accepts the id and display-name spellings of the same role', () => {
+  for (const summary of ['backend-agent: do it', 'Backend Agent: do it', 'BACKEND: do it']) {
+    assert.equal(assignment.deriveAgentFromSummary('test-project', summary).id, 'backend-agent', summary);
+  }
+});
+
+test('deriveAgentFromSummary does not derive an agent the project is not permitted', () => {
+  // frontend-agent is in the fixture catalog but not in test-project's allowed set
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Frontend: build the form'), null);
+});
+
+test('deriveAgentFromSummary derives nothing from an unrecognized or absent role prefix', () => {
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Database: add an index'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', 'Add the /health endpoint'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', ': no role at all'), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', ''), null);
+  assert.equal(assignment.deriveAgentFromSummary('test-project', undefined), null);
+});
+
+test('deriveAgentFromSummary derives nothing for an unconfigured project', () => {
+  assert.equal(assignment.deriveAgentFromSummary('no-such-project', 'Backend: add the /health endpoint'), null);
 });

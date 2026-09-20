@@ -3,7 +3,7 @@
 // Thin, injectable client for the two Jenkins REST API questions the
 // workspace prune job needs answered, both from one call:
 //   1. Which job/branch combinations have a build running right now?
-//      (REQ-04's exclusion list for workspace pruning.)
+//      (the exclusion list for workspace pruning.)
 //   2. Which top-level jobs are multibranch parents (so their on-disk
 //      workspace layout is <job>/<branch>/) versus singleton pipeline jobs
 //      (workspace layout is just <job>/)?

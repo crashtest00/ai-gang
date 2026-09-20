@@ -1,8 +1,7 @@
 'use strict';
 
 // Structural validation and end-to-end walks of the checked-in Cloudflare
-// pilot graph (graph-process-engine.md REQ-10) against every documented
-// environment state, satisfying PRD AC-03 / REQ-10's acceptance. All
+// pilot graph against every documented environment state. All
 // Cloudflare API calls are mocked via the injectable httpClient — this
 // suite never touches a real account.
 
@@ -179,7 +178,7 @@ test('CF_ACCOUNT_ID absent when Access is required -> reaches its own remediatio
   assert.equal(result.outcome, 'success');
 });
 
-test('every missing-prerequisite branch reaches a remediation node before any action node (REQ-10 acceptance)', async () => {
+test('every missing-prerequisite branch reaches a remediation node before any action node', async () => {
   const doc = loadGraph();
   const remediationNodeIds = doc.nodes.filter((n) => n.kind === 'remediation').map((n) => n.id);
   assert.equal(remediationNodeIds.length, 7); // one per decision node's non-happy-path branch(es)

@@ -64,9 +64,9 @@ generic permissions error, not an obvious one:
 | Permission | Classic PAT scope | Fine-grained PAT permission | Needed for |
 |---|---|---|---|
 | Read/write commit statuses | `repo:status` | Commit statuses: Read and write | PR checks showing up at all (§2.3 above) |
-| Merge PRs | `repo` | Pull requests: Read and write | Auto-merge to `dev`; merging the frozen `release/<sha> → prod` PR (release-workflow.md step 14) |
-| Trigger workflows | `workflow` | Actions: Read and write | `gh workflow run build-desktop.yml` (desktop-app-support.md) |
-| Push tags | `repo` | Contents: Read and write | Pushing the `vX.Y.Z` release tag on production approval (desktop-app-support.md) |
+| Merge PRs | `repo` | Pull requests: Read and write | Auto-merge to `dev`; merging the frozen `release/<sha> → prod` PR |
+| Trigger workflows | `workflow` | Actions: Read and write | `gh workflow run build-desktop.yml` |
+| Push tags | `repo` | Contents: Read and write | Pushing the `vX.Y.Z` release tag on production approval |
 
 `prod` branch protection (§7 below) still requires its status checks and
 review rules regardless of token scope — this table only covers what
@@ -101,12 +101,14 @@ Repos configured:
 
 ## 6. Release Flow (dev → beta automatic, beta → prod via Release ticket)
 
-Superseded design: a single `jira-done-promote` job fired on *every* Done
-transition and promoted `dev → beta` per ticket. See
-the release-workflow design for why that doesn't scale (N stories
-= N promotions = N approvals) and for the full corrected flow. There is no
-Jira automation rule in the new design — ScrumMaster calls Jenkins directly
-in every case, same as before, just via different jobs.
+Earlier iteration: a single `jira-done-promote` job fired on *every* Done
+transition and promoted `dev → beta` per ticket. That doesn't scale — N
+stories means N promotions and N approvals — so promotion is now split into
+the three jobs described below (`dev → beta` automatic, `release-candidate`,
+and `production-promote`), batching many tickets' work into one release
+approval. There is no Jira automation rule driving any of it — ScrumMaster
+calls Jenkins directly in every case, same as before, just via these
+different jobs.
 
 ### dev → beta (automatic, no Jira involvement)
 
@@ -288,7 +290,7 @@ only as a fast-forward from `dev` (see `setup/Jenkinsfile.template`).
 ### `prod`
 
 The most restrictive of the three — `prod` only ever changes via the
-Release-ticket flow (the release-workflow design step 14), never
+`production-promote` job merging the frozen `release/<sha> → prod` PR, never
 an arbitrary PR.
 
 | Setting | Value |
@@ -368,10 +370,8 @@ image/layer cache) are shared across every project's pipeline. They exist
 because `buildDiscarder(logRotator(...))` (`setup/Jenkinsfile.template`)
 only bounds Jenkins' own build-record history, not on-disk workspace or
 Docker cache growth, and unpruned growth on those two surfaces has already
-caused one hard build failure from disk exhaustion
-(the hwd2-pipeline-audit design #13). Full detail:
-[`jenkins/CACHE_RETENTION.md`](../jenkins/CACHE_RETENTION.md) and
-the jenkins-cache-retention design.
+caused one hard build failure from disk exhaustion. Full detail:
+[`jenkins/CACHE_RETENTION.md`](../jenkins/CACHE_RETENTION.md).
 
 ### `jenkins-cache-retention-nightly` job
 

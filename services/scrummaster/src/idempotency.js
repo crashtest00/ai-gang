@@ -5,7 +5,7 @@
 // external side effect for this messageId already been applied?).
 //
 // A record must survive process restart and outlive the maximum source
-// retention/replay window (REQ-05, REQ-10 default 7d acknowledged / 30d
+// retention/replay window (default 7d acknowledged / 30d
 // dead-letter) — the default TTL here is 30 days so a single store covers
 // both windows without a second configuration knob.
 const DEFAULT_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -55,7 +55,7 @@ async function getOutcome(client, namespace, id) {
 // redeliveries. The outcome is recorded only after `fn` resolves — if `fn`
 // throws (a partial failure), nothing is recorded and a later retry runs
 // `fn` again from scratch. This is the "did the whole operation already
-// complete" fast path (REQ-04/REQ-05); callers with side effects that must
+// complete" fast path; callers with side effects that must
 // also survive a partial-failure retry (e.g. a dispatch a handler makes
 // partway through its own work) still need their own stable dedupeKey at
 // that specific call site — see streams.publish's `dedupeKey` option.

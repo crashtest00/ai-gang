@@ -1,12 +1,10 @@
 'use strict';
 
-// ScrumMaster's client onto the Internal Work-Item Service
-// (the internal-work-item-service design,
-// canonical-work-model.md). Two interfaces, matching that document exactly:
+// ScrumMaster's client onto the Internal Work-Item Service. Two interfaces:
 //
-//  - getMode(): a direct, synchronous HTTP read (REQ-04) — not a Streams
+//  - getMode(): a direct, synchronous HTTP read — not a Streams
 //    round-trip, since it has no state-changing effect.
-//  - publishCommand(): every write goes over Redis Streams (REQ-03) using
+//  - publishCommand(): every write goes over Redis Streams using
 //    the SAME envelope/streams machinery ScrumMaster already uses for every
 //    other flow (envelope.js/streams.js) — this module does not invent a
 //    second write mechanism, it targets a different stream.
@@ -19,8 +17,7 @@
 // why the coupling runs the OTHER way (work-item-service requires
 // ScrumMaster's pure validation/streams modules) and not this one: a
 // deployed ScrumMaster should not need work-item-service's source tree on
-// its filesystem, only the stream-naming contract they both already share
-// via redis-streams.md's topology convention.
+// its filesystem, only the stream-naming contract they both already share.
 
 const axios = require('axios');
 const redis = require('./redis');
@@ -36,7 +33,7 @@ function commandStreamName(project) {
   return `aigang:workitems:${registry.normalizeProjectName(project)}`;
 }
 
-// REQ-04 direct read. `client` is axios by default, injectable for testing.
+// Direct read. `client` is axios by default, injectable for testing.
 async function getMode(project, { client = axios } = {}) {
   const { data } = await client.get(`${baseUrl()}/projects/${encodeURIComponent(project)}/mode`);
   return data; // { project, mode, jiraProjectKey }
@@ -52,7 +49,7 @@ async function getWorkItem(id, { client = axios, full = false } = {}) {
   }
 }
 
-// REQ-03: publish a command onto the internal API's Streams command
+// Publish a command onto the internal API's Streams command
 // channel. `payload` is the same { command, actor, ... } shape
 // services/work-item-service/src/commandConsumer.js expects.
 async function publishCommand(project, payload, { redisClient, dedupeKey } = {}) {

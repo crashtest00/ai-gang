@@ -100,7 +100,7 @@ test('resolveRef rejects a "next" lookup against a terminal node', () => {
   assert.throws(() => resolveRef(sampleDoc, 'sample#c:next'), /terminal/);
 });
 
-// --- escalation nodes (REQ-17) ---
+// --- escalation nodes ---
 
 const escalationSampleDoc = {
   graph_id: 'sample-esc',
@@ -121,7 +121,7 @@ const escalationSampleDoc = {
   ],
 };
 
-test('resolveRef resolves an escalation node branch edge (REQ-17)', () => {
+test('resolveRef resolves an escalation node branch edge', () => {
   const { node, target } = resolveRef(escalationSampleDoc, 'sample-esc#ask:right');
   assert.equal(node.id, 'ask');
   assert.equal(target, 'do-right');

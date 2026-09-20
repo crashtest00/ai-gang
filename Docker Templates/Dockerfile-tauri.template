@@ -3,8 +3,7 @@
 #
 # Debian-family base, matching hello-desktop's landed Alpine-to-Debian
 # switch (projects/hello-desktop/Dockerfile uses node:22-bookworm) — this is
-# the checked-in fixture for the base-image-family branch-point class
-# (the graph-process-engine design REQ-12/REQ-14): its
+# the checked-in fixture for the base-image-family branch-point class: its
 # user-management step uses `useradd`, not Alpine's `adduser`/`deluser`.
 #
 # This template only builds the *container* used for AI Gang agent

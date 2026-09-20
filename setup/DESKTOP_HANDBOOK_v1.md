@@ -28,9 +28,8 @@ stage — via `jenkins/scripts/trigger-native-build.sh`, which detects a desktop
 project by the presence of this workflow file itself, so no separate per-project
 config is needed. Agents and humans do not run the workflow or create release
 tags. The Jenkins integration and artifact-link Jira comment are defined by
-the desktop-app-support design and
-the release-workflow design and should be changed with that
-flow, not inside an application repository.
+the release-flow tooling shared with the rest of the release pipeline and should be
+changed with that flow, not inside an application repository.
 
 The workflow verifies that checkout resolved to the requested SHA before building.
 A failure on any matrix OS fails the run; successful legs remain downloadable for

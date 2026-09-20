@@ -1,8 +1,8 @@
 """
 Redis Streams transport — a Python port of services/scrummaster/src/streams.js,
-reimplemented against redis-py rather than required cross-language
-(internal-work-item-service.md's own framing: "Redis Streams is a wire
-protocol, not a language-specific library"). Same stream/consumer-group
+reimplemented against redis-py rather than required cross-language —
+Redis Streams is a wire protocol, not a language-specific library. Same
+stream/consumer-group
 topology, same ack/retry/dead-letter semantics, same idempotency
 (dedupe-on-publish) mechanism as the Node original — see each function's
 docstring for the line-by-line correspondence.

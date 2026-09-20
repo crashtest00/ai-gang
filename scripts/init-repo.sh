@@ -24,18 +24,17 @@ done
 [[ -n "$TARGET_DIR" ]] || { echo "--target is required" >&2; exit 2; }
 [[ -n "$DEPLOYMENT" ]] || { echo "--deployment is required" >&2; exit 2; }
 
-# Boilerplate selection by target deployment
-# (the deployment-target-boilerplate design REQ-02) — the
-# same branch point is also addressable as a graph node,
+# Boilerplate selection by target deployment — the same branch point is
+# also addressable as a graph node,
 # setup/graphs/deployment-target-boilerplate.graph.yaml
 # (deployment-target-boilerplate#select-target-deployment), for callers
 # walking the graph-based initialization procedure instead of invoking this
 # script directly.
 case "$DEPLOYMENT" in
   web)
-    # REQ-01/REQ-02: scaffold the checked-in, minimal, independently
-    # runnable and deployable web boilerplate instead of an empty
-    # repository. templates/web/ is the scaffold source; the running,
+    # Scaffold the checked-in, minimal, independently runnable and
+    # deployable web boilerplate instead of an empty repository.
+    # templates/web/ is the scaffold source; the running,
     # checked-in reference instance lives at projects/hello-web/ (built
     # from the same content, paralleling projects/hello-desktop/).
     if [[ -n "$(ls -A "$TARGET_DIR" 2>/dev/null)" ]]; then
@@ -58,18 +57,17 @@ case "$DEPLOYMENT" in
       "$TARGET_DIR/.github/workflows/release-desktop.yml"
     echo "  Installed desktop build and release workflows ($FRAMEWORK)."
     echo "  NOTE: desktop remains an experimental target in V2 — not generalized"
-    echo "  further, not covered by deployment-target-boilerplate.md's acceptance bar."
+    echo "  further, and outside this feature's acceptance bar."
     ;;
   *)
-    # REQ-03: an unsupported target deployment reaches guided remediation,
-    # not a silent empty scaffold. This is the same remediation content as
+    # An unsupported target deployment reaches guided remediation, not a
+    # silent empty scaffold. This is the same remediation content as
     # setup/graphs/deployment-target-boilerplate.graph.yaml's
     # remediate-unsupported-target node, for a caller running this script
     # directly rather than walking the graph.
     echo "" >&2
     echo "  No boilerplate is defined for deployment target \"$DEPLOYMENT\"." >&2
-    echo "  V2 officially supports the web target only" >&2
-    echo "  (deployment-target-boilerplate.md REQ-01); desktop remains available" >&2
+    echo "  V2 officially supports the web target only; desktop remains available" >&2
     echo "  but experimental. $TARGET_DIR was left empty — this is not a failure," >&2
     echo "  but there is no starting scaffold for this target yet." >&2
     echo "" >&2

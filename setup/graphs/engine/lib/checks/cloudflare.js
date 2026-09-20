@@ -1,7 +1,7 @@
 'use strict';
 
-// Detection logic backing the Cloudflare pilot graph's four decision nodes
-// (graph-process-engine.md REQ-10). Each function takes an injectable
+// Detection logic backing the Cloudflare pilot graph's four decision nodes.
+// Each function takes an injectable
 // `httpClient` (defaulting to Node's global fetch) so tests can mock every
 // external Cloudflare API call per this workstream's test-coverage
 // requirement ("Mock external Cloudflare API calls in automated tests — do
@@ -58,7 +58,7 @@ async function checkTunnelExists(env, httpClient = defaultHttpClient(), tunnelNa
  *                                BETA_VM_HOST is not
  *   "probe-error"             — unreachable for a pure env-var read; present
  *                                only for decision-node contract uniformity
- *                                (REQ-02) and for a check function that
+ *                                and for a check function that
  *                                throws unexpectedly
  */
 function checkSubdomainVars(env) {

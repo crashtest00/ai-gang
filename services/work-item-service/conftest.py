@@ -6,9 +6,8 @@ workitemservice/settings.py picks up the real test Postgres/Redis
 containers (services/work-item-service/docker-compose.test.yml) and the SAME
 fixture agent catalog scrummaster's own tests use — mirrors the Node
 implementation's test/helpers/testDb.js exactly, including why: catalog-
-backed assignment validation (workitems/assignment.py, reused per
-canonical-work-model.md REQ-03/REQ-13) needs a real catalog to validate
-against.
+backed assignment validation (workitems/assignment.py, reused here too)
+needs a real catalog to validate against.
 """
 
 import importlib.util

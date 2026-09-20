@@ -1,9 +1,7 @@
 # Jenkins Workspace and Docker Cache Retention
 
-Implements the jenkins-cache-retention design.
-Resolves the hwd2-pipeline-audit design #13 — a real "No space left
-on device" build failure caused by unpruned `jenkins-data` workspaces and
-host Docker image/layer cache.
+Resolves a real "No space left on device" build failure caused by
+unpruned `jenkins-data` workspaces and host Docker image/layer cache.
 
 ## What runs, and when
 
@@ -13,34 +11,35 @@ project's pipeline):
 
 | Job | Schedule | Does |
 | --- | --- | --- |
-| `jenkins-cache-retention-nightly` | `cron('H 2 * * *')` — nightly | Prunes stale `jenkins-data` workspaces (REQ-01) and the host Docker image/layer cache (REQ-02) |
-| `jenkins-disk-usage-sweep` | `cron('H/30 * * * *')` — every ≥30 min | Checks disk usage; if ≥85%, re-runs the same two prunes repeatedly until usage is back below 70% (REQ-03) |
+| `jenkins-cache-retention-nightly` | `cron('H 2 * * *')` — nightly | Prunes stale `jenkins-data` workspaces and the host Docker image/layer cache |
+| `jenkins-disk-usage-sweep` | `cron('H/30 * * * *')` — every ≥30 min | Checks disk usage; if ≥85%, re-runs the same two prunes repeatedly until usage is back below 70% |
 
 Both call the exact same underlying logic (`jenkins/scripts/prune-workspaces.js`,
 `jenkins/scripts/prune-docker-cache.js`) — the threshold sweep is a safety
-net on top of the nightly cadence, not a separate policy. See §4 of the
-feature spec for why the threshold sweep, not the cadence, is what actually
-closes the gap the original incident exposed.
+net on top of the nightly cadence, not a separate policy: the nightly
+cadence alone can still lose the race if enough builds land between runs,
+which is why the threshold sweep is what actually closes the gap the
+original incident exposed.
 
 ## Retention policy
 
-- **Workspaces** (REQ-01): a job's on-disk workspace is pruned once it's
+- **Workspaces**: a job's on-disk workspace is pruned once it's
   older than 14 days, or once it's beyond the 5 most-recently-used
   workspaces for that job (superseded branches/PRs), whichever comes first.
-- **Docker cache** (REQ-02): `docker system prune -f --filter until=72h` —
+- **Docker cache**: `docker system prune -f --filter until=72h` —
   images/layers/build cache untouched for 72+ hours, never anything backing
   an existing container.
-- **In-progress builds are never touched** (REQ-04): a workspace whose
+- **In-progress builds are never touched**: a workspace whose
   job/branch Jenkins reports as currently building is excluded from every
   prune, regardless of age or count. Docker's own `system prune` semantics
   (no `-a`) never remove an image/cache layer attached to an existing
   container, running or stopped, which gives the Docker side of this
   guarantee for free.
 
-Values are starting defaults (§6 Open Question 1 in the spec), not yet
-tuned against this host's real disk size or churn.
+Values are starting defaults, not yet tuned against this host's real disk
+size or churn.
 
-## Where to look: current disk usage and prune history (REQ-05)
+## Where to look: current disk usage and prune history
 
 Two places, both without SSHing in:
 
@@ -71,10 +70,10 @@ Two places, both without SSHing in:
 - `lib/workspace-fs.js` — walks `jenkins-data`'s workspace tree and deletes
   directories.
 - `lib/disk-usage.js` — reads `df` output for the current usage percent.
-- `lib/retention-log.js` — the REQ-05 append-only log.
+- `lib/retention-log.js` — the append-only prune-history log.
 - `prune-workspaces.js`, `prune-docker-cache.js` — orchestration entry
   points invoked by both jobs above.
-- `disk-usage-sweep.js` — REQ-03's threshold-check-and-loop entry point.
+- `disk-usage-sweep.js` — the threshold-check-and-loop entry point.
 
 Run `npm test` from `jenkins/` for the full suite (`jenkins/test/`, using
 Node's built-in `node --test`, matching `services/scrummaster/`'s convention).

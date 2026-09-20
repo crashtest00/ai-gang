@@ -5,14 +5,13 @@
 # agent catalog (services/scrummaster/config/agents.json). Jira is a projection of
 # the catalog, never the other way around — this script never reads Jira to
 # decide what's valid, only to decide what needs to change.
-# See the agent-assignment design REQ-06.
 #
 # What it does:
 #   - Creates a Jira option (enabled) for every active catalog id that has
 #     no corresponding option yet.
 #   - Disables (never deletes) the Jira option for every id listed in the
 #     catalog's `retiredAgents` — preserves the value so historical Jira
-#     work referencing it stays interpretable, per REQ-06.
+#     work referencing it stays interpretable.
 #   - Reports, without modifying, any Jira option whose value is neither an
 #     active catalog id nor a retired one — its provenance is unknown, so a
 #     human decides whether to add it to agents.json or retire it deliberately.

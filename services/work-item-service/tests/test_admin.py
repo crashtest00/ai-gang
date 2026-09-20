@@ -1,5 +1,5 @@
 """
-REQ-08's Django admin UI — the concrete capability this rebuild exists to
+The Django admin UI — the concrete capability this rebuild exists to
 add (the Node build's own tracked gap: "Node/Express doesn't get one for
 free"). These tests exercise the ACTUAL admin views (not just admin.py's
 configuration) through a logged-in Django test Client, confirming that an
@@ -78,7 +78,7 @@ def test_admin_add_work_item_routes_through_store_and_produces_history_and_outbo
 
 
 def test_admin_add_work_item_uses_admin_ui_origin(clean_db, monkeypatch):
-    """REQ-08 origin split: a write made through the real, session-
+    """Origin split: a write made through the real, session-
     authenticated Django admin must reach store.py as Origins.ADMIN_UI,
     never Origins.EXTERNAL_API (reserved for views.py's unauthenticated
     HTTP handlers)."""
@@ -194,8 +194,8 @@ def test_admin_add_then_edit_saves_story_detail_via_inline(clean_db):
     # WorkItemStoryDetail instance) rather than through store.py — so this
     # write does not append to work_item_history or produce its own
     # outbox_event, unlike every other write in this module. Documenting
-    # the actual behavior rather than asserting what REQ-05/REQ-06 would
-    # imply; retrofitting the inline to route through store.py is out of
+    # the actual behavior rather than asserting what history/outbox parity
+    # would imply; retrofitting the inline to route through store.py is out of
     # this feature's scope.
     from workitems.models import OutboxEvent
     events = OutboxEvent.objects.filter(work_item_id=item_id)
@@ -236,6 +236,78 @@ def test_admin_add_then_edit_saves_release_detail_via_inline(clean_db):
     assert detail.release_notes == 'Notes here'
 
 
+def test_admin_add_two_work_items_with_blank_external_key_both_succeed(clean_db):
+    """Regression test: a TextField left blank on the admin's change form
+    is submitted by the browser as '', not None — and '' is a value like
+    any other for external_key's unique constraint, so a second work item
+    added with the field left blank used to collide with the first. Both
+    adds must now succeed, and the column must hold NULL, not ''."""
+    client = _admin_client(clean_db)
+
+    for _ in range(2):
+        item_id = uuid.uuid4()
+        resp = client.post('/django-admin/workitems/workitem/add/', data={
+            'id': str(item_id), 'project': PROJECT, 'type': 'task', 'display_name': 'No external key',
+            'description': '', 'status': 'proposed', 'assignee_agent_id': '', 'priority': '0',
+            'writes_files': '', 'writes_services': '', 'parent': '', 'external_key': '',
+            **_EMPTY_FORMSETS,
+        })
+        assert resp.status_code == 302, f'expected a redirect after add, got {resp.status_code}'
+        item = WorkItem.objects.get(id=item_id)
+        assert item.external_key is None, "a blank External key must be stored as NULL, not ''"
+
+
+def test_admin_add_work_item_with_duplicate_external_key_is_rejected(clean_db):
+    """A non-blank External key is still a real duplicate — normalizing
+    blank to NULL must not weaken the unique constraint for an actual
+    collision."""
+    client = _admin_client(clean_db)
+    store.create_work_item({'id': uuid.uuid4(), 'project': PROJECT, 'type': 'task', 'displayName': 'First',
+                             'externalKey': 'DUP-1'})
+
+    item_id = uuid.uuid4()
+    resp = client.post('/django-admin/workitems/workitem/add/', data={
+        'id': str(item_id), 'project': PROJECT, 'type': 'task', 'display_name': 'Second',
+        'description': '', 'status': 'proposed', 'assignee_agent_id': '', 'priority': '0',
+        'writes_files': '', 'writes_services': '', 'parent': '', 'external_key': 'DUP-1',
+        **_EMPTY_FORMSETS,
+    })
+    assert resp.status_code == 200, 'a genuine duplicate key must redisplay the form with a field error, not redirect'
+    assert b'already exists' in resp.content
+    assert not WorkItem.objects.filter(id=item_id).exists()
+    assert WorkItem.objects.filter(external_key='DUP-1').count() == 1
+
+
+def test_admin_rejected_status_transition_redisplays_form_instead_of_500(clean_db):
+    """Regression test: a gated write store.py rejects (here, a status
+    transition to an unrecognized status) used to escape save_model as an
+    uncaught exception and reach the operator as a bare 500. It must
+    instead redirect back to the change form with the rejection reason
+    flashed as a message, and must not apply the rejected change."""
+    client = _admin_client(clean_db)
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item_id}/change/', data={
+        'id': str(item_id), 'project': PROJECT, 'type': 'task', 'display_name': 'X',
+        'description': '', 'status': 'not-a-real-status', 'assignee_agent_id': '', 'priority': '0',
+        'writes_files': '', 'writes_services': '', 'parent': '', 'external_key': '',
+        'story_detail-TOTAL_FORMS': '0', 'story_detail-INITIAL_FORMS': '0',
+        'story_detail-MIN_NUM_FORMS': '0', 'story_detail-MAX_NUM_FORMS': '1',
+        'release_detail-TOTAL_FORMS': '0', 'release_detail-INITIAL_FORMS': '0',
+        'release_detail-MIN_NUM_FORMS': '0', 'release_detail-MAX_NUM_FORMS': '1',
+        **_EMPTY_FORMSETS,
+    })
+    assert resp.status_code == 302, f'a rejected gated write must redirect, not 500 — got {resp.status_code}'
+
+    item = WorkItem.objects.get(id=item_id)
+    assert item.status == 'proposed', 'the rejected transition must not have been applied'
+
+    followed = client.get(resp.headers['Location'])
+    assert followed.status_code == 200
+    assert b'is not one of the minimum canonical statuses' in followed.content
+
+
 def test_admin_status_transition_on_jira_mode_project_is_rejected(clean_db):
     client = _admin_client(clean_db)
     item_id = uuid.uuid4()
@@ -248,7 +320,7 @@ def test_admin_status_transition_on_jira_mode_project_is_rejected(clean_db):
     # silently applied.
     resp = client.get(f'/django-admin/workitems/workitem/{item_id}/change/')
     assert resp.status_code == 200
-    assert b'name="status"' not in resp.content, 'status must render read-only for a Jira-mode project (REQ-08)'
+    assert b'name="status"' not in resp.content, 'status must render read-only for a Jira-mode project'
 
     item = WorkItem.objects.get(id=item_id)
     assert item.status == 'proposed', 'no write should have been possible through the read-only field'

@@ -2,8 +2,7 @@
 'use strict';
 
 /**
- * Operator tool: replay a dead-lettered Redis Stream entry
- * (the redis-streams design REQ-08).
+ * Operator tool: replay a dead-lettered Redis Stream entry.
  *
  * Run from the services/scrummaster/ directory (needs its node_modules):
  *   node scripts/redis-streams-replay.js <dead-letter-stream> <entry-id>

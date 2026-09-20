@@ -6,11 +6,11 @@
 #   TAG=<the tag just pushed, or empty if this is not a desktop-lane project>
 # for the calling Jenkins pipeline stage to capture via `sh(returnStdout: true)`.
 #
-# Unlike trigger-native-build.sh, this step is REQUIRED production behavior for
-# desktop projects (the desktop-app-support design REQ-07), not
-# supplementary validation — `set -e` lets a real git/gh failure fail the
-# production-promote job so it surfaces through the existing post-failure Jira
-# comment, instead of silently skipping the release tag.
+# Unlike trigger-native-build.sh, this step is REQUIRED production behavior
+# for desktop projects, not supplementary validation — `set -e` lets a real
+# git/gh failure fail the production-promote job so it surfaces through the
+# existing post-failure Jira comment, instead of silently skipping the
+# release tag.
 #
 # Requires: git configured to push to origin, run from inside the project's
 # checked-out repository, CANDIDATE_SHA set in the environment.

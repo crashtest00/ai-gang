@@ -25,7 +25,7 @@ services:
       - JIRA_TOKEN
       - GITHUB_TOKEN
       - JENKINS_URL
-      # Release flow — see the release-workflow design
+      # Release flow environment variables
       - JIRA_CANDIDATE_SHA_FIELD_ID
       - JIRA_BUILD_IDENTIFIER_FIELD_ID
       - JIRA_PREVIEW_URL_FIELD_ID
@@ -33,11 +33,11 @@ services:
       - BETA_VM_HOST
       - PROD_VM_HOST
       - REDIS_HOST=ai-gang-redis
-      # canonical-release-workflow.md REQ-04 — local-mode release-candidate/
-      # production-promote writeback target. Container DNS name on the
-      # shared ai-gang network (services/work-item-service/docker-compose.yml's
-      # `api` service), not a configurable host — same convention as
-      # REDIS_HOST above, not JIRA_URL/BETA_VM_HOST below.
+      # Local-mode release-candidate/production-promote writeback target.
+      # Container DNS name on the shared ai-gang network
+      # (services/work-item-service/docker-compose.yml's `api` service), not
+      # a configurable host — same convention as REDIS_HOST above, not
+      # JIRA_URL/BETA_VM_HOST below.
       - WORKITEM_SERVICE_URL=http://work-item-service:9100
       # Deploy credentials added once deployment targets are decided
     deploy:

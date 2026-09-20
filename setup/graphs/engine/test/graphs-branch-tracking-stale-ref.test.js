@@ -31,7 +31,7 @@ test('a matching tracking ref reaches success directly', async () => {
   );
 });
 
-// REQ-13 acceptance: given a stale ref after a server-side rename, reaches
+// Given a stale ref after a server-side rename, reaches
 // the mismatch branch, and the remediation's declared procedure is a
 // fetch --prune resync followed by re-evaluation of the same check.
 test('a stale tracking ref after a server-side rename reaches remediation, whose guidance is a fetch --prune resync, then re-verifies', async () => {

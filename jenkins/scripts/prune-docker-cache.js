@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-// Scheduled Docker image/layer cache pruning (REQ-02), invoked nightly by
+// Scheduled Docker image/layer cache pruning, invoked nightly by
 // the jenkins-cache-retention-nightly job, and also callable directly by
-// the threshold sweep (REQ-03, disk-usage-sweep.js).
+// the threshold sweep (disk-usage-sweep.js).
 //
-// REQ-04's in-progress guarantee for this surface is not something this
+// The in-progress-build guarantee for this surface is not something this
 // script re-implements — see the comment on buildDockerPruneCommand() in
 // lib/retention-policy.js: `docker system prune` without `-a` never
 // removes an image or build-cache layer attached to an existing container

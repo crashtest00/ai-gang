@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Operator diagnostic for the Redis Streams transport
-# (the redis-streams design REQ-09).
+# Operator diagnostic for the Redis Streams transport.
 #
 # Usage:
 #   scripts/redis-streams-health.sh <project-name> [agent-suffix ...]
@@ -55,5 +54,5 @@ Reading further:
   XRANGE <stream> - +                                dump every retained entry
   XPENDING <stream> <group> - + 10                   list up to 10 pending entries with idle time
   (cd services/scrummaster && node scripts/redis-streams-replay.js <dead-stream> <entry-id>)
-                                                       replay a dead-lettered entry (see redis-streams.md REQ-08)
+                                                       replay a dead-lettered entry
 EOF

@@ -4,13 +4,12 @@
 // lineage validation for A2A Tasks, Messages, and Artifacts.
 //
 // This store is intentionally in-memory only and does not survive a
-// ScrumMaster restart. Durable, restart-safe Task state is the explicit
-// concern of FEATURE-REDIS-STREAMS (the redis-streams design);
-// this feature (A2A messaging) defines the object model and lifecycle rules,
-// not their persistence. A restart while Tasks are in flight loses in-memory
-// Task identity — REQ-07's "must not create a new assignment for the
-// continuation" therefore only holds within one ScrumMaster process lifetime
-// until that follow-on feature lands.
+// ScrumMaster restart. Durable, restart-safe Task state is a separate
+// concern handled by Redis Streams; this module defines the object model
+// and lifecycle rules, not their persistence. A restart while Tasks are in
+// flight loses in-memory Task identity — the guarantee that a continuation
+// must not create a new assignment therefore only holds within one
+// ScrumMaster process lifetime.
 
 const schema = require('./schema');
 
@@ -75,6 +74,27 @@ function checkMessageLineage(record, message, {
   }
   if (message.referenceMessageId) {
     const found = record.messages.some(m => m.messageId === message.referenceMessageId);
+    const outcome = requireSuccessfulReference
+      ? messageOutcomesByTask.get(record.id)?.get(message.referenceMessageId)
+      : undefined;
+
+    // A predecessor already known dead must reject its successor outright,
+    // checked ahead of the found/accepted branch below so this covers both
+    // ways a predecessor can be known-failed: applied via applyTransition
+    // and later failed (found === true), or dead-lettered before
+    // applyTransition ever recorded it, with gateway.js's onDeadLetter hook
+    // recording the failure directly instead (found === false — see
+    // recordDeadLetteredMessageFailure below; without this branch that case
+    // fell through to "merely accepted" and deferred forever). 'superseded'
+    // is the same rejection for a predecessor a controlled reopen (below)
+    // neutralized rather than deleted, so a stale successor from the
+    // abandoned attempt can't pass lineage just because the entry is gone.
+    if (outcome === 'failed' || outcome === 'superseded') {
+      throw new A2ACausalDependencyFailedError(
+        `Message ${message.messageId} cannot proceed because predecessor ${message.referenceMessageId} failed`
+      );
+    }
+
     if (!found) {
       if (acceptedMessageIds.has(message.referenceMessageId)) {
         throw new A2ACausalDependencyPendingError(
@@ -86,18 +106,10 @@ function checkMessageLineage(record, message, {
       );
     }
 
-    if (requireSuccessfulReference) {
-      const outcome = messageOutcomesByTask.get(record.id)?.get(message.referenceMessageId);
-      if (outcome === 'pending') {
-        throw new A2ACausalDependencyPendingError(
-          `Message ${message.messageId} is waiting for predecessor ${message.referenceMessageId} to finish`
-        );
-      }
-      if (outcome === 'failed') {
-        throw new A2ACausalDependencyFailedError(
-          `Message ${message.messageId} cannot proceed because predecessor ${message.referenceMessageId} failed`
-        );
-      }
+    if (outcome === 'pending') {
+      throw new A2ACausalDependencyPendingError(
+        `Message ${message.messageId} is waiting for predecessor ${message.referenceMessageId} to finish`
+      );
     }
   }
 }
@@ -124,7 +136,7 @@ function checkArtifactLineage(record, artifact) {
 //
 // Idempotent per task.id: a caller's handler can legitimately be retried in
 // full (a partial-failure retry of the surrounding webhook/gateway handler —
-// see dispatch.js and redis-streams.md's dedupeKey pattern) and rebuild the
+// see dispatch.js and the Streams dedupeKey pattern) and rebuild the
 // same taskId from scratch. The *first* registration's initial message wins;
 // a retried registration attempt is a no-op that returns the existing record
 // unchanged, since the actual dispatch it would have produced is separately
@@ -199,6 +211,39 @@ function applyTransition(taskId, {
   }
 
   const controlledReopen = reopen && state === 'working' && message?.role === 'client';
+
+  // A controlled reopen is a fresh continuation: a human or canonical event
+  // (pipeline retry, human rework, unblock) deliberately redispatching this
+  // Task past whatever happened on its earlier attempt. A message already
+  // recorded failed (markMessageFailed) belongs to that earlier attempt —
+  // the agent that sent it cannot see the rejection comment it produced, and
+  // a literal resend referencing it would itself be refused by the lineage
+  // check below, so the only real recovery *is* a reopen. Carrying the old
+  // failure forward past that point would leave the Task reading failed
+  // (gateway.js's handleTaskStatus) forever, even once the redispatched
+  // attempt genuinely succeeds — so a genuine reopen must stop it counting
+  // against that read. It must not simply delete the entry, though: a
+  // successor from the abandoned attempt can still be sitting on the
+  // gateway stream deferring on this same referenceMessageId
+  // (A2ACausalDependencyPendingError/retryWithoutAttempt), and deleting the
+  // entry makes its next lineage check see `undefined` — indistinguishable
+  // from a predecessor that simply never existed here — and pass, running
+  // that stale successor's side effect on top of the new dispatch. Recording
+  // 'superseded' instead keeps checkMessageLineage rejecting it (see its
+  // `outcome === 'failed' || outcome === 'superseded'` branch above) without
+  // it counting as this Task's own current failure. Guarded on
+  // `!existingMessage` so a redelivery of the same reopen message (already
+  // applied) doesn't re-run this against bookkeeping a later, unrelated
+  // failure may since have added.
+  if (controlledReopen && !existingMessage) {
+    const outcomes = messageOutcomesByTask.get(taskId);
+    if (outcomes) {
+      for (const [msgId, outcome] of outcomes) {
+        if (outcome === 'failed') outcomes.set(msgId, 'superseded');
+      }
+    }
+  }
+
   const pendingRetry = existingMessage && existingOutcome === 'pending' && record.state === state;
   if (schema.TERMINAL_STATES.includes(record.state) && !controlledReopen && !pendingRetry) {
     throw new A2ATerminalTaskError(
@@ -240,6 +285,41 @@ function markMessageFailed(taskId, messageId) {
   if (outcomes?.has(messageId)) outcomes.set(messageId, 'failed');
 }
 
+// A dead-lettered gateway submission whose own processing threw before ever
+// reaching applyTransition (a Redis lookup it depends on erroring, or its
+// own referenceMessageId turning out unresolvable) never got an outcomes
+// entry in the first place, so markMessageFailed above — guarded on an
+// existing entry — silently does nothing for it. Called from gateway.js's
+// onDeadLetter hook, this writes the failure regardless, so
+// checkMessageLineage's `outcome === 'failed'` branch still rejects a
+// successor that names it as a referenceMessageId instead of treating the
+// reference as merely unresolved (acceptedMessageIds) and deferring the
+// successor forever. The return value tells the caller which case this
+// was, so it can log only the one markMessageFailed used to handle
+// silently: 'updated' (an entry already existed — the ordinary path, where
+// applyTransition ran before the later failure), 'recorded' (none existed —
+// the gap this closes), or 'unknown-task' (the Task itself isn't known,
+// e.g. after a restart — nothing to record against).
+function recordDeadLetteredMessageFailure(taskId, messageId) {
+  const outcomes = messageOutcomesByTask.get(taskId);
+  if (!outcomes) return 'unknown-task';
+  const existed = outcomes.has(messageId);
+  outcomes.set(messageId, 'failed');
+  return existed ? 'updated' : 'recorded';
+}
+
+// Message ids on this Task whose gateway-side effect was rejected or failed.
+// A container's own execution outcome cannot see these — it only knows
+// whether the agent process exited cleanly — so the gateway consults them
+// before believing a "completed" report (see gateway.js's handleTaskStatus).
+function failedMessageIds(taskId) {
+  const outcomes = messageOutcomesByTask.get(taskId);
+  if (!outcomes) return [];
+  return Array.from(outcomes.entries())
+    .filter(([, outcome]) => outcome === 'failed')
+    .map(([messageId]) => messageId);
+}
+
 function lastMessage(taskId) {
   const record = tasksById.get(taskId);
   if (!record) throw new A2ATaskNotFoundError(`Unknown task ${taskId}`);
@@ -264,6 +344,8 @@ module.exports = {
   applyTransition,
   markMessageSucceeded,
   markMessageFailed,
+  recordDeadLetteredMessageFailure,
+  failedMessageIds,
   lastMessage,
   _reset,
 };

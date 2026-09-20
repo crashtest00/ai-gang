@@ -22,7 +22,7 @@ test('detectBaseImageFamily: "debian-ubuntu" for python:3.11-slim (Dockerfile-py
   assert.equal(detectBaseImageFamily(content), 'debian-ubuntu');
 });
 
-test('detectBaseImageFamily: "debian-ubuntu" for the checked-in Dockerfile-tauri.template (REQ-14)', () => {
+test('detectBaseImageFamily: "debian-ubuntu" for the checked-in Dockerfile-tauri.template', () => {
   const content = readTemplate('Dockerfile-tauri.template');
   assert.equal(detectBaseImageFamily(content), 'debian-ubuntu');
 });

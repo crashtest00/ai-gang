@@ -5,13 +5,12 @@
 // agent: result of registry.getAgent()
 // context.allowedAgents (optional): catalog entries for the effective
 // allowed-agent set of the target project, included only for dispatches
-// (e.g. to the Refinement Agent) that need to choose among agent ids
-// (the agent-assignment design REQ-01, REQ-03). Rendered
-// dynamically from the catalog rather than hardcoded in any prompt text.
+// (e.g. to the Refinement Agent) that need to choose among agent ids.
+// Rendered dynamically from the catalog rather than hardcoded in any prompt text.
 // context.task: { id, contextId } — the Task this dispatch belongs to.
 // context.message: { messageId } — the id of this dispatch's own client
 //   Message, which the agent must set as `referenceMessageId` on its first
-//   reply. See the a2a-messaging design.
+//   reply.
 function buildTaskPrompt(issue, agent, context = {}) {
   const lines = [];
   lines.push(`## ROLE`);
@@ -65,9 +64,9 @@ function buildTaskPrompt(issue, agent, context = {}) {
 
   if (context.allowedAgents && context.allowedAgents.length > 0) {
     lines.push(`## ALLOWED AGENTS`);
-    lines.push(`This project permits assigning subtasks only to the agent ids below. Any other value`);
-    lines.push(`will be rejected atomically by the decomposition tool along with the rest of your submission —`);
-    lines.push(`use exactly one of these ids in each subtask's "agent" field:`);
+    lines.push(`This project permits assigning subtasks only to the agent ids below. A request naming`);
+    lines.push(`any other value is refused and creates nothing — use exactly one of these ids, copied`);
+    lines.push(`exactly, as each subtask's "agentFieldValue":`);
     for (const a of context.allowedAgents) {
       lines.push(`- ${a.id}: ${a.agentCard.description}`);
     }
@@ -123,8 +122,8 @@ function buildUnblockPrompt(issue, agent, task, message, blockedMarker) {
 }
 
 // Build the Claude Code prompt for redispatching the recorded implementation
-// owner after a pipeline failure or human-requested rework (release-workflow.md
-// REQ-11). evidence: { kind: 'pipeline_failure', build_url, build_number } or
+// owner after a pipeline failure or human-requested rework.
+// evidence: { kind: 'pipeline_failure', build_url, build_number } or
 // { kind: 'human_rework' }.
 function buildRetryPrompt(issue, agent, evidence, task, message) {
   const lines = [];
@@ -165,11 +164,11 @@ function buildRetryPrompt(issue, agent, evidence, task, message) {
 }
 
 // Shared A2A task-context + gateway-protocol instructions for every dispatch/
-// continuation/retry prompt. See the a2a-messaging design.
+// continuation/retry prompt.
 //
 // Agents submit the *payload* shown below — gateway-publish.js wraps it in
 // the transport envelope (schemaVersion/messageId/kind/taskId/contextId; see
-// setup/lib/gateway-publish.js and the redis-streams design) —
+// setup/lib/gateway-publish.js) —
 // so the agent only ever needs to think in A2A terms, never Streams terms.
 function buildA2AInstructions(issue, task, message) {
   const lines = [];
@@ -213,12 +212,12 @@ function buildA2AInstructions(issue, task, message) {
   lines.push('  |------------------|------------------------------|-------------|');
   lines.push('  | comment          | working                      | progress update, no PR yet |');
   lines.push('  | reassign         | working                      | hand the ticket\'s Agent field to another registered agent — data: {"operation":"reassign","agentFieldValue":"<agent>"} |');
-  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"...","description":"...","agentFieldValue":"<agent>"} |');
+  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"<Role>: ...","description":"...","agentFieldValue":"<agent>"}. All three fields are required; agentFieldValue must be one of the allowed agent ids listed above |');
   lines.push('  | (blocked)        | input-required / auth-required | you need human clarification (input-required) or missing credentials/authorization (auth-required) — omit "operation", put the precise question in the text part; do not block without a precise, located question |');
   lines.push('  | (complete)       | completed                    | your work is fully done — omit "operation", include a summary text part |');
   lines.push('- To open a pull request: set "state" to "completed" and add this sibling "artifacts" array to your submission:');
   lines.push('  "artifacts": [ { "kind": "artifact", "artifactId": "<uuid>", "taskId": "' + task.id + '", "name": "pull-request", "parts": [ { "kind": "file", "file": { "name": "pull-request", "mimeType": "text/uri-list", "uri": "<PR URL>" } }, { "kind": "text", "text": "<summary>" } ] } ]');
-  lines.push('  Opening a PR does not transition the ticket or reassign it — that is Jenkins\' job once the pipeline passes (release-workflow.md). Just post the PR and stop.');
+  lines.push('  Opening a PR does not transition the ticket or reassign it — that is Jenkins\' job once the pipeline passes. Just post the PR and stop.');
   lines.push(`- Do not block without a precise, located question`);
 
   return lines;

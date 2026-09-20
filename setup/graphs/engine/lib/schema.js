@@ -16,14 +16,15 @@ function loadGraphFile(filePath) {
 }
 
 /**
- * Validate a graph document against graph-process-engine.md REQ-01 through
- * REQ-06, REQ-16, and REQ-17. Returns { valid: boolean, errors: string[] }.
+ * Validate a graph document's structural well-formedness — required
+ * top-level fields, each node kind's required shape, dead-end/reachability
+ * checks, and fan-out/fan-in well-formedness. Returns
+ * { valid: boolean, errors: string[] }.
  *
  * This is deliberately a pure function over a plain object (not tied to
- * file I/O) so it's easy to unit test with inline fixtures, per that
- * document's own "Validation" section: "This feature does not mandate a
- * specific validator implementation... as long as REQ-01 through REQ-06
- * continue to hold."
+ * file I/O) so it's easy to unit test with inline fixtures — this feature
+ * does not mandate a specific validator implementation, as long as the
+ * core structural checks continue to hold.
  */
 function validateGraphDocument(doc) {
   const errors = [];
@@ -32,7 +33,7 @@ function validateGraphDocument(doc) {
     return { valid: false, errors: ['document is not an object'] };
   }
 
-  // --- REQ-01: graph_id, schema_version, entry, nodes ---
+  // --- graph_id, schema_version, entry, nodes ---
   if (!doc.graph_id || typeof doc.graph_id !== 'string') {
     errors.push('missing or invalid graph_id');
   }
@@ -72,12 +73,12 @@ function validateGraphDocument(doc) {
     validateNodeShape(node, nodesById, errors);
   }
 
-  // REQ-05: no unresolved dead ends anywhere reachable from entry
+  // no unresolved dead ends anywhere reachable from entry
   if (doc.entry && nodesById.has(doc.entry)) {
     validateNoDeadEnds(doc, nodesById, errors);
   }
 
-  // REQ-16: fan-out/fan-in well-formedness
+  // fan-out/fan-in well-formedness
   for (const node of nodesById.values()) {
     if (node.kind === 'fan-out') {
       validateFanOut(node, nodesById, errors);
@@ -117,15 +118,14 @@ function validateNodeShape(node, nodesById, errors) {
       errors.push(`node "${node.id}" is terminal but outcome is not "success" or "skipped" (got "${node.outcome}")`);
     }
     if (node.kind === 'remediation') {
-      errors.push(`remediation node "${node.id}" MUST NOT be terminal (REQ-04)`);
+      errors.push(`remediation node "${node.id}" MUST NOT be terminal`);
     }
     if (node.kind === 'fan-out') {
-      errors.push(`fan-out node "${node.id}" MUST NOT be terminal (REQ-16)`);
+      errors.push(`fan-out node "${node.id}" MUST NOT be terminal`);
     }
   }
 }
 
-// REQ-02
 function validateDecisionNode(node, nodesById, errors) {
   if (node.writes) {
     errors.push(`decision node "${node.id}" MUST NOT declare writes (decision nodes MUST NOT mutate state)`);
@@ -153,7 +153,7 @@ function validateDecisionNode(node, nodesById, errors) {
       errors.push(`decision node "${node.id}" branch "when: ${branch.when}" targets unknown node "${branch.to}"`);
     }
   }
-  // REQ-02: "a distinct outcome for the probe itself failing to execute"
+  // a distinct outcome for the probe itself failing to execute
   const errorWhen = node.check && node.check.error_when;
   if (!errorWhen) {
     errors.push(`decision node "${node.id}" check must declare "error_when" naming the branch reached when the probe itself fails to execute`);
@@ -162,16 +162,15 @@ function validateDecisionNode(node, nodesById, errors) {
   }
 }
 
-// REQ-17
 function validateEscalationNode(node, nodesById, errors) {
   if (node.check) {
-    errors.push(`escalation node "${node.id}" MUST NOT declare "check" (REQ-17 — its outcome is human-resolved, never probe-derived)`);
+    errors.push(`escalation node "${node.id}" MUST NOT declare "check" (its outcome is human-resolved, never probe-derived)`);
   }
   if (node.procedure) {
-    errors.push(`escalation node "${node.id}" MUST NOT declare "procedure" (REQ-17)`);
+    errors.push(`escalation node "${node.id}" MUST NOT declare "procedure"`);
   }
   if (node.writes) {
-    errors.push(`escalation node "${node.id}" MUST NOT declare "writes" (REQ-17 — persist a chosen branch's state in a following action node instead)`);
+    errors.push(`escalation node "${node.id}" MUST NOT declare "writes" (persist a chosen branch's state in a following action node instead)`);
   }
   if (!node.prompt || typeof node.prompt !== 'string') {
     errors.push(`escalation node "${node.id}" missing "prompt"`);
@@ -196,7 +195,6 @@ function validateEscalationNode(node, nodesById, errors) {
   }
 }
 
-// REQ-03
 function validateActionNode(node, nodesById, errors) {
   if (!node.procedure || typeof node.procedure !== 'string') {
     errors.push(`action node "${node.id}" missing "procedure"`);
@@ -216,7 +214,6 @@ function validateActionNode(node, nodesById, errors) {
   }
 }
 
-// REQ-04
 function validateRemediationNode(node, nodesById, errors) {
   if (!node.guidance || typeof node.guidance !== 'string') {
     errors.push(`remediation node "${node.id}" missing "guidance"`);
@@ -240,7 +237,6 @@ function validateSingleNextEdge(node, nodesById, errors) {
   }
 }
 
-// REQ-16
 function validateFanOutShape(node, nodesById, errors) {
   if (node.check) {
     errors.push(`fan-out node "${node.id}" MUST NOT declare "check"`);
@@ -288,7 +284,6 @@ function validateFanInShape(node, nodesById, errors) {
   validateSingleNextEdge(node, nodesById, errors);
 }
 
-// REQ-05
 function validateNoDeadEnds(doc, nodesById, errors) {
   const reachable = new Set();
   const stack = [doc.entry];
@@ -330,7 +325,7 @@ function outgoingTargets(node) {
   }
 }
 
-// REQ-16 acceptance: every path from each of a fan-out node's branches
+// Every path from each of a fan-out node's branches
 // reaches the paired fan-in node before reaching any terminal node.
 function validateFanOut(fanOutNode, nodesById, errors) {
   if (!fanOutNode.join || !nodesById.has(fanOutNode.join)) {

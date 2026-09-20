@@ -1,7 +1,5 @@
-# AI Gang Internal Work-Item Service — Django implementation
-# (the internal-work-item-service design §4 "Implementation
-# intent": "a Django application as this service, with PostgreSQL as its
-# datastore").
+# AI Gang Internal Work-Item Service — Django implementation, built as a
+# Django application with PostgreSQL as its datastore.
 Django>=5.0,<5.1
 psycopg2-binary>=2.9,<3.0
 redis>=5.0,<6.0

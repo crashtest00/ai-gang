@@ -1,6 +1,6 @@
 'use strict';
 
-// disk-usage-sweep's own job is orchestrating the loop (REQ-03): check
+// disk-usage-sweep's own job is orchestrating the loop: check
 // usage, sweep repeatedly while above the high/low watermark hysteresis,
 // stop when below target or out of iterations. The hysteresis itself is
 // unit tested directly in retention-policy.test.js; here the loop is

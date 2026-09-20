@@ -9,8 +9,7 @@
  * Replaces the Pub/Sub subscriber's in-memory queue with Redis Streams
  * consumer-group semantics: a task survives a container restart, an
  * unacknowledged task is reclaimed and retried, and a terminal outcome is
- * always durably reported back on the gateway stream
- * (the redis-streams design).
+ * always durably reported back on the gateway stream.
  *
  * Required env vars:
  *   PROJECT_NAME          — matches the Jira project name (e.g. "hello-world")
@@ -26,14 +25,14 @@
  *                            container handling multiple roles (e.g.
  *                            "refinement,backend,frontend,devops"). Each
  *                            listed stream is consumed explicitly — there is
- *                            no wildcard/pattern subscription (REQ-03).
+ *                            no wildcard/pattern subscription.
  *                            Defaults to "refinement,backend,frontend,devops"
  *                            if neither this nor AGENT_CHANNEL_SUFFIX is set;
  *                            keep this in sync with services/scrummaster/config/agents.json.
  *   AGENT_DISPLAY_NAME     — label used in terminal task-status reports
  *                            (defaults to PROJECT_NAME).
  *   AGENT_MAX_ATTEMPTS     — must match ScrumMaster's per-stream maxAttempts
- *                            default (default 3) — see REQ-06.
+ *                            default (default 3).
  *
  * Tasks are processed serially across all consumed streams — if a message
  * arrives while Claude is running, it waits until the current session
@@ -41,8 +40,8 @@
  * queue, now backed by pending Streams entries instead of process memory).
  *
  * A kind=TASK envelope's `payload` is a canonical A2A Message ({ kind:
- * "message", messageId, taskId, contextId, role, parts, ... }) — see
- * the a2a-messaging design. This subscriber only needs the
+ * "message", messageId, taskId, contextId, role, parts, ... }). This
+ * subscriber only needs the
  * text Part(s) as the Claude Code prompt; it does not otherwise parse or
  * validate the message.
  */
@@ -73,8 +72,8 @@ function agentStreamName(suffix) {
 }
 
 // Extract the Claude Code prompt text from a kind=TASK envelope's payload —
-// a canonical A2A Message (the text Part(s) of `payload.parts`). See
-// the a2a-messaging design — the A2A Message, not a bare
+// a canonical A2A Message (the text Part(s) of `payload.parts`). The A2A
+// Message, not a bare
 // `.prompt` field, is the wire contract for the payload's content.
 function extractPrompt(payload) {
   const parts = payload?.parts;
@@ -110,8 +109,8 @@ async function publishTaskStatus(client, envelope, statusPayload) {
     contextId: envelope.contextId,
     correlationId: envelope.messageId,
     payload: {
-      // taskId is the Jira issue key itself (the
-      // a2a-messaging design: one Task per ticket for its whole lifecycle).
+      // taskId is the Jira issue key itself (one
+      // Task per ticket for its whole lifecycle).
       ticket_key: envelope.taskId,
       agent_name: AGENT_DISPLAY_NAME,
       ...statusPayload,
@@ -149,8 +148,8 @@ function runClaude(envelope) {
       },
       (err, _stdout, stderr) => {
         // Bounded, best-effort diagnostic — not a guarantee that no secret
-        // ever appears in agent stderr output (REQ-07 notes the diagnostic
-        // "does not expose secrets"; this truncates but does not scrub).
+        // ever appears in agent stderr output; this truncates but does not
+        // scrub.
         const diagnostic = stderr ? stderr.slice(0, 500) : undefined;
         if (err) {
           const reason = err.killed ? 'timeout' : `exit_code_${err.code ?? 'unknown'}`;
@@ -187,7 +186,7 @@ function makeTaskHandler(client) {
     }
 
     // A retryable attempt failure stays delivery metadata; only publish the
-    // terminal 'failed' Task outcome once attempts are exhausted (REQ-07).
+    // terminal 'failed' Task outcome once attempts are exhausted.
     if (meta.attemptNumber >= MAX_ATTEMPTS) {
       await publishTaskStatus(client, envelope, {
         status: 'failed',

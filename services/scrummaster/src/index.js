@@ -14,10 +14,10 @@ const { startDispatchConsumers } = require('./dispatchConsumer');
 const PORT = process.env.PORT || 9000;
 
 // Idempotently create every stream + consumer group this deployment will
-// ever address, before any producer or consumer starts (redis-streams.md
-// REQ-11: streams/groups must exist before producers are enabled, and
-// creating a *new* group on restart would incorrectly replay retained
-// history — ensureGroup only creates a group the first time it sees one).
+// ever address, before any producer or consumer starts (streams/groups
+// must exist before producers are enabled, and creating a *new* group on
+// restart would incorrectly replay retained history — ensureGroup only
+// creates a group the first time it sees one).
 async function bootstrapStreams() {
   const client = getClient();
 
@@ -54,7 +54,7 @@ function everyStreamGroup() {
   return targets;
 }
 
-// Bounded retention without premature deletion (REQ-10): acknowledged
+// Bounded retention without premature deletion: acknowledged
 // history is trimmed after STREAM_RETENTION_DAYS (default 7), dead-letter
 // entries after DEAD_LETTER_RETENTION_DAYS (default 30). Runs at startup and
 // every 6 hours thereafter.
@@ -81,8 +81,7 @@ async function main() {
   console.log('[scrummaster] Starting...');
 
   // Fail fast on a malformed agent catalog or project configuration
-  // (agent-assignment.md REQ-01, REQ-02) rather than accepting webhook
-  // traffic against invalid assignment data.
+  // rather than accepting webhook traffic against invalid assignment data.
   registry.load();
 
   await connect();
@@ -92,8 +91,8 @@ async function main() {
   await startDispatchConsumers();
   scheduleRetention();
 
-  // Startup + every-24h Jira Agent-field drift audit (agent-assignment.md
-  // REQ-07). Runs against live Jira, so it starts only after redis.connect()
+  // Startup + every-24h Jira Agent-field drift audit. Runs against live
+  // Jira, so it starts only after redis.connect()
   // succeeds — no point auditing before the service is otherwise healthy.
   scheduleAgentFieldAudit();
 

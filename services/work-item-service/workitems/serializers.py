@@ -2,7 +2,7 @@
 Plain-dict serialization matching the Node implementation's HTTP response
 shapes EXACTLY — this is the contract services/scrummaster/src/canonicalWorkItems.js
 depends on (see that module's own comment: "the actual synchronous HTTP
-surface, REQ-04/REQ-08"). The Node service returned raw `SELECT * FROM
+surface"). The Node service returned raw `SELECT * FROM
 work_item` rows (node-postgres hands back snake_case column names as
 object keys) for every work-item-shaped response; this module reproduces
 those exact keys so a JSON diff between the two services' responses is

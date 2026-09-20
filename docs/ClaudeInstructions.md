@@ -36,6 +36,170 @@ Read through Phase 0 first — it determines the project topology, which shapes 
 
 ---
 
+## Platform Startup
+
+*This is how AI Gang itself is brought up on a machine. Everything after
+it — Phases 0 to 4 — is how a customer project is set up on a running AI
+Gang. Platform startup performs that project setup once, unattended, for
+the one project its configuration names.*
+
+An operator with Docker installed, an Anthropic API key, and an empty
+GitHub repository already created for the project reaches a running AI
+Gang in six steps and one command:
+
+1. Clone AI Gang.
+2. `cp ai-gang.config.template.json ai-gang.config.json` and fill it in.
+3. `cp .env.template .env` and fill it in.
+4. `docker compose up --exit-code-from ai-gang` at the repository root, in
+   the foreground.
+5. Wait. Initialization streams to the terminal until it finishes, and the
+   command's exit status is the AI Gang container's: 0 means AI Gang is up,
+   anything else means a step failed and the log says which.
+6. Open Django admin at `http://127.0.0.1:9100/django-admin/` and write
+   stories.
+
+There is no command to run between steps 4 and 6.
+
+### What step 4 starts
+
+`docker compose up --exit-code-from ai-gang` builds and starts exactly one
+container, the AI Gang container, and returns that container's exit status
+as its own (`--exit-code-from` is what makes Compose do that; without it
+Compose returns 0 whatever the container did). It is a client of the operator's own Docker daemon, not a host
+for a second one: the root `docker-compose.yml` gives it the daemon's
+socket and mounts the checkout at the checkout's own host path, with the
+working directory to match, so that the per-service compose files'
+relative bind mounts resolve on the host. Every other container AI Gang
+runs is created by this container's initialization, as a sibling on that
+same daemon.
+
+Its entrypoint (`scripts/startup/entrypoint.sh`) validates the
+configuration and the environment file before anything else exists, then
+runs the Initialization Agent — Claude Code, unsupervised, with
+permission prompts bypassed — against the ordered steps below. The
+container exits when initialization finishes, and does not restart.
+
+That agent gets one non-interactive turn, and the run ends when the turn
+does: it is told to run every step in the foreground and wait, because a
+step left running in the background is abandoned half-done the moment the
+turn ends. It is also run with no settings source loaded, so the
+`CLAUDE.md` and `.claude/settings.json` in the checkout — which are
+addressed to people and agents developing AI Gang, and ask for branches,
+pull requests and backgrounded commands — are not loaded into it. The
+prompt the entrypoint builds is the whole of what it is told.
+
+### The ordered steps
+
+Each of these is a script. The agent invokes them in this order; it does
+not decide what they do. `scripts/startup/steps.sh` is the list, and is
+what the container builds the agent's own instructions from.
+
+| # | Script | What it does |
+| --- | --- | --- |
+| 1 | `scripts/startup/create-network.sh` | Create the ai-gang Docker network if it does not already exist |
+| 2 | `scripts/startup/start-redis.sh` | Start Redis |
+| 3 | `scripts/startup/start-work-item-service.sh` | Build and start the work-item service and apply its database migrations |
+| 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
+| 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
+| 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
+| 7 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
+| 8 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
+| 9 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
+
+Before the first of them, the entrypoint has already run
+`scripts/startup/validate-config.sh`, `scripts/startup/validate-env.sh`,
+`scripts/startup/config-identity.sh` and `scripts/startup/derive-env.sh`
+— validation, the checkout's recorded configuration, and each service's
+own environment file derived from the platform `.env`.
+
+### Where judgment belongs
+
+The agent's judgment is for a step that fails, and for nothing else. A
+routine step is the script's job.
+
+- Do not re-ask or change the project name, deployment target, stack
+  profile or repository URL. They were validated before the run started.
+- When a step fails, diagnose it from its own output and from
+  `docker logs` / `docker ps`. If the cause is something that can genuinely
+  be put right — a transient pull failure, a container that needs another
+  moment, a stale container from an earlier run — put it right and re-run
+  that same script. Every script is safe to re-run.
+- Never build a service by hand. Never write a compose file, a Dockerfile
+  or an environment file yourself, and never substitute a different image,
+  name or port for the one a script uses. A service that cannot be started
+  by its script is a failure to report.
+- When it cannot be put right, run
+  `./scripts/startup/status.sh fail "<one-line reason>"` and stop. The run
+  ends nonzero. That is the correct outcome; a hand-built substitute is
+  not.
+
+### Reading a run
+
+Three things in the checkout, outside every container, and readable from
+a second shell while the run is in progress:
+
+- `.ai-gang/status.json` — the step in progress, every step's state, each
+  service's health, and, on completion, the Django admin address. No
+  credential is ever written here.
+- `.ai-gang/startup.log` — each step's own progress lines, tailed live to
+  the container's stdout. It is not the whole of what the container
+  prints there: two banner lines print before that tail starts and are
+  gone by the time it does, and the Initialization Agent's own output —
+  its `claude --print` transcript — goes to `.ai-gang/agent.log` instead
+  of here, apart from the bounded tail described next.
+- `.ai-gang/agent.log` — everything the Initialization Agent printed,
+  stdout and stderr together, written as it streams to the container's
+  stdout rather than instead of it. An agent that stops partway through a
+  step exits 0 like one that finished, so this file is the only account
+  of what it was doing and whether it hit anything; without it that
+  account left with the container. It is an unfiltered transcript, not
+  lines a step chose to print, so it is written owner-readable only
+  (0600). When a run ends with the record saying anything but complete,
+  the last 40 lines of it are copied into `.ai-gang/startup.log` after
+  the line reporting that, so the step log on its own shows the agent's
+  last words.
+
+`.ai-gang/config-identity.json` records the configuration this checkout
+was initialized with. Running the same command again against an
+already-initialized checkout verifies the existing services and
+reconnects, creating no second project, network, account or container. A
+run whose configuration differs from that record is refused before
+anything changes.
+
+All four stay in the checkout after the container exits, and nothing in
+the flow deletes them — a failed run's record, log and agent transcript
+are still there afterwards, and are what a later reader diagnoses it
+from. Starting again does not overwrite them either: a new run moves the
+previous run's record, log and transcript to `.ai-gang/previous/` first.
+`.ai-gang/startup.log` is the step log that survives the container, not a
+full copy of everything the container printed — see above for what it
+leaves out, and `.ai-gang/agent.log` for the part of it the agent wrote.
+
+### Which phases below this flow covers
+
+Included, performed by the steps above: **2.1** (Redis), **2.2**
+(ScrumMaster), **3.1** (project initialisation), **3.2** (container
+setup), **3.3** (the project map stub `init-project.sh` writes — filling
+it in is still the operator's), **3.4** (Claude Code and git access in the
+project container, exercised by the end-to-end test below) and **3.5**
+(the Redis subscriber, which the project container's own entrypoint
+starts on every start).
+
+Not included, and left exactly as they are for an operator to add
+afterwards: **Phase 1** (Jira), **2.0** (Cloudflare Tunnel), **2.3**
+(Jenkins), **2.4** (security), **2.5** (the Beta VM), **3.6** (the Jenkins
+pipeline) and **3.7** (release promotion).
+
+**Phase 3.0 is the operator's prerequisite, not a step of this flow.** The
+project's GitHub repository must already exist, empty, before step 2: its
+URL is what `repository.url` in `ai-gang.config.json` names.
+
+**Phase 4 is replaced, for this flow, by the Django-admin end-to-end test**
+at the end of this document. Phase 4 as written is a Jira scenario, and
+Jira is outside this flow.
+
+---
+
 ## Phase 0: Project Type Discovery
 
 Before any setup begins, gather enough information to determine the container topology and deployment strategy.
@@ -68,7 +232,7 @@ Apply the one-container-per-repo principle:
 - **One repo → one container.** The container subscribes to all agent channels for the project.
 - **N repos → N containers.** Each container subscribes only to its own agent channel.
 
-Assign an `AGENT_CHANNEL_SUFFIX` to each container based on its role. Common values: `frontend`, `backend`, `mobile`, `api`, `web`. The suffix must match the agent's `routing.channelSuffix` entry in `agents.json` (the canonical agent catalog — see the agent-assignment design).
+Assign an `AGENT_CHANNEL_SUFFIX` to each container based on its role. Common values: `frontend`, `backend`, `mobile`, `api`, `web`. The suffix must match the agent's `routing.channelSuffix` entry in `agents.json` (the canonical agent catalog).
 
 Every container uses `AGENT_CHANNEL_SUFFIX` — there is no special handling for single-repo projects. A single-repo project sets one suffix (e.g. `AGENT_CHANNEL_SUFFIX=api`).
 
@@ -95,21 +259,19 @@ This shapes Phase 3 (one pass per repo) and Phase 4 (E2E test scenario).
 *These steps are scoped to the Jira instance, not the project. Skip any step that is already done for this Jira instance.*
 
 This phase has been converted to graph form —
-Graph-Based Process Engine
-REQ-17, `setup/graphs/jira-instance-setup.graph.yaml` — covering, as an
+`setup/graphs/jira-instance-setup.graph.yaml` — covering, as an
 `escalation` node (a human's declared preference, not a check on observable
 state), whether this AI Gang deployment will connect any project to Jira at
 all before doing the instance-level setup below, per
-`setup/graphs/migration-status.md`. This is not the same decision as
-`canonical-work-model.md` REQ-14's per-project Jira-vs-local mode switch,
-which always defaults to local mode at project initialization and connects
-Jira later, separately, per project. **Walk the graph — do not follow the
-steps below directly.** They describe the same underlying procedure for
-reference only; running them directly skips the escalation gate above and
-performs Jira-instance setup unconditionally, which is exactly the
-REQ-14/REQ-17 violation this graph exists to prevent. Only fall back to
-them manually if the graph engine itself is unavailable, and note that
-deviation in the run's log:
+`setup/graphs/migration-status.md`. This is not the same decision as the
+per-project Jira-vs-local mode switch, which always defaults to local mode
+at project initialization and connects Jira later, separately, per
+project. **Walk the graph — do not follow the steps below directly.** They
+describe the same underlying procedure for reference only; running them
+directly skips the escalation gate above and performs Jira-instance setup
+unconditionally, which is exactly the violation this graph exists to
+prevent. Only fall back to them manually if the graph engine itself is
+unavailable, and note that deviation in the run's log:
 
 ### 1.0 Jira Service Account
 
@@ -190,8 +352,7 @@ When adding a new project, apply existing fields via `init-project.sh` — do no
 **The tunnel must be live before Jenkins starts.** Jenkins registers its GitHub webhook at first boot — if the tunnel isn't routing when Jenkins boots, the registration fails silently and must be done manually afterward.
 
 This phase has been converted to graph form —
-Graph-Based Process Engine
-REQ-10/REQ-11, `setup/graphs/cloudflare-setup.graph.yaml` — covering account/
+`setup/graphs/cloudflare-setup.graph.yaml` — covering account/
 token presence, tunnel existence, the subdomain-var combinations, and
 `CF_ACCOUNT_ID` presence as decision nodes with their own remediation, per
 `setup/graphs/migration-status.md`. **Walk the graph — do not follow the
@@ -205,8 +366,8 @@ engine itself is unavailable, and note that deviation in the run's log:
 - Run `./scripts/setup-cloudflare-tunnel.sh`
   - Creates a named tunnel (`ai-gang`) via Cloudflare's account-scoped
     Tunnel REST API, authenticated by `CF_API_KEY`/`CF_ACCOUNT_ID` —
-    **no interactive `cloudflared tunnel login` browser step** (REQ-11;
-    superseded the previous manual step this section used to list here)
+    **no interactive `cloudflared tunnel login` browser step** (superseded
+    the previous manual step this section used to list here)
   - Adds DNS records for HQ and Jenkins subdomains via Cloudflare API
   - Writes `~/.cloudflared/config.yml`
   - Installs and starts `cloudflared` as a systemd service
@@ -258,7 +419,7 @@ After Jenkins is up:
 - `[HUMAN]` Verify Jira connection: **Manage Jenkins → System → Jira → Test Connection**
 - Wire `JENKINS_URL` into ScrumMaster config so ScrumMaster can trigger builds
 
-**Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule. See the release-workflow design for the full flow.
+**Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule.
 
 **Jenkinsfile template**: Copy `setup/Jenkinsfile.template` into the project's repo root and fill in its four TODO blocks (install, test, build, deploy-to-Beta-VM) based on the project's tech stack and deployment target. It already implements the test gate, auto-merge to `dev`, and automatic `beta` promotion + deploy — only the project-specific commands are missing.
 
@@ -276,7 +437,7 @@ After Jenkins is up:
 **Branch protection** (see `setup/JenkinsConfig.md` §7 for the full settings and `gh api` commands):
 - `dev`: require status checks to pass + branch up to date + do not allow bypassing
 - `beta`: no direct pushes — Jenkins only, fast-forward from `dev` only
-- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review (release-workflow.md).
+- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review.
 
 ### 2.5 Beta VM Bootstrap
 
@@ -330,20 +491,38 @@ existing repo, it never creates one.
 
 ### 3.1 Project Initialisation
 
+The supported way to initialize a project whose name, deployment target,
+and stack are already decided is `--config`, pointing at a JSON file:
+
+```bash
+cd ~/ai-gang && ./scripts/init-project.sh --config <file>
+```
+
+Those three decisions come from that file's `project.name`, `project.type`,
+and `project.stack` fields. They are validated up front and then bound —
+not prompted for, and the agent must not re-ask them or change them once
+the file has validated. A runnable example is
+`scripts/init-project.example.json`; the currently supported `type`/`stack`
+values are published in `setup/graphs/engine/lib/config/catalog.js`.
+`GitHub HTTPS URL` and `GH_TOKEN` are still prompted for either way.
+
+Without `--config`, the alternative is the fully interactive flow:
+
 ```bash
 cd ~/ai-gang && ./scripts/init-project.sh
 ```
 
-Prompts for: project name, GitHub HTTPS URL, `GH_TOKEN`, and deployment
-target. Initializes in **local mode by default** (`canonical-work-model.md`
-REQ-14: local mode is the unconditional default, Jira mode cannot be chosen
-at init) — no Jira project key is asked for and no Jira API call is made.
-Deployment-target boilerplate selection (currently `web` or `desktop`) is
-also represented as a graph node —
-Deployment-Target Boilerplate
-REQ-02/REQ-03, `setup/graphs/deployment-target-boilerplate.graph.yaml` — an
-unsupported target reaches that graph's remediation node (or this script's
-own equivalent guidance) rather than an empty, unexplained repository.
+This prompts for: project name, GitHub HTTPS URL, `GH_TOKEN`, and
+deployment target. Initializes in **local mode by default** — local mode
+is the unconditional default, Jira mode cannot be chosen at init — no Jira
+project key is asked for and no Jira API call is made. Deployment-target
+boilerplate selection (currently `web` or `desktop`) is also represented
+as a graph node — `setup/graphs/deployment-target-boilerplate.graph.yaml`
+— which resolves the target from the project's
+`.aigang-config-identity.json` file's `type` field when the project was
+initialized with `--config`, rather than asking again; an unsupported
+target reaches that graph's remediation node (or this script's own
+equivalent guidance) rather than an empty, unexplained repository.
 
 Creates:
 - `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
@@ -355,7 +534,7 @@ Pass `--connect-jira` to additionally prompt for a Jira project key and
 perform one-time Jira-instance bootstrapping for this project (creates the
 Jira project, the AI Gang Kanban workflow, and applies custom fields to its
 screens) — this is always an explicit, separate opt-in, never offered by
-the default flow above (REQ-14/REQ-15).
+the default flow above.
 
 **Before running this**: `JENKINS_GITHUB_USER` must be set in `~/ai-gang/.env` (the platform `.env`, not the project's) — see `.env.template`. Without it, `dev` branch protection is still applied but `beta`/`prod` protection is skipped with a warning. Also, applying branch protection at all requires the `GH_TOKEN` you provide here to include **Administration: Read and write** on top of its Contents/Pull requests/Metadata scopes (see 3.2 below) — without it, the branch-creation step still succeeds but each protection call gets a `403` and prints a warning to configure it manually per `setup/JenkinsConfig.md` §7.
 
@@ -373,8 +552,7 @@ cp ~/ai-gang/Docker\ Templates/Dockerfile-node.template ./Dockerfile   # or pyth
 Which user-management syntax the chosen template needs (Alpine's
 `adduser`/`deluser` vs. Debian/Ubuntu's `useradd`) is a base-image-family
 branch point, also represented as a graph —
-Graph-Based Process Engine
-REQ-12, `setup/graphs/base-image-family.graph.yaml` — walkable against a
+`setup/graphs/base-image-family.graph.yaml` — walkable against a
 Dockerfile to confirm which family it's in before customising it further.
 
 Customise the Dockerfile for the repo's tech stack, then:
@@ -440,7 +618,7 @@ For deployment target-specific pipeline steps:
 ### 3.7 Release Promotion (Release ticket, not manual)
 
 There is no manual `beta → prod` PR for a human to open — `prod` only changes
-via the Release-ticket flow (the release-workflow design):
+via the Release-ticket flow:
 1. Human creates a Jira Release ticket (Target Project field required) once
    enough has accumulated on `beta`
 2. Jenkins checks `beta`'s queue is clean, pins the candidate SHA, cuts
@@ -498,6 +676,123 @@ Adapt the story to match what the project's actual agents can implement.
 - Verify Jenkins detects the PR
 - Verify tests run and pass
 - Verify Jenkins auto-merges to `dev`
+
+---
+
+## End-to-End Test: Platform Startup
+
+*The end-to-end test for an installation brought up by Platform Startup.
+Phase 4 above is a Jira scenario and Jira is outside that flow, so this is
+a separate test, not a variation of it. Run it once, after `docker compose up`
+reports the platform is up.*
+
+The leg this proves is the one that matters: a story written by hand in
+Django admin reaches the project container's agent.
+
+### Write the story
+
+Open `http://127.0.0.1:9100/django-admin/` and sign in as the
+`AIGANG_ADMIN_USER` account from `.env`.
+
+Under **Workitems → Work items**, add a work item:
+
+- **Project**: the `project.name` from `ai-gang.config.json`
+- **Type**: `story`
+- **Display name**: `[TEST] Hello World endpoint`
+- **Status**: `proposed`
+- **Assignee agent id**: `refinement-agent`
+- **External key**: leave it empty. It is the Jira issue key a work item
+  mirrors; this flow has no Jira integration configured, so setting it
+  saves fine but makes dispatch refuse the item outright — a comment
+  explaining why, and the item moved to `needs-clarification` instead of
+  being run.
+
+It takes three saves, in this order, and the order matters:
+
+1. **Save the work item.** The **Work item story detail** section is not on
+   the add form at all — it belongs to the saved object.
+2. **Re-open it, fill in the story schema fields** (Behavior, Acceptance
+   Criteria, Constraints, Edge Cases, Out of Scope) and save again,
+   leaving the status at `proposed`.
+3. **Re-open it once more, change Status to `ready`, and save.**
+
+Filling in the story fields and moving to `ready` in the same save does
+not work: the admin saves the work item before its story detail, so the
+status change is rejected for the fields it cannot see yet.
+
+`ready` with an assignee is what makes a work item eligible for dispatch;
+nothing is dispatched before that.
+
+### Validation legs
+
+**Work-item service leg** — the write was recorded and published:
+
+```bash
+docker logs workitem-relay --tail 50     # the outbox row was published
+docker exec ai-gang-redis redis-cli XLEN aigang:workitems:<project>:events
+```
+
+The stream length increases by at least one when the story reaches
+`ready`.
+
+**ScrumMaster leg** — the event was consumed and dispatched:
+
+```bash
+docker logs scrummaster --tail 50
+docker exec ai-gang-redis redis-cli XLEN aigang:agent:<project>:refinement
+```
+
+ScrumMaster's log names the work item and the agent it dispatched to. If
+the event stream grew but nothing was dispatched, check that the project
+is listed in `services/scrummaster/config/projects.json` and that
+ScrumMaster has been restarted since it was added — it reads that file
+once, at startup.
+
+**Work-item consumer leg** — the commands the dispatch produced were
+consumed:
+
+```bash
+docker exec ai-gang-redis redis-cli XINFO GROUPS aigang:workitems:<project>
+docker logs workitem-consumers --tail 50
+```
+
+A `workitemservice` group has to be listed, and the log has to name the
+project. The work-item service reads
+`services/scrummaster/config/projects.json` once at startup, exactly as
+ScrumMaster does, and creates each listed project's consumer groups then.
+If the group is missing, that service is older than the project's
+registration: a story is dispatched, the commands that follow it land on
+the stream, nothing reads them, no subtask is ever created and no agent
+runs — with no error in any log. Make it re-read:
+
+```bash
+cd ~/ai-gang/services/work-item-service && docker compose restart api consumers
+```
+
+**Project container leg** — the agent ran:
+
+```bash
+docker exec <project>-dev pm2 list             # subscriber: online
+docker exec <project>-dev pm2 logs subscriber --lines 50 --nostream
+```
+
+The subscriber's log shows the task being received and Claude Code being
+invoked. This is also the first proof that the container's Claude Code and
+its `gh` credentials work — Phase 3.4's verification, done for real rather
+than as a separate hello-world call.
+
+**Deliverable leg** — the work reached GitHub:
+
+The agent's branch and pull request appear on the repository named by
+`repository.url` in `ai-gang.config.json`. A pull request there is the
+deliverable of a story.
+
+### If a leg fails
+
+Each leg names the container whose log explains it. `.ai-gang/status.json`
+records what initialization believed about every service's health at the
+moment it finished; a service healthy there but silent here has stopped
+since, and `docker ps` will say so.
 
 ---
 

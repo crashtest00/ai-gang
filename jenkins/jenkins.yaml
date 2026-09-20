@@ -19,8 +19,8 @@ jenkins:
   # already filed as PRs" value per the github-branch-source plugin's
   # BranchDiscoveryTrait bitmask (1=exclude-PR-branches, 2=only-PR-branches,
   # 3=all) — so the strategyId itself isn't wrong. But it was observed live
-  # (the release-testing design A9) to still let a plain branch job and
-  # its PR job get indexed as duplicates in a race (branch indexed before the
+  # to still let a plain branch job and its PR job get indexed as
+  # duplicates in a race (branch indexed before the
   # PR-exclusion rescan catches up), which then deadlocked the single shared
   # executor. Raised to 2 so a duplicate/competing build can't fully block
   # every other job (including the manual release-candidate/production-promote
@@ -73,7 +73,7 @@ jobs:
   # per-project Jenkinsfile (see setup/Jenkinsfile.template) on every merge
   # to `dev`. The three jobs below implement the batched, deliberate release
   # flow instead: cutting a candidate, promoting it to production, and
-  # tearing down its preview if abandoned. See the release-workflow design.
+  # tearing down its preview if abandoned.
 
   - script: |
       pipelineJob('release-candidate') {
@@ -128,8 +128,8 @@ jobs:
                   stage('Deploy SHA-pinned preview to the Beta VM') {
                     steps {
                       // Reuses the image already built and tested on the Beta VM for this SHA —
-                      // no rebuild. Runs over the restricted deploy SSH key described in
-                      // release-workflow.md's Beta VM remote-deploy mechanism dependency.
+                      // no rebuild. Runs over the restricted deploy SSH key used for the
+                      // Beta VM remote-deploy mechanism.
                       sh "ssh beta-deploy@\$BETA_VM_HOST preview-deploy ^${PROJECT_NAME} ^${CANDIDATE_SHA} ^${ISSUE_KEY}"
                       script {
                         env.PREVIEW_URL = "https://rc-^${env.CANDIDATE_SHA}.^${env.PREVIEW_DOMAIN}"
@@ -138,8 +138,8 @@ jobs:
                   }
                   stage('Trigger native validation build') {
                     steps {
-                      // Supplementary to the web preview above, per desktop-app-support.md —
-                      // no-ops (STATUS=skipped) for a non-desktop project and never fails this
+                      // Supplementary to the web preview above — no-ops (STATUS=skipped)
+                      // for a non-desktop project and never fails this
                       // job on its own; a native build failure is reported, not fatal here.
                       dir("^${PROJECT_DIR}") {
                         script {
@@ -161,9 +161,9 @@ jobs:
                   stage('Report candidate back to the release') {
                     steps {
                       script {
-                        // canonical-release-workflow.md REQ-04 — a local-mode-originated
-                        // release carries WORK_ITEM_ID (no Jira ticket to write onto);
-                        // a Jira-mode one carries ISSUE_KEY as before. Never both.
+                        // A local-mode-originated release carries WORK_ITEM_ID (no Jira
+                        // ticket to write onto); a Jira-mode one carries ISSUE_KEY as
+                        // before. Never both.
                         if (env.WORK_ITEM_ID?.trim()) {
                           sh """
                             curl -sf -X POST \\
@@ -173,9 +173,9 @@ jobs:
                           """
                           // Candidate SHA/Build Identifier/Preview URL recorded and a
                           // comment posted in the same call (store.record_release_candidate)
-                          // — the work item is already `in-review` (REQ-04's Django-side
-                          // transition ran before this job was ever triggered), so unlike
-                          // Jira mode there is no separate status transition to make here.
+                          // — the work item is already `in-review` (that transition ran
+                          // before this job was ever triggered), so unlike Jira mode there
+                          // is no separate status transition to make here.
                         } else {
                           sh """
                             curl -s -u "\$JIRA_EMAIL:\$JIRA_TOKEN" -X PUT \\
@@ -269,9 +269,8 @@ jobs:
                   }
                   stage('Tag and publish desktop release') {
                     steps {
-                      // Required (not supplementary) for a desktop-lane project — see
-                      // desktop-app-support.md REQ-07. No-ops (TAG=) for a non-desktop
-                      // project. A real git/gh failure here fails this job and is reported
+                      // Required (not supplementary) for a desktop-lane project. No-ops
+                      // (TAG=) for a non-desktop project. A real git/gh failure here fails this job and is reported
                       // through the post/failure block below, since the tag IS the production
                       // approval artifact for desktop, not just a validation signal.
                       dir("^${PROJECT_DIR}") {
@@ -409,19 +408,18 @@ jobs:
       }
 
   # ---- Jenkins workspace / Docker-cache retention ----------------------
-  # the jenkins-cache-retention design. Two triggers sharing
-  # one policy (REQ-01/REQ-02 nightly cadence, REQ-03 threshold safety net)
-  # against the two disk-growth surfaces logRotator doesn't touch: the
-  # jenkins-data workspace volume, and the host Docker daemon's image/layer
-  # cache reached through the bind-mounted socket. Decision logic lives in
-  # jenkins/scripts/lib/retention-policy.js (unit tested in jenkins/test/);
-  # these jobs just invoke it on a schedule. System-level jobs, not
-  # per-project Jenkinsfile stages, per the spec's "shared infrastructure,
-  # not any one project's concern" rationale (§4).
+  # Two triggers sharing one policy (nightly cadence plus a threshold
+  # safety net) against the two disk-growth surfaces logRotator doesn't
+  # touch: the jenkins-data workspace volume, and the host Docker daemon's
+  # image/layer cache reached through the bind-mounted socket. Decision
+  # logic lives in jenkins/scripts/lib/retention-policy.js (unit tested in
+  # jenkins/test/); these jobs just invoke it on a schedule. System-level
+  # jobs, not per-project Jenkinsfile stages — this is shared
+  # infrastructure, not any one project's concern.
 
   - script: |
       pipelineJob('jenkins-cache-retention-nightly') {
-        description('Nightly scheduled pruning of the jenkins-data workspace volume (REQ-01: 14-day age / 5-superseded-per-job bound) and the host Docker image/layer cache (REQ-02: docker system prune --filter until=72h). Independent of and in addition to buildDiscarder(logRotator(...)) in setup/Jenkinsfile.template, which only governs Jenkins\' own build-record retention, not workspace/cache disk usage. Never removes a workspace or image an in-progress build is using (REQ-04). See the jenkins-cache-retention design and jenkins/CACHE_RETENTION.md.')
+        description('Nightly scheduled pruning of the jenkins-data workspace volume (14-day age / 5-superseded-per-job bound) and the host Docker image/layer cache (docker system prune --filter until=72h). Independent of and in addition to buildDiscarder(logRotator(...)) in setup/Jenkinsfile.template, which only governs Jenkins\' own build-record retention, not workspace/cache disk usage. Never removes a workspace or image an in-progress build is using. See jenkins/CACHE_RETENTION.md.')
         triggers {
           cron('H 2 * * *')
         }
@@ -455,7 +453,7 @@ jobs:
 
   - script: |
       pipelineJob('jenkins-disk-usage-sweep') {
-        description('Disk-usage-triggered safety sweep (REQ-03), checked every 30 minutes. Re-runs the same workspace/Docker-cache pruning jenkins-cache-retention-nightly does, out of band, whenever usage is at/above 85%, repeatedly until it drops back below 70% -- the mechanism that actually closes the gap from the original disk-exhaustion failure (the hwd2-pipeline-audit design #13), since the nightly cadence alone can still lose that race if enough builds land between runs. A build of this job going red means the sweep could not get usage back under the target after its iteration cap -- operator attention needed.')
+        description('Disk-usage-triggered safety sweep, checked every 30 minutes. Re-runs the same workspace/Docker-cache pruning jenkins-cache-retention-nightly does, out of band, whenever usage is at/above 85%, repeatedly until it drops back below 70% -- the mechanism that actually closes the gap from the original disk-exhaustion failure, since the nightly cadence alone can still lose that race if enough builds land between runs. A build of this job going red means the sweep could not get usage back under the target after its iteration cap -- operator attention needed.')
         triggers {
           cron('H/30 * * * *')
         }

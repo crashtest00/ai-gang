@@ -1,5 +1,5 @@
 """
-URL routing for the REQ-04/REQ-08 HTTP interface. Paths and methods match
+URL routing for the HTTP interface. Paths and methods match
 the Node service's src/httpApi.js exactly — see that mapping preserved
 here so services/scrummaster/src/canonicalWorkItems.js's requests resolve
 unchanged:
@@ -11,11 +11,11 @@ unchanged:
   POST /admin/work-items
   POST /admin/work-items/<uuid>/transition
   POST /admin/work-items/<uuid>/comments
-  POST /admin/work-items/<uuid>/release-candidate  — canonical-release-workflow.md
-    REQ-04 writeback target, new in V2.1
+  POST /admin/work-items/<uuid>/release-candidate  — the release-candidate
+    writeback target, new in V2.1
 
-  POST /webhooks/jira  — canonical-work-model.md REQ-09 (amended
-    2026-09-09): the Jira webhook endpoint, moved here from
+  POST /webhooks/jira  — amended
+    2026-09-09: the Jira webhook endpoint, moved here from
     services/scrummaster/src/server.js's deleted `/webhook/jira` route now that
     this service is AI Gang's sole external-facing surface.
 """

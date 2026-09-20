@@ -2,7 +2,7 @@
   "name": "hello-web",
   "private": true,
   "version": "0.1.0",
-  "description": "AI Gang web deployment-target boilerplate (deployment-target-boilerplate.md REQ-01) — a minimal, real, independently runnable and deployable web app.",
+  "description": "AI Gang web deployment-target boilerplate — a minimal, real, independently runnable and deployable web app.",
   "type": "commonjs",
   "main": "server.js",
   "scripts": {

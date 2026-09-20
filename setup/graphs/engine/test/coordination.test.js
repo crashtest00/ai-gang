@@ -4,7 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { Coordination } = require('../lib/coordination');
 
-// --- REQ-02: sourcing candidates ---
+// --- sourcing candidates ---
 
 function twoEntryGraphs() {
   const a = {
@@ -22,7 +22,7 @@ function twoEntryGraphs() {
   return { a, b };
 }
 
-test('REQ-02: distinct graph entry points become addressed candidates', () => {
+test('distinct graph entry points become addressed candidates', () => {
   const { a, b } = twoEntryGraphs();
   const candidates = Coordination.sourceEntryPointCandidates([
     { graphDoc: a, writes: { files: ['jira.json'], services: [] } },
@@ -34,7 +34,7 @@ test('REQ-02: distinct graph entry points become addressed candidates', () => {
   );
 });
 
-test('REQ-02: a fan-out node\'s branches become candidates addressed via <graph_id>#<node_id>:<branch_id>', () => {
+test('a fan-out node\'s branches become candidates addressed via <graph_id>#<node_id>:<branch_id>', () => {
   const doc = {
     graph_id: 'init',
     schema_version: 1,
@@ -65,7 +65,7 @@ test('REQ-02: a fan-out node\'s branches become candidates addressed via <graph_
   );
 });
 
-test('REQ-02: a candidate reachable from another candidate in the same document is rejected', () => {
+test('a candidate reachable from another candidate in the same document is rejected', () => {
   const doc = {
     graph_id: 'g',
     schema_version: 1,
@@ -90,9 +90,9 @@ test('REQ-02: a candidate reachable from another candidate in the same document 
   assert.throws(() => Coordination.sourceFanOutCandidates(doc, 'split'), /not independent/);
 });
 
-// --- REQ-03/REQ-04: collision safety ---
+// --- collision safety ---
 
-test('REQ-03: a candidate with no declared write-scope is excluded from concurrency (fails closed)', () => {
+test('a candidate with no declared write-scope is excluded from concurrency (fails closed)', () => {
   const withWrites = { address: 'a', writes: { files: ['x'], services: [] } };
   const withoutWrites = { address: 'b' };
   const { concurrentGroups, sequential } = Coordination.partitionCollisionSafe([withWrites, withoutWrites]);
@@ -100,7 +100,7 @@ test('REQ-03: a candidate with no declared write-scope is excluded from concurre
   assert.deepEqual(concurrentGroups, [[withWrites]]);
 });
 
-test('REQ-04: two candidates sharing a file path are never grouped concurrently', () => {
+test('two candidates sharing a file path are never grouped concurrently', () => {
   const c1 = { address: 'a', writes: { files: ['shared.json'], services: [] } };
   const c2 = { address: 'b', writes: { files: ['shared.json'], services: [] } };
   const { concurrentGroups } = Coordination.partitionCollisionSafe([c1, c2]);
@@ -108,7 +108,7 @@ test('REQ-04: two candidates sharing a file path are never grouped concurrently'
   assert.equal(Coordination.isCollisionSafe(c1, c2), false);
 });
 
-test('REQ-04: two candidates with fully disjoint write-scopes are grouped concurrently', () => {
+test('two candidates with fully disjoint write-scopes are grouped concurrently', () => {
   const c1 = { address: 'a', writes: { files: ['a.json'], services: ['svc-a'] } };
   const c2 = { address: 'b', writes: { files: ['b.json'], services: ['svc-b'] } };
   const { concurrentGroups } = Coordination.partitionCollisionSafe([c1, c2]);
@@ -117,15 +117,15 @@ test('REQ-04: two candidates with fully disjoint write-scopes are grouped concur
   assert.equal(Coordination.isCollisionSafe(c1, c2), true);
 });
 
-test('REQ-04: a shared service name is also a collision, not just a shared file', () => {
+test('a shared service name is also a collision, not just a shared file', () => {
   const c1 = { address: 'a', writes: { files: [], services: ['cloudflared'] } };
   const c2 = { address: 'b', writes: { files: [], services: ['cloudflared'] } };
   assert.equal(Coordination.isCollisionSafe(c1, c2), false);
 });
 
-// --- REQ-05 through REQ-14: dispatch and tracking ---
+// --- dispatch and tracking ---
 
-test('REQ-05/REQ-06/REQ-12: dispatching a group records each branch under one fan-out group id', async () => {
+test('dispatching a group records each branch under one fan-out group id', async () => {
   const c = new Coordination();
   const candidates = [
     { address: 'jira-setup#start', writes: { files: ['jira.json'], services: [] } },
@@ -141,7 +141,7 @@ test('REQ-05/REQ-06/REQ-12: dispatching a group records each branch under one fa
   assert.ok(status.branches.every((b) => b.status === 'done'));
 });
 
-test('REQ-07: a failed branch does not abort or block a sibling branch (three-branch group, one forced to fail)', async () => {
+test('a failed branch does not abort or block a sibling branch (three-branch group, one forced to fail)', async () => {
   const c = new Coordination();
   const candidates = [
     { address: 'a', writes: { files: ['a.json'], services: [] } },
@@ -163,11 +163,11 @@ test('REQ-07: a failed branch does not abort or block a sibling branch (three-br
   assert.equal(byAddress.c.status, 'done');
   assert.equal(byAddress.b.status, 'failed');
   assert.match(byAddress.b.reason, /subagent crashed/);
-  // REQ-10: group is complete once every branch — including the failed one — is terminal.
+  // Group is complete once every branch — including the failed one — is terminal.
   assert.equal(status.complete, true);
 });
 
-test('REQ-08: an execution-layer failure is recorded locally, never as a graph terminal-failure node', async () => {
+test('an execution-layer failure is recorded locally, never as a graph terminal-failure node', async () => {
   const c = new Coordination();
   const candidates = [{ address: 'only', writes: { files: ['x'], services: [] } }];
   const status = await c.dispatchGroup('group-2', candidates, async () => {
@@ -177,10 +177,10 @@ test('REQ-08: an execution-layer failure is recorded locally, never as a graph t
   assert.match(status.branches[0].reason, /retry exhaustion/);
   // Nothing here ever produces or references a graph node — Coordination
   // has no method that could construct one (see coordination.js's class
-  // comment / REQ-01's authority boundary).
+  // comment).
 });
 
-test('REQ-09: a [HUMAN]-gated remediation pause records paused-for-human, distinct from failed, without pausing a sibling', async () => {
+test('a [HUMAN]-gated remediation pause records paused-for-human, distinct from failed, without pausing a sibling', async () => {
   const c = new Coordination();
   const candidates = [
     { address: 'a', writes: { files: ['a.json'], services: [] } },
@@ -197,7 +197,7 @@ test('REQ-09: a [HUMAN]-gated remediation pause records paused-for-human, distin
   assert.notEqual(byAddress.a.status, 'failed');
 });
 
-test('REQ-10: an incomplete group (one branch still running) is reported incomplete, not silently done', async () => {
+test('an incomplete group (one branch still running) is reported incomplete, not silently done', async () => {
   const c = new Coordination();
   let resolveB;
   const bPromise = new Promise((r) => {
@@ -229,7 +229,7 @@ test('REQ-10: an incomplete group (one branch still running) is reported incompl
   assert.equal(finalStatus.complete, true);
 });
 
-test('REQ-13: a branch exceeding its timeout is retried, and succeeding siblings are unaffected', async () => {
+test('a branch exceeding its timeout is retried, and succeeding siblings are unaffected', async () => {
   const c = new Coordination();
   let attempts = 0;
   const status = await c.dispatchGroup(
@@ -258,7 +258,7 @@ test('REQ-13: a branch exceeding its timeout is retried, and succeeding siblings
   assert.equal(byAddress.fast.attempts, 1);
 });
 
-test('REQ-13: exhausting retries after repeated timeouts records failed', async () => {
+test('exhausting retries after repeated timeouts records failed', async () => {
   const c = new Coordination();
   const status = await c.dispatchGroup(
     'group-6',
@@ -271,7 +271,7 @@ test('REQ-13: exhausting retries after repeated timeouts records failed', async 
   assert.match(status.branches[0].reason, /timed out/);
 });
 
-test('REQ-14: inspectable state distinguishes a fully-completed group from one with a paused/failed branch', async () => {
+test('inspectable state distinguishes a fully-completed group from one with a paused/failed branch', async () => {
   const c = new Coordination();
   await c.dispatchGroup(
     'group-7',
@@ -289,7 +289,7 @@ test('REQ-14: inspectable state distinguishes a fully-completed group from one w
   assert.equal(byAddress.b.reason, 'nope');
 });
 
-test('REQ-11: Coordination exposes no interface that calls canonical-work-model.md or Jira/Streams', () => {
+test('Coordination exposes no interface that calls the canonical work-item store, Jira, or Streams', () => {
   const c = new Coordination();
   const publicMethods = Object.getOwnPropertyNames(Coordination.prototype).filter((m) => m !== 'constructor');
   for (const m of publicMethods) {

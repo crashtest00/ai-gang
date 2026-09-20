@@ -1,10 +1,10 @@
 """
-internal-work-item-service.md REQ-04 (direct query interface) and REQ-08
-(human-/external-facing interfaces MAY write directly to the datastore,
-subject to REQ-08's Jira-mode restriction on canonical fields). Direct
+The external HTTP API: a direct query interface, plus
+human-/external-facing interfaces that may write directly to the datastore,
+subject to the Jira-mode restriction on canonical fields. Direct
 port of the Node service's src/httpApi.js — intentionally a thin HTTP
 surface: every request still goes through store.py/readstore.py, which is
-where REQ-04's access logging, REQ-10/REQ-08's write-gating, and REQ-05's
+where access logging, write-gating, and
 history all actually happen.
 
 Preserves services/scrummaster/src/canonicalWorkItems.js's expected HTTP contract
@@ -44,10 +44,9 @@ def _error_response(err: Exception):
 
 
 def health(request):
-    """canonical-work-model.md REQ-09 / internal-work-item-service.md
-    REQ-06 — report on this service's own inbound-webhook consumer group
-    health (REQ-09/REQ-11's Jira ingestion path, now that this service
-    owns it — see jira_webhook below) and the REQ-06 outbox relay's
+    """Report on this service's own inbound-webhook consumer group
+    health (the Jira ingestion path, now that this service
+    owns it — see jira_webhook below) and the outbox relay's
     health, mirroring the depth services/scrummaster/src/server.js's own /health
     already provides for its streams. Previously a bare {"status": "ok"}
     stub."""
@@ -75,7 +74,7 @@ def registry_redis_client():
 
 
 def relay_health(client) -> dict:
-    """The REQ-06 outbox relay has no consumer group of its own (it's a
+    """The outbox relay has no consumer group of its own (it's a
     plain poll-and-publish loop, not a Streams consumer) — health is
     instead "is there a growing backlog of unpublished rows," using the
     oldest unpublished row's age as the same kind of staleness signal
@@ -99,13 +98,13 @@ def relay_health(client) -> dict:
 @csrf_exempt
 @require_http_methods(['POST'])
 def jira_webhook(request):
-    """canonical-work-model.md REQ-09 (amended 2026-09-09) — Django is AI
+    """Amended 2026-09-09 — Django is AI
     Gang's sole external-facing surface; this replaces
     services/scrummaster/src/server.js's deleted `POST /webhook/jira` route.
 
     Durably enqueues the raw webhook onto the SAME `aigang:webhooks:{project}`
     Redis Stream, using the SAME envelope/dedupe-key shape server.js used to
-    produce, before ever acknowledging receipt — this is REQ-09's own
+    produce, before ever acknowledging receipt — this is the
     acceptance test: a Django/work-item-service kill immediately after this
     durable enqueue must not lose the event."""
     secret = os.environ.get('WEBHOOK_SECRET')
@@ -148,7 +147,7 @@ def jira_webhook(request):
         return JsonResponse({'received': True, 'deduped': result['deduped']})
     except Exception as err:
         # Do not report success if the event was never durably enqueued —
-        # Jira will retry a non-2xx response (REQ-09).
+        # Jira will retry a non-2xx response.
         print(f'[views] Failed to durably enqueue webhook for {issue["key"]}: {err!r}')
         return JsonResponse({'error': 'Failed to durably accept event'}, status=502)
 
@@ -215,12 +214,12 @@ def admin_transition_work_item(request, work_item_id):
 @csrf_exempt
 @require_http_methods(['POST'])
 def admin_record_release_candidate(request, work_item_id):
-    """canonical-release-workflow.md REQ-04 — the local-mode writeback
+    """The local-mode writeback
     target for the release-candidate Jenkins job's results (Candidate SHA,
     Build Identifier, Preview URL), mirroring what Jenkins already writes
     directly onto a Jira Release ticket's custom fields today. Jenkins
-    itself does not yet call this — see the feature spec's Implementation
-    Status for the remaining Jenkins-side follow-up."""
+    itself does not yet call this — remaining Jenkins-side follow-up is
+    tracked separately."""
     try:
         actor = request.headers.get('X-Actor', 'jenkins')
         body = json.loads(request.body or b'{}')

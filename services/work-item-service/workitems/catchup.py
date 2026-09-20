@@ -1,13 +1,12 @@
 """
-canonical-work-model.md REQ-15 — connecting Jira performs a one-time,
+Connecting Jira performs a one-time,
 idempotent, batched export of a project's existing local canonical work
 items into Jira. Direct port of the Node service's src/catchup.js.
 
 Design decision (carried over unchanged from the Node implementation):
-this service has no Jira client of its own (internal-work-item-service.md
-REQ-09's own resolution — "this service has no Jira client of its own...
-and never calls Jira directly"). The catch-up push is therefore split at
-the same boundary REQ-09's rollup push already uses: this module does the
+this service has no Jira client of its own and never calls Jira directly.
+The catch-up push is therefore split at
+the same boundary the rollup push already uses: this module does the
 idempotent, resumable SELECTION of what still needs a Jira issue (skip
 anything with external_key already set) and emits one outbound event per
 remaining item via the normal outbox/Streams path; a downstream
@@ -52,7 +51,7 @@ def start_catchup_push(project: str, *, batch_size: int = 50) -> dict:
 
 
 def record_external_key(work_item_id, external_key: str, *, actor: str = 'jira-catchup') -> dict:
-    """The idempotent half of REQ-15's contract: a no-op if external_key is
+    """The idempotent half of the catch-up contract: a no-op if external_key is
     already set — "skipped rather than re-created"."""
     with transaction.atomic():
         item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
@@ -76,7 +75,7 @@ def record_external_key(work_item_id, external_key: str, *, actor: str = 'jira-c
 
 
 def connect_jira(project: str, jira_project_key: str) -> None:
-    """REQ-14: the actual mode flip. Called once the catch-up push has
+    """The actual mode flip. Called once the catch-up push has
     been initiated (not necessarily fully drained)."""
     project_config.set_mode(project, project_config.JIRA, jira_project_key=jira_project_key)
 

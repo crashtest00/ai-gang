@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "CHANGE-ME-project-name",
+    "type": "CHANGE-ME-deployment-target",
+    "stack": "CHANGE-ME-stack-profile"
+  },
+  "repository": {
+    "url": "CHANGE-ME-repository-https-url"
+  }
+}

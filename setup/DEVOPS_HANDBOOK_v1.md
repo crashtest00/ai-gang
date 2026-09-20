@@ -241,8 +241,7 @@ Backlog → In Progress → In Review → Done
 
 Story/Sub-task Done never triggers Jenkins. Production only moves via a
 separate Release ticket type — see The Full Lifecycle and Production
-Promotion below, and the release-workflow design for the full
-design.
+Promotion below for the full flow.
 
 ---
 
@@ -302,7 +301,7 @@ design.
    - If satisfied: moves Jira ticket to Done — this means "accepted on beta,"
      full stop. It does not trigger production promotion.
 
-7. CUTTING A RELEASE (batched, deliberate — see release-workflow.md)
+7. CUTTING A RELEASE (batched, deliberate)
    - When enough has accumulated on beta, a human creates a Jira Release
      ticket (Target Project required)
    - ScrumMaster checks beta's queue is clean, then triggers the
@@ -362,7 +361,7 @@ that passed there — built once, never rebuilt.
 
 ### Release-Ticket Promotion (beta → release/<sha> → prod)
 
-Full design: the release-workflow design. Summary:
+The release-ticket promotion flow:
 
 1. Human creates a Jira Release ticket (Target Project required) once enough
    has landed on beta
@@ -388,8 +387,8 @@ manually instead.
 point for rollback — it names the exact commit that shipped, with a PR
 history showing exactly what it contained. A separate version-tag scheme is
 not needed for the hosted web/server lane; desktop production builds are
-tagged separately for GitHub Releases distribution, see
-the desktop-app-support design.
+tagged separately for GitHub Releases distribution — see
+`DESKTOP_HANDBOOK_v1.md`.
 
 ---
 

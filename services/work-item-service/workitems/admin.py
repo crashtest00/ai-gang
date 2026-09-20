@@ -1,22 +1,22 @@
 """
-The Django admin UI — internal-work-item-service.md REQ-08's human-facing
-admin interface. §4 "Implementation intent": "Django is expected to also
-host the human-facing admin UI referenced in REQ-08, since that capability
-comes with the framework at effectively no additional build cost." This
+The Django admin UI — this service's human-facing
+admin interface. Django is expected to also
+host the human-facing admin UI, since that capability
+comes with the framework at effectively no additional build cost. This
 module is that capability; the Node/Express implementation explicitly
-could NOT provide this for free (its own "Implementation intent note"
+could NOT provide this for free (its own design notes
 flagged the missing admin UI as a tracked gap) — wiring it up here is one
 of the concrete reasons the product owner chose to rebuild in Django.
 
 Every gated write made through this admin (status transition, assignment)
-routes through store.py, so it gets the SAME REQ-10 write-gate, REQ-05
-history recording, and REQ-06 outbound event as a Streams-originated write
+routes through store.py, so it gets the SAME write-gate, history
+recording, and outbound event as a Streams-originated write
 — never a raw ORM save that would bypass any of that. Non-gated fields
 (display_name, description, priority, writes_files/services, external_key)
 are saved via a small helper that still records history + emits an
-outbound event, since REQ-08's obligation ("every such write MUST still
-be recorded... and MUST still produce an outbound event") is not scoped
-only to the three REQ-10-gated fields — it applies to "an admin-UI edit"
+outbound event, since every such write must still
+be recorded and must still produce an outbound event, and that's not scoped
+only to the gated fields — it applies to an admin-UI edit
 generally.
 
 WorkItemHistory, AccessLog, and OutboxEvent are registered read-only:
@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import uuid
 
+from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import HttpResponseRedirect
 from django.utils import timezone
 
 from . import project_config, store, write_gate
@@ -47,17 +49,40 @@ def _actor(request) -> str:
 def _raise_as_form_error(err: Exception):
     """store.py's own exceptions (ValidationError, AssignmentRejectedError,
     DependencyGateError, write_gate.WriteGateRejectedError) all carry a
-    `.code`. Re-raised as Django's ValidationError so
-    ModelAdmin._changeform_view's own `except ValidationError` handling
-    redisplays the form with a non-field error instead of a 500."""
+    `.code`. Re-raised as Django's ValidationError so it carries a type
+    WorkItemAdmin.changeform_view (below) specifically catches — Django's
+    admin machinery has no handling of its own for an exception raised out
+    of save_model(): ModelAdmin._changeform_view calls it with no
+    surrounding try/except, so whatever it raises otherwise propagates all
+    the way out as an unhandled exception (a bare 500, and one with no
+    traceback to go on once DEBUG is off)."""
     raise DjangoValidationError(str(err)) from err
+
+
+class WorkItemAdminForm(forms.ModelForm):
+    """A blank External key must be normalized to NULL before Django's own
+    model-level uniqueness check runs (ModelForm._post_clean, during
+    form.is_valid(), before save_model is ever reached) — otherwise a
+    second work item saved with the field left blank is rejected as a
+    duplicate of the first: the browser submits a left-blank TextField as
+    '', and '' is a value like any other for a unique constraint, where
+    only NULL is guaranteed never to collide with another row. See also
+    WorkItem.save(), which applies the same normalization for a write that
+    does not go through this form."""
+
+    class Meta:
+        model = WorkItem
+        fields = '__all__'
+
+    def clean_external_key(self):
+        return self.cleaned_data.get('external_key') or None
 
 
 NON_GATED_FIELDS = ('display_name', 'description', 'priority', 'writes_files', 'writes_services', 'external_key')
 
 
 class WorkItemStoryDetailInline(admin.StackedInline):
-    """REQ-17 — Story schema field contract. Plain ORM-backed inline: the
+    """Story schema field contract. Plain ORM-backed inline: the
     Node reference implementation never tracked per-field history for
     story-detail edits either (store.js's history entries are limited to
     `status`/`assignee_agent_id`/`work_item_link`), so this mirrors that
@@ -70,10 +95,10 @@ class WorkItemStoryDetailInline(admin.StackedInline):
 
 
 class WorkItemReleaseDetailInline(admin.StackedInline):
-    """canonical-release-workflow.md REQ-01. `candidate_sha`/
+    """Release schema field contract. `candidate_sha`/
     `build_identifier`/`preview_url` are rendered but not meant for direct
-    hand-editing — they're written by store.record_release_candidate
-    (REQ-04's writeback path); left editable here anyway rather than
+    hand-editing — they're written by store.record_release_candidate's
+    writeback path; left editable here anyway rather than
     read-only, matching WorkItemStoryDetailInline's precedent of not
     inventing field-level history/permission machinery the Node reference
     implementation never had either."""
@@ -123,7 +148,7 @@ class WorkItemArtifactInline(admin.TabularInline):
 
     def has_add_permission(self, request, obj=None):
         # Adding an artifact via the inline would bypass store.attach_artifact's
-        # outbox-event publication (REQ-06) — use the dedicated
+        # outbox-event publication — use the dedicated
         # WorkItemArtifact admin (routes through store.py) to add one.
         return False
 
@@ -145,17 +170,36 @@ class WorkItemAdmin(admin.ModelAdmin):
     list_filter = ('project', 'type', 'status')
     search_fields = ('=id', 'external_key', 'display_name', 'description')
     readonly_fields = ('created_at', 'updated_at')
+    form = WorkItemAdminForm
     inlines = [WorkItemStoryDetailInline, WorkItemReleaseDetailInline, WorkItemLinkFromInline, WorkItemLinkToInline,
                WorkItemArtifactInline, WorkItemCommentInline, WorkItemHistoryInline]
     fields = ('id', 'project', 'type', 'display_name', 'description', 'status', 'assignee_agent_id',
                'priority', 'writes_files', 'writes_services', 'parent', 'external_key', 'created_at', 'updated_at')
+
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        """Catches the DjangoValidationError save_model (below) raises for
+        a rejected gated write. Nothing upstream in Django's admin does:
+        ModelAdmin._changeform_view calls self.save_model(...) with no
+        surrounding try/except of its own, so left uncaught this would
+        propagate all the way out as an unhandled exception. Converts it
+        into a flashed error message and a redirect back to the same page
+        instead — the transaction save_model ran inside has already been
+        rolled back by this point (changeform_view's own
+        transaction.atomic(), which wraps the call this method's super()
+        makes), so nothing was actually written."""
+        try:
+            return super().changeform_view(request, object_id, form_url, extra_context)
+        except DjangoValidationError as err:
+            for message in err.messages:
+                messages.error(request, message)
+            return HttpResponseRedirect(request.path)
 
     def get_inlines(self, request, obj):
         """WorkItemStoryDetail/WorkItemReleaseDetail are 1:1 child tables
         keyed by the PARENT's own primary key (OneToOneField(primary_key=
         True)) — and this admin's `id` field is human-editable on add
         (models.py: "a human-admin UX convenience," not a relaxation of
-        REQ-01). Those two facts don't compose: Django's `_changeform_view`
+        that rule). Those two facts don't compose: Django's `_changeform_view`
         builds every inline formset from `form.instance` BEFORE
         `form.is_valid()` runs, so each inline's hidden pk_field bakes in
         the PARENT's pre-validation random-default id — never whatever a
@@ -176,11 +220,11 @@ class WorkItemAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         ro = list(self.readonly_fields)
         if obj is not None:
-            # REQ-01: canonical identity is never reissued once created.
+            # Canonical identity is never reissued once created.
             ro = ['id'] + ro
             mode = project_config.get_mode(obj.project)
             if mode['mode'] == 'jira':
-                # REQ-08's 2026-09-07 Jira-mode restriction: status,
+                # The 2026-09-07 Jira-mode restriction: status,
                 # assignment, and dependency fields render read-only in
                 # Jira mode. (Dependency links are managed via the
                 # WorkItemLink admin, which applies the same gate itself.)
@@ -241,11 +285,11 @@ class WorkItemAdmin(admin.ModelAdmin):
 
     @staticmethod
     def _apply_non_gated_edit(obj: WorkItem, changed_fields, actor: str) -> None:
-        """REQ-08: "Every such write MUST still be recorded in the
-        append-only history... and MUST still produce an outbound event...
+        """Every such write must still be recorded in the
+        append-only history, and must still produce an outbound event,
         so it remains visible to the rest of the platform after the fact
         even though the request itself did not arrive as a Streams
-        command." Applies to any admin write, not only the REQ-10-gated
+        command. Applies to any admin write, not only the gated
         fields — display_name/description/priority/writes_files/
         writes_services/external_key/parent are not individually tracked
         in work_item_history (mirroring store.js's own scope, which never
@@ -273,7 +317,7 @@ class WorkItemLinkAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         if change:
-            # dependency-handling.md's contract has no "edit a link" concept
+            # The dependency graph's contract has no "edit a link" concept
             # — a link is created or it isn't (createLink is the only
             # mutator in store.py). Editing an existing row here is not a
             # gated write this service's contract defines.
@@ -337,7 +381,7 @@ class WorkItemCommentAdmin(admin.ModelAdmin):
 
 @admin.register(WorkItemHistory)
 class WorkItemHistoryAdmin(admin.ModelAdmin):
-    """REQ-05: append-only. No add/change/delete — this is a read-only
+    """Append-only. No add/change/delete — this is a read-only
     audit view, matching store.py never issuing UPDATE/DELETE against this
     table."""
 
@@ -357,7 +401,7 @@ class WorkItemHistoryAdmin(admin.ModelAdmin):
 
 @admin.register(OutboxEvent)
 class OutboxEventAdmin(admin.ModelAdmin):
-    """Operational visibility into REQ-06's transactional outbox — whether
+    """Operational visibility into the transactional outbox — whether
     the relay (`python manage.py relay`) is keeping up. Read-only: rows are
     written exclusively by store.py inside the same transaction as the
     write they describe, and marked published by the relay process."""
@@ -374,8 +418,8 @@ class OutboxEventAdmin(admin.ModelAdmin):
 
 @admin.register(AccessLog)
 class AccessLogAdmin(admin.ModelAdmin):
-    """REQ-04: "Read access MUST be recorded in the service's own API/access
-    logs." Read-only audit view."""
+    """Read access must be recorded in the service's own API/access
+    logs. Read-only audit view."""
 
     list_display = ('operation', 'project', 'work_item_id', 'actor', 'occurred_at')
     list_filter = ('operation', 'project')
@@ -392,7 +436,7 @@ class AccessLogAdmin(admin.ModelAdmin):
 
 @admin.register(WebhookFailure)
 class WebhookFailureAdmin(admin.ModelAdmin):
-    """REQ-09/REQ-11 — operator-visible record of a Jira-originated
+    """Operator-visible record of a Jira-originated
     webhook event rejected by validation. Read-only except for delete, so
     an operator can clear entries once investigated."""
 
@@ -408,10 +452,10 @@ class WebhookFailureAdmin(admin.ModelAdmin):
 
 @admin.register(ProjectConfig)
 class ProjectConfigAdmin(admin.ModelAdmin):
-    """REQ-14 mode selection. Not itself a "work item write" REQ-08/REQ-10
+    """Mode selection. Not itself a "work item write" the gated-write rules
     govern — this is project-level meta-configuration, plain CRUD.
     Prefer catchup.connect_jira/disconnect_jira for a real mode flip (they
-    also trigger the REQ-15 catch-up push); this admin is an operational
+    also trigger the catch-up push); this admin is an operational
     escape hatch."""
 
     list_display = ('project', 'mode', 'jira_project_key', 'updated_at')

@@ -4,8 +4,7 @@
 # Creates the Jira "Release" issue type, its dedicated fields, and the
 # "Abandoned" resolution used to close a release that will not ship — then
 # writes the field IDs to services/scrummaster/.env. Sibling to create-jira-fields.sh,
-# same idempotent pattern. See the release-workflow design ("Jira
-# setup" ToDo section).
+# same idempotent pattern.
 #
 # The Release issue type itself is instance-level, same as the Story schema
 # fields. It still needs to be added to each target project's issue type
