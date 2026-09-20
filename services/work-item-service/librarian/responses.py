@@ -21,7 +21,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .envelope import RESPONSE_KIND, build_envelope, read_field, to_stream_fields
+from workitems.streams import publish as streams_publish
+
+from .envelope import RESPONSE_KIND, build_envelope, read_field
 from .stream_topology import RESPONSE_STREAM
 
 STATUS_DELIVERED = 'delivered'
@@ -30,9 +32,17 @@ STATUS_FAILED = 'failed'
 
 def _publish(client, payload: dict[str, Any], *, correlation_id: Optional[str],
              task_id: Optional[str]) -> str:
+    """Publish through ``workitems.streams.publish`` — the same path
+    ``artifacts/events.py`` uses — rather than a bare ``XADD``, so this
+    response is validated against the shared envelope contract exactly
+    like every other stream write on this platform (V4 audit Pass 2 row
+    28). No ``dedupe_key``: a response is published exactly once per
+    request by construction (REQ-06), so there is nothing here for
+    SET-NX to guard against.
+    """
     envelope = build_envelope(RESPONSE_KIND, payload=payload, correlation_id=correlation_id, task_id=task_id)
-    entry_id = client.xadd(RESPONSE_STREAM, to_stream_fields(envelope))
-    return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+    result = streams_publish(client, RESPONSE_STREAM, envelope)
+    return result['entryId']
 
 
 def publish_confirmation(client, request, confirmation: dict[str, Any], *,
