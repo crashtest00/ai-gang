@@ -89,6 +89,47 @@ test('an operator override in the platform .env wins over the contract default',
   assert.equal(derived.PGDATABASE, 'chosen-db');
 });
 
+// BUGFIXES.md BF-01 Pass 1 audit row 1: workitems/jira_interpret.py and
+// workitems/webhook_consumer.py read these JIRA_*_FIELD_ID variables via
+// os.environ, but the documented startup flow never carried them from the
+// platform .env into the work-item service's own .env — they always saw
+// unconfigured ids. This is the full list jira_interpret.py and
+// webhook_consumer.py read (Story fields, the five BF-01 Release fields,
+// and the Agent/Blocked fields).
+const ALL_JIRA_FIELD_ID_VARS = [
+  'JIRA_AGENT_FIELD_ID', 'JIRA_BLOCKED_FIELD_ID',
+  'JIRA_VALUE_HYPOTHESIS_FIELD_ID', 'JIRA_TEST_MEASUREMENT_FIELD_ID', 'JIRA_BEHAVIOR_FIELD_ID',
+  'JIRA_AC_FIELD_ID', 'JIRA_CONSTRAINTS_FIELD_ID', 'JIRA_EDGE_CASES_FIELD_ID', 'JIRA_OUT_OF_SCOPE_FIELD_ID',
+  'JIRA_TARGET_PROJECT_FIELD_ID', 'JIRA_RELEASE_NOTES_FIELD_ID', 'JIRA_CANDIDATE_SHA_FIELD_ID',
+  'JIRA_BUILD_IDENTIFIER_FIELD_ID', 'JIRA_PREVIEW_URL_FIELD_ID',
+];
+
+test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item service .env, and an unset one is left out entirely', () => {
+  const root = makeRoot({
+    platformEnv: PLATFORM_ENV + 'JIRA_BEHAVIOR_FIELD_ID=customfield_10050\nJIRA_TARGET_PROJECT_FIELD_ID=customfield_10060\n',
+  });
+  assert.equal(run(root).status, 0);
+  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  assert.equal(derived.JIRA_BEHAVIOR_FIELD_ID, 'customfield_10050');
+  assert.equal(derived.JIRA_TARGET_PROJECT_FIELD_ID, 'customfield_10060');
+  // Not set in the platform .env — a local-mode-only deployment must see
+  // no trace of them, not even an empty assignment.
+  for (const name of ALL_JIRA_FIELD_ID_VARS) {
+    if (name === 'JIRA_BEHAVIOR_FIELD_ID' || name === 'JIRA_TARGET_PROJECT_FIELD_ID') continue;
+    assert.equal(name in derived, false, `${name} should not appear when unset in the platform .env`);
+  }
+});
+
+test('every JIRA_*_FIELD_ID the work-item service reads is wired through when the platform .env sets it', () => {
+  const extra = ALL_JIRA_FIELD_ID_VARS.map((name, i) => `${name}=customfield_${10000 + i}`).join('\n') + '\n';
+  const root = makeRoot({ platformEnv: PLATFORM_ENV + extra });
+  assert.equal(run(root).status, 0);
+  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  ALL_JIRA_FIELD_ID_VARS.forEach((name, i) => {
+    assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the work-item service .env`);
+  });
+});
+
 test("ScrumMaster's environment file gets AI_GANG_HOME set to the checkout's own path", () => {
   const root = makeRoot();
   assert.equal(run(root).status, 0);
