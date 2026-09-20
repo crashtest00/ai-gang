@@ -255,15 +255,28 @@ test('the end-to-end leg uses the work-item type and status the service actually
 
 // ---- the work-item service's own environment example ----
 
-test('every variable the .env.example declares is one settings.py reads', () => {
+test('every variable the .env.example declares is one settings.py reads, or a documented Jira custom-field id read directly via os.environ', () => {
   const example = read(path.join(REPO_ROOT, 'services', 'work-item-service', '.env.example'));
   const settings = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitemservice', 'settings.py'));
+  // The Jira custom-field ids (JIRA_*_FIELD_ID) are the one documented
+  // exception to "settings.py reads it": jira_interpret.py and
+  // webhook_consumer.py read them directly via os.environ, never through
+  // settings.py (see .env.example's own header and
+  // scripts/startup/derive-env.sh's comment on the same variables). An
+  // explicit list of reader files, not a wildcard over the package, so a
+  // var declared in .env.example still has to name a real reader, not
+  // merely live somewhere under workitems/.
+  const jiraReaders = [
+    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'jira_interpret.py'),
+    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'webhook_consumer.py'),
+  ].map(read);
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
   for (const name of new Set(declared)) {
+    const readsIt = settings.includes(`'${name}'`) || jiraReaders.some((source) => source.includes(`'${name}'`));
     assert.ok(
-      settings.includes(`'${name}'`),
-      `${name} is in services/work-item-service/.env.example but settings.py never reads it`
+      readsIt,
+      `${name} is in services/work-item-service/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py reads it`
     );
   }
 });
