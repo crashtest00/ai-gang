@@ -142,8 +142,17 @@ def _record_specification_link(item: WorkItem, artifact_id, requirement_id: str)
     make the link immutable, and a Streams command redelivered with the
     SAME (artifactId, requirementId) must be a safe no-op, per REQ-03's
     Streams delivery semantics (`redis-streams.md`'s idempotency
-    handling)."""
+    handling) — mirroring `_add_artifact_link`'s identical-payload early
+    return below, this returns the existing row unchanged (no write, no
+    second event) when it already holds the same (artifact_id,
+    requirement_id); a different pair still replaces and emits."""
     _assert_artifact_resolves(artifact_id)
+    existing = WorkItemSpecificationLink.objects.filter(
+        work_item=item, artifact_id=artifact_id, requirement_id=requirement_id,
+    ).first()
+    if existing:
+        return existing
+
     link, _created = WorkItemSpecificationLink.objects.update_or_create(
         work_item=item, defaults={'artifact_id': artifact_id, 'requirement_id': requirement_id, 'updated_at': timezone.now()},
     )

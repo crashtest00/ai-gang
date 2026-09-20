@@ -21,7 +21,7 @@ from django.db import IntegrityError
 
 from artifacts.models import Artifact
 from workitems import readstore, store
-from workitems.models import WorkItemArtifactLink, WorkItemSpecificationLink
+from workitems.models import OutboxEvent, WorkItemArtifactLink, WorkItemSpecificationLink
 
 PROJECT = 'test-project'
 
@@ -71,6 +71,34 @@ def test_record_specification_link_replaces_existing_req01(clean_db):
     link = readstore.get_specification_link(item.id)
     assert link.artifact_id == second_artifact.id
     assert link.requirement_id == 'REQ-2'
+
+
+def test_record_specification_link_identical_redelivery_is_a_noop_req03(clean_db):
+    """work-items.md REQ-03's docstring contract on `_record_specification_link`:
+    a redelivered command carrying the SAME (artifactId, requirementId)
+    must be a safe no-op — no bumped `updated_at`, no second outbox event
+    — mirroring `_add_artifact_link`'s identical-payload dedupe. A
+    different pair (test_record_specification_link_replaces_existing_req01
+    above) still replaces and emits."""
+    artifact = make_artifact()
+    item = make_work_item()
+
+    store.record_specification_link(item.id, artifact.id, 'REQ-18')
+    link_before = WorkItemSpecificationLink.objects.get(work_item_id=item.id)
+    events_before = OutboxEvent.objects.filter(
+        work_item_id=item.id, event_type='work_item.specification_link_recorded',
+    ).count()
+
+    result = store.record_specification_link(item.id, artifact.id, 'REQ-18')
+    assert result == {'workItemId': str(item.id), 'artifactId': str(artifact.id), 'requirementId': 'REQ-18'}
+
+    link_after = WorkItemSpecificationLink.objects.get(work_item_id=item.id)
+    assert link_after.updated_at == link_before.updated_at
+    assert WorkItemSpecificationLink.objects.filter(work_item_id=item.id).count() == 1
+    events_after = OutboxEvent.objects.filter(
+        work_item_id=item.id, event_type='work_item.specification_link_recorded',
+    ).count()
+    assert events_after == events_before
 
 
 def test_record_specification_link_req04_rejects_unresolved_artifact(clean_db):
