@@ -192,6 +192,79 @@ def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_column
     assert detail_after_update['release_notes'] == 'Fixes login bug.'
 
 
+def test_req01_an_update_webhook_for_a_release_ticket_with_no_prior_create_still_materializes_it(
+    clean_db, monkeypatch, redis_client,
+):
+    """BUGFIXES.md BF-01 Pass 1 audit row 2: a Release ticket created
+    before BF-01 shipped (or whose jira:issue_created webhook was never
+    delivered/consumed) has no canonical `release` work item yet — only
+    `jira:issue_updated` webhooks are arriving for it now. REQ-01's
+    "create OR update webhook" acceptance criterion means the update path
+    alone must still materialize the same `release` work item and
+    `work_item_release_detail` row, exercised here through the real
+    dispatch path: POST /webhooks/jira -> the durable stream ->
+    handle_webhook_envelope -> GET /work-items/<id>?full=true, exactly
+    like the create-then-update test above."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    for env_name, field_id in RELEASE_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+    client = Client()
+    stream = registry.webhook_stream_name(PROJECT)
+
+    updated = jira_payload(
+        'REL-2', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes the checkout bug.',
+            'customfield_candidate_sha': 'def5678',
+        },
+        changelog={'id': 'cl-rel-2', 'items': [
+            {'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha', 'from': None, 'to': 'def5678'},
+        ]},
+    )
+    resp = client.post('/webhooks/jira', data=json.dumps(updated), content_type='application/json')
+    assert resp.status_code == 200
+
+    envelope, count = _latest_envelope(redis_client, stream)
+    assert count == 1
+    handle_webhook_envelope(envelope)
+
+    item = WorkItem.objects.get(external_key='REL-2')
+    assert item.type == 'release'
+    assert item.project == 'engineering-app'
+
+    read = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read.status_code == 200
+    detail = read.json()['releaseDetail']
+    assert detail['release_notes'] == 'Fixes the checkout bug.'
+    assert detail['candidate_sha'] == 'def5678'
+
+    # A second update for the same never-created ticket must not create a
+    # duplicate work item or detail row.
+    updated_again = jira_payload(
+        'REL-2', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes the checkout bug.',
+            'customfield_candidate_sha': 'def5678',
+            'customfield_build_id': 'build-7',
+        },
+        changelog={'id': 'cl-rel-3', 'items': [
+            {'field': 'Build Identifier', 'fieldId': 'customfield_build_id', 'from': None, 'to': 'build-7'},
+        ]},
+        timestamp=2000,
+    )
+    resp2 = client.post('/webhooks/jira', data=json.dumps(updated_again), content_type='application/json')
+    assert resp2.status_code == 200
+    envelope2, count2 = _latest_envelope(redis_client, stream)
+    assert count2 == 2
+    handle_webhook_envelope(envelope2)
+
+    assert WorkItem.objects.filter(external_key='REL-2').count() == 1
+    read_again = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read_again.json()['releaseDetail']['build_identifier'] == 'build-7'
+
+
 # ---------------------------------------------------------------------------
 # Acceptance: "Kill Django/work-item-service immediately after a
 # webhook is durably enqueued but before it's processed; on restart, the

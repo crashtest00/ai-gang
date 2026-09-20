@@ -11,6 +11,15 @@
 #     as the interpolation source for the ${PGUSER}/${PGPASSWORD}/
 #     ${PGDATABASE} references in that stack's docker-compose.yml.
 #
+#     It also carries every configured JIRA_*_FIELD_ID (workitems/
+#     jira_interpret.py and workitems/webhook_consumer.py both read these
+#     via os.environ — Story schema fields, the five-field Release schema
+#     BUGFIXES.md BF-01 added, and the Agent/Blocked fields). These are
+#     genuinely optional — a local-mode-only deployment never sets them —
+#     so each is copied from the platform .env only when set there; an
+#     unset one is left out of the generated file entirely rather than
+#     written empty, same as an unset one is absent from .env itself.
+#
 #   services/scrummaster/.env — updated in place, never rewritten, since
 #     scripts/create-jira-fields.sh and scripts/init-project.sh both write
 #     their own values there. Only the keys this flow owns are set.
@@ -35,6 +44,29 @@ source "$STARTUP_DIR/lib.sh"
 
 WIS_DIR="$AIGANG_ROOT/services/work-item-service"
 SM_DIR="$AIGANG_ROOT/services/scrummaster"
+
+# Every JIRA_*_FIELD_ID workitems/jira_interpret.py and
+# workitems/webhook_consumer.py read via os.environ (grepped from both —
+# see this file's header comment). Reuses the SAME env var names
+# services/scrummaster/src/jira.js already reads, per jira_interpret.py's
+# own module docstring, so one .env can configure both services'
+# custom-field ids identically.
+JIRA_FIELD_ID_VARS=(
+  JIRA_AGENT_FIELD_ID
+  JIRA_BLOCKED_FIELD_ID
+  JIRA_VALUE_HYPOTHESIS_FIELD_ID
+  JIRA_TEST_MEASUREMENT_FIELD_ID
+  JIRA_BEHAVIOR_FIELD_ID
+  JIRA_AC_FIELD_ID
+  JIRA_CONSTRAINTS_FIELD_ID
+  JIRA_EDGE_CASES_FIELD_ID
+  JIRA_OUT_OF_SCOPE_FIELD_ID
+  JIRA_TARGET_PROJECT_FIELD_ID
+  JIRA_RELEASE_NOTES_FIELD_ID
+  JIRA_CANDIDATE_SHA_FIELD_ID
+  JIRA_BUILD_IDENTIFIER_FIELD_ID
+  JIRA_PREVIEW_URL_FIELD_ID
+)
 
 # Sets one KEY=value in a file, replacing an existing assignment or
 # appending a new one, and leaving every other line untouched.
@@ -71,6 +103,11 @@ WIS_TMP="$(mktemp)"
   echo "REDIS_HOST=ai-gang-redis"
   echo "REDIS_PORT=6379"
   echo "PORT=9100"
+  for jira_var in "${JIRA_FIELD_ID_VARS[@]}"; do
+    if jira_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_var")" && [[ -n "$jira_value" ]]; then
+      printf '%s=%s\n' "$jira_var" "$jira_value"
+    fi
+  done
 } > "$WIS_TMP"
 chmod 600 "$WIS_TMP"
 mv "$WIS_TMP" "$WIS_ENV"

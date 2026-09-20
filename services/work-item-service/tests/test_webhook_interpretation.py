@@ -345,6 +345,57 @@ def test_release_ticket_update_resyncs_candidate_fields_written_back_by_jenkins(
     assert detail.release_notes == 'Fixes login bug.', 'unrelated field carried through from the same full-snapshot resync'
 
 
+def test_release_ticket_update_with_no_prior_create_materializes_the_canonical_work_item(clean_db, monkeypatch):
+    """BUGFIXES.md BF-01 Pass 1 audit row 2: a Release ticket created
+    before BF-01 shipped never got a canonical `release` work item from
+    the (never-fired) `jira:issue_created` webhook it originally received
+    — only its later `jira:issue_updated` webhooks are still arriving.
+    REQ-01 says "create OR update webhook" must materialize it."""
+    _set_release_field_env(monkeypatch)
+    fields = _release_fields(release_notes='Fixes the login bug.', candidate_sha='abc1234')
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-17', 'fields': fields},
+            'changelog': {'items': [{'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha',
+                                      'from': None, 'to': 'abc1234'}]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    item = WorkItem.objects.get(external_key='TP-17')
+    assert item.type == 'release'
+    assert item.project == 'engineering-app', 'Target Project custom field still maps onto the work item\'s own project'
+
+    detail = WorkItemReleaseDetail.objects.get(work_item_id=item.id)
+    assert detail.release_notes == 'Fixes the login bug.'
+    assert detail.candidate_sha == 'abc1234', 'detail columns populated from the payload\'s issue.fields'
+
+    # No jira:issue_created webhook ever fired for this ticket, so the
+    # 'requested' side-effect that path publishes must not appear either —
+    # only the jira:issue_created handler publishes work_item.jira_release_event.
+    assert not OutboxEvent.objects.filter(event_type='work_item.jira_release_event').exists()
+
+
+def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_second_update(clean_db, monkeypatch):
+    _set_release_field_env(monkeypatch)
+
+    def _update_envelope(candidate_sha):
+        fields = _release_fields(candidate_sha=candidate_sha)
+        body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-18', 'fields': fields},
+                'changelog': {'items': [{'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha',
+                                          'from': None, 'to': candidate_sha}]}}
+        return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+            'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+        })
+
+    handle_webhook_envelope(_update_envelope('abc1234'))
+    handle_webhook_envelope(_update_envelope('def5678'))  # a second update — must not create a duplicate.
+
+    assert WorkItem.objects.filter(external_key='TP-18').count() == 1
+    assert WorkItemReleaseDetail.objects.filter(work_item__external_key='TP-18').count() == 1
+    detail = WorkItemReleaseDetail.objects.get(work_item__external_key='TP-18')
+    assert detail.candidate_sha == 'def5678', 'second update still re-syncs the (already-materialized) detail row'
+
+
 def test_release_abandoned_is_recorded_and_republished(clean_db):
     fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-11', 'fields': fields},
