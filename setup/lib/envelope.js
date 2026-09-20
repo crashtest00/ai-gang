@@ -5,6 +5,18 @@
 // subscriber.js and gateway-publish.js can require it without depending on
 // the scrummaster package. Schema must stay identical to the ScrumMaster
 // copy.
+//
+// ARTIFACT_DELIVERY_REQUEST/ARTIFACT_DELIVERY_RESPONSE are this copy's one
+// intentional addition beyond that parity, added for request-artifact.js
+// (V4 agent-facing artifact access). They mirror
+// services/work-item-service/workitems/envelope.py's Kind.ARTIFACT_DELIVERY_REQUEST /
+// Kind.ARTIFACT_DELIVERY_RESPONSE byte-for-byte (same strings), which
+// already validates a librarian delivery envelope exactly as it validates
+// a work-item command (that module's own docstring). services/scrummaster/src/envelope.js
+// does not yet carry them — ScrumMaster is out of this track's scope to
+// change — so this copy is, for now, not identical to it for this one
+// kind pair; see the request-artifact.js build report for the proposal to
+// reconcile that.
 
 const crypto = require('crypto');
 
@@ -15,6 +27,12 @@ const KIND = Object.freeze({
   TASK_STATUS: 'task_status',
   JIRA_OPERATION: 'jira_operation',
   WEBHOOK_EVENT: 'webhook_event',
+  // V4 — artifact custody. The librarian's request/response pair
+  // (librarian/README.md, workitems/envelope.py's Kind class). Not a task:
+  // TASK_KINDS below deliberately does not include either, so neither
+  // requires taskId/contextId.
+  ARTIFACT_DELIVERY_REQUEST: 'artifact_delivery_request',
+  ARTIFACT_DELIVERY_RESPONSE: 'artifact_delivery_response',
 });
 
 const VALID_KINDS = new Set(Object.values(KIND));
