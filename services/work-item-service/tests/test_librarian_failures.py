@@ -295,6 +295,36 @@ def test_a_symlink_planted_after_the_check_delivers_nothing_outside_the_reposito
     assert not ArtifactDelivery.objects.exists()
 
 
+def test_a_symlink_planted_after_the_check_leaves_no_directories_in_the_victim(librarian_env, settings):
+    """Same window as the test above, but with a ``requestedPath`` nested
+    one level deeper than the planted symlink itself (``designs/sub/...``
+    rather than ``designs/...``). ``mkdir(parents=True)`` then has to
+    create ``sub`` too, and — since ``designs`` now points through the
+    symlink — it creates it INSIDE the victim repository. The refusal path
+    already removed the planted file; before V4 audit Pass 2 row 29 it left
+    that ``sub`` directory behind for the planter to collect, contradicting
+    ``_refuse_a_file_that_left_the_repository``'s own docstring."""
+    settings.LIBRARIAN_LOCK_HOLD_DELAY_MS = 2000
+    artifact = seed_artifact(MOCKUP)
+    repo = make_repo(librarian_env, 'hello-web')
+    victim = make_repo(librarian_env, 'hello-desktop')
+
+    message_id, cursor = publish_request(librarian_env, {
+        'requestedBy': 'frontend-agent', 'artifactId': str(artifact.id),
+        'destinationRepo': 'hello-web', 'requestedPath': 'designs/sub/mockup.png',
+    })
+    await_lock_granted(str(artifact.id), 'hello-web')
+    (repo / 'designs').symlink_to(victim)
+
+    response = await_response(librarian_env, message_id, cursor)
+
+    payload = _failure(response, COPY_FAILED)
+    assert 'containment check' in payload['detail']
+    assert files_in(victim) == []
+    assert list(victim.rglob('*')) == [], 'no directories were left in the victim repository either'
+    assert not ArtifactDelivery.objects.exists()
+
+
 # --- "no request completes without a response" ---------------------------
 
 def test_every_request_gets_exactly_one_answer(librarian_env):
