@@ -184,6 +184,25 @@ def test_a_requested_path_under_a_directory_the_search_skips_is_refused(libraria
     assert files_in(repo) == []
 
 
+@pytest.mark.parametrize('skipped', sorted(SKIPPED_DIRECTORIES))
+def test_a_requested_path_under_a_skipped_directory_nested_below_the_top_is_refused(librarian_env, skipped):
+    """content.py's walk prunes SKIPPED_DIRECTORIES at every depth, not
+    only the top level (its ``dirnames[:] = ...`` filter runs on every
+    recursion of ``os.walk``) — a submodule's own ``.git`` or a nested
+    package's ``node_modules`` is exactly as invisible to REQ-03's search
+    as a top-level one. The write rule has to walk every path component to
+    match, not just the first."""
+    artifact = seed_artifact(MOCKUP)
+    repo = make_repo(librarian_env, 'hello-web')
+
+    response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
+                                requested_path=f'packages/app/{skipped}/nested/planted.png')
+
+    payload = _failure(response, PATH_OUTSIDE_REPOSITORY)
+    assert skipped in payload['detail']
+    assert files_in(repo) == []
+
+
 def test_a_requested_path_through_a_symlink_that_leaves_the_repository(librarian_env, tmp_path):
     artifact = seed_artifact(MOCKUP)
     repo = make_repo(librarian_env, 'hello-web')

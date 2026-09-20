@@ -149,15 +149,20 @@ def resolve_requested_path(repository: Repository, requested_path) -> str:
                               f'requested path {requested_path!r} does not resolve inside repository '
                               f'{repository.name!r}')
 
-    # The write rule and the search rule are one list. ``content.py`` never
-    # descends into these directories, so a file delivered inside one could
-    # never be found again by REQ-03's content search — and ``.git`` in
-    # particular is the repository's own object store, which a delivery has
-    # no business writing into.
-    first_component = relative.split('/', 1)[0]
-    if first_component in content.SKIPPED_DIRECTORIES:
+    # The write rule and the search rule are one list. ``content.py`` prunes
+    # these names at EVERY depth of its walk (not just the top), so a
+    # delivery under one of them anywhere in the path — not only as the
+    # first component — could never be found again by REQ-03's content
+    # search; ``.git`` in particular is the repository's own object store
+    # (including a submodule's, nested arbitrarily deep), which a delivery
+    # has no business writing into.
+    skipped_component = next(
+        (component for component in relative.split('/') if component in content.SKIPPED_DIRECTORIES),
+        None,
+    )
+    if skipped_component is not None:
         raise DeliveryFailure(failures.PATH_OUTSIDE_REPOSITORY,
-                              f'requested path {requested_path!r} is under {first_component!r}, which is not '
+                              f'requested path {requested_path!r} is under {skipped_component!r}, which is not '
                               f'repository content the librarian delivers into')
 
     # Containment of the RESOLVED path: this is the check that catches a
