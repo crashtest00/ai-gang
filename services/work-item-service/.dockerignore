@@ -5,3 +5,7 @@ tests
 .pytest_cache
 __pycache__
 *.pyc
+
+# Local virtualenv and collected static files: built inside the image, never copied in.
+.venv/
+staticfiles/
