@@ -18,7 +18,61 @@ One task per invocation. Complete it fully before finishing.
 
 - `/workspace` — project codebase (read/write)
 - `/agent-docs` — agent definitions and reference docs (read-only)
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, `$AGENT_DISPLAY_NAME`
+
+---
+
+## Requesting an Artifact
+
+Some tickets depend on an artifact — a design file, a spec document, a data
+fixture — already uploaded to the platform's artifact store. You never
+browse or search for one: you are given its canonical id, and you ask for
+it by that id alone.
+
+**Finding the id.** The internal work-item record behind your ticket can
+carry a list of linked artifacts, but your dispatch prompt does not carry
+that record's own id — only the Jira issue key — and there is no lookup
+from the key to the record yet. Until that exists, an artifact your ticket
+depends on is named directly in the ticket text your prompt already gives
+you: its description, acceptance criteria, or comment thread. Only request
+an id you find stated there — never guess or invent one.
+
+**Asking for it:**
+
+```bash
+node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+```
+
+This publishes the request and blocks until the librarian answers —
+normally under a second — bounded by a timeout (`--timeout-ms`, default
+30000) so it can never hang your session indefinitely. `requestedBy` is
+filled in for you from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME` if that is
+unset); there is no flag to override it. On success it prints, and only
+prints, the path the file now occupies, relative to `/workspace`, and
+exits 0:
+
+```bash
+FILE_PATH=$(node /agent-docs/lib/request-artifact.js $PROJECT_NAME 3f9c2eab-1a2b-4c3d-9e8f-0a1b2c3d4e5f designs/mockup.png)
+```
+
+**What the answer means.** The printed path is where the file actually is —
+not necessarily the path you asked for. If something else already occupied
+that name, the librarian delivered it alongside instead (e.g.
+`designs/mockup-1.png`) and the adjusted path is what came back; always use
+the printed path, never the one you requested. Asking for the same
+artifact a second time returns that same path without writing a second
+copy, so it is safe to ask again if you are ever unsure whether you already
+have it.
+
+**On failure**, the command exits non-zero and prints the reason to
+stderr: `unknown_artifact` (the id does not resolve — recheck it against
+the ticket text before retrying), `path_outside_repository` (the path you
+asked for escaped `/workspace`, was absolute, or named `.git`/
+`node_modules` — retry with a plain path under your own working tree), or
+`copy_failed` (the librarian could not complete the write — worth one
+retry, and a BLOCKED marker if it keeps failing). A timeout prints its own
+message; retry once with a longer `--timeout-ms` before treating it as a
+failure worth blocking on.
 
 ---
 
