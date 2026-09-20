@@ -31,10 +31,12 @@ from typing import Any, Optional
 from django.db import transaction
 from django.utils import timezone
 
+from artifacts.models import Artifact
+
 from . import assignment, project_config, status_vocabulary, write_gate
 from .models import (
-    OutboxEvent, WorkItem, WorkItemArtifact, WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail,
-    WorkItemStoryDetail,
+    OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink,
+    WorkItemReleaseDetail, WorkItemSpecificationLink, WorkItemStoryDetail,
 )
 
 
@@ -56,6 +58,18 @@ class AssignmentRejectedError(Exception):
     def __init__(self, message: str, result: dict):
         super().__init__(message)
         self.result = result
+
+
+class UnresolvedArtifactError(Exception):
+    """work-items.md REQ-04 — a specification link or artifact link named
+    an artifact canonical id that does not resolve to a registered
+    artifact. The schema itself already refuses this (WorkItemSpecificationLink.artifact
+    / WorkItemArtifactLink.artifact are real foreign keys to artifacts.Artifact
+    with on_delete=PROTECT — see models.py), so this exception exists to
+    turn that into a clean, well-formed rejection at the application
+    boundary instead of a raw IntegrityError, the same way ValidationError
+    turns other rejections into a clean failure through the command path."""
+    code = 'UNRESOLVED_ARTIFACT'
 
 
 class ReleaseGateError(Exception):
@@ -109,12 +123,69 @@ def _assert_story_fields_present(detail: Optional[dict]) -> None:
         )
 
 
+def _assert_artifact_resolves(artifact_id) -> None:
+    """work-items.md REQ-04. `WorkItemSpecificationLink.artifact`/
+    `WorkItemArtifactLink.artifact` are real foreign keys to
+    `artifacts.Artifact` (models.py), so an unresolved id would fail at the
+    database level regardless — this check exists to turn that into a
+    clean UnresolvedArtifactError before the INSERT is even attempted,
+    the same role `_assert_story_fields_present` plays for REQ-17."""
+    if not Artifact.objects.filter(id=artifact_id).exists():
+        raise UnresolvedArtifactError(f'artifact {artifact_id} does not resolve to a registered artifact')
+
+
+def _record_specification_link(item: WorkItem, artifact_id, requirement_id: str) -> WorkItemSpecificationLink:
+    """Shared by create_work_item (recorded at creation) and
+    record_specification_link (recorded/replaced later) — same
+    REQ-04 check, same upsert, same outbound event, regardless of when the
+    link is set. Upsert rather than create-once: work-items.md does not
+    make the link immutable, and a Streams command redelivered with the
+    SAME (artifactId, requirementId) must be a safe no-op, per REQ-03's
+    Streams delivery semantics (`redis-streams.md`'s idempotency
+    handling)."""
+    _assert_artifact_resolves(artifact_id)
+    link, _created = WorkItemSpecificationLink.objects.update_or_create(
+        work_item=item, defaults={'artifact_id': artifact_id, 'requirement_id': requirement_id, 'updated_at': timezone.now()},
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.specification_link_recorded', work_item_id=item.id,
+        payload={'workItemId': str(item.id), 'artifactId': str(artifact_id), 'requirementId': requirement_id},
+    )
+    return link
+
+
+def _add_artifact_link(item: WorkItem, artifact_id) -> tuple[WorkItemArtifactLink, bool]:
+    """Shared by create_work_item and add_artifact_link. Idempotent on
+    (work_item, artifact) — a redelivered addArtifactLink command must not
+    create a duplicate list entry or disturb existing positions, mirroring
+    create_link's own dedupe-by-unique-edge precedent. `position` is
+    assigned here (count of existing links), never supplied by a caller —
+    REQ-02's "the order recorded"."""
+    _assert_artifact_resolves(artifact_id)
+    existing = WorkItemArtifactLink.objects.filter(work_item=item, artifact_id=artifact_id).first()
+    if existing:
+        return existing, True
+
+    next_position = WorkItemArtifactLink.objects.filter(work_item=item).count()
+    link = WorkItemArtifactLink.objects.create(
+        work_item=item, artifact_id=artifact_id, position=next_position, created_at=timezone.now(),
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.artifact_link_added', work_item_id=item.id,
+        payload={'id': str(link.id), 'workItemId': str(item.id), 'artifactId': str(artifact_id), 'position': next_position},
+    )
+    return link, False
+
+
 @transaction.atomic
 def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = write_gate.Origins.DIRECT) -> WorkItem:
     """input: { id (REQUIRED), project, type, displayName, description,
     status, priority, parentId, writesFiles, writesServices,
     storyDetail: {...} (required if type === 'story' and status is leaving
-    'proposed') }"""
+    'proposed'), specificationLink: {artifactId, requirementId} (optional,
+    work-items.md REQ-01 — "a Refinement Agent records them when it
+    creates the work item"), artifactLinks: [artifactId, ...] (optional,
+    REQ-02, order preserved) }"""
     if not input or not input.get('id'):
         raise ValidationError('createWorkItem requires an id (canonical identity)')
     if not input.get('project'):
@@ -166,6 +237,13 @@ def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = 
             value_hypothesis=story_detail.get('valueHypothesis'),
             test_measurement=story_detail.get('testMeasurement'),
         )
+
+    spec_link_input = input.get('specificationLink')
+    if spec_link_input:
+        _record_specification_link(item, spec_link_input['artifactId'], spec_link_input['requirementId'])
+
+    for artifact_id in (input.get('artifactLinks') or []):
+        _add_artifact_link(item, artifact_id)
 
     _append_history(item.id, 'status', None, status, actor or 'system')
     if input.get('assigneeAgentId'):
@@ -479,6 +557,41 @@ def attach_artifact(work_item_id, artifact_type: str, reference: str, *, actor: 
         payload={'id': str(artifact.id), 'workItemId': str(work_item_id), 'artifactType': artifact_type, 'reference': reference},
     )
     return {'id': str(artifact.id), 'workItemId': str(work_item_id), 'artifactType': artifact_type, 'reference': reference}
+
+
+# ---------------------------------------------------------------------------
+# work-items.md REQ-01/REQ-02 — specification link and artifact links (not
+# subject to the write-gate, same as artifact association/comments above:
+# neither is a status/assignment/dependency field write_gate.py governs).
+# ---------------------------------------------------------------------------
+
+@transaction.atomic
+def record_specification_link(work_item_id, artifact_id, requirement_id: str, *, actor: Optional[str] = None) -> dict:
+    """REQ-01. Sets (or replaces) the work item's single specification
+    link. Called from command_consumer.py (Streams path) and admin.py
+    (the admin-UI path — see that module's own comment on why this is a
+    direct write rather than a Streams round-trip)."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'recordSpecificationLink: no work item {work_item_id}')
+
+    link = _record_specification_link(item, artifact_id, requirement_id)
+    return {'workItemId': str(work_item_id), 'artifactId': str(link.artifact_id), 'requirementId': link.requirement_id}
+
+
+@transaction.atomic
+def add_artifact_link(work_item_id, artifact_id, *, actor: Optional[str] = None) -> dict:
+    """REQ-02. Appends one artifact link to the work item's ordered list.
+    Same two callers as record_specification_link above."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'addArtifactLink: no work item {work_item_id}')
+
+    link, deduped = _add_artifact_link(item, artifact_id)
+    return {
+        'id': str(link.id), 'workItemId': str(work_item_id), 'artifactId': str(link.artifact_id),
+        'position': link.position, 'deduped': deduped,
+    }
 
 
 # Durable per-item completion marker check, so an evidence-posting
