@@ -13,7 +13,7 @@ import uuid
 
 from workitems import project_config, registry, store, write_gate
 from workitems.envelope import Kind, build_envelope
-from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment
+from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment, WorkItemReleaseDetail
 from workitems.webhook_consumer import handle_webhook_envelope
 
 PROJECT = 'test-project'
@@ -26,9 +26,22 @@ STORY_FIELD_IDS = {
     'JIRA_OUT_OF_SCOPE_FIELD_ID': 'customfield_oos',
 }
 
+RELEASE_FIELD_IDS = {
+    'JIRA_TARGET_PROJECT_FIELD_ID': 'customfield_target_project',
+    'JIRA_RELEASE_NOTES_FIELD_ID': 'customfield_release_notes',
+    'JIRA_CANDIDATE_SHA_FIELD_ID': 'customfield_candidate_sha',
+    'JIRA_BUILD_IDENTIFIER_FIELD_ID': 'customfield_build_id',
+    'JIRA_PREVIEW_URL_FIELD_ID': 'customfield_preview_url',
+}
+
 
 def _set_story_field_env(monkeypatch):
     for env_name, field_id in STORY_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+
+
+def _set_release_field_env(monkeypatch):
+    for env_name, field_id in RELEASE_FIELD_IDS.items():
         monkeypatch.setenv(env_name, field_id)
 
 
@@ -235,19 +248,101 @@ def test_comment_on_an_untracked_issue_is_recorded_generically_not_dropped(clean
 
 
 # ---------------------------------------------------------------------------
-# Handlers 5/6 — Release requested / abandoned (scope carve-out: Django
-# interprets and republishes; ScrumMaster's existing handleReleaseRequested/
-# handleReleaseAbandoned remain the executors — see webhook_consumer.py's
-# module docstring for why).
+# Handlers 5/6 — Release requested / abandoned. BF-01 (v2.1/BUGFIXES.md)
+# narrowed the scope carve-out below: Django now ALSO materializes a
+# canonical `release` work item and its `work_item_release_detail` row from
+# the ticket's five fields (REQ-01), in addition to recording/republishing
+# `work_item.jira_release_event` unchanged. The beta-queue-clean check and
+# the Jenkins triggers remain ScrumMaster's — handleReleaseRequested/
+# handleReleaseAbandoned are still the executors — see webhook_consumer.py's
+# module docstring for why.
 # ---------------------------------------------------------------------------
 
-def test_release_ticket_created_is_recorded_and_republished(clean_db):
-    fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
+def _release_fields(summary='Release it', project=PROJECT, target_project=('ENG', 'engineering-app'),
+                     release_notes='Fixes login bug.', candidate_sha=None, build_identifier=None, preview_url=None):
+    fields = {
+        'summary': summary,
+        'issuetype': {'name': 'Release'},
+        'project': {'name': project, 'key': 'TP'},
+    }
+    if target_project is not None:
+        key, name = target_project
+        fields['customfield_target_project'] = {'key': key, 'name': name}
+    if release_notes is not None:
+        fields['customfield_release_notes'] = release_notes
+    if candidate_sha is not None:
+        fields['customfield_candidate_sha'] = candidate_sha
+    if build_identifier is not None:
+        fields['customfield_build_id'] = build_identifier
+    if preview_url is not None:
+        fields['customfield_preview_url'] = preview_url
+    return fields
+
+
+def test_release_ticket_created_materializes_a_canonical_release_work_item(clean_db, monkeypatch):
+    _set_release_field_env(monkeypatch)
+    fields = _release_fields()
     handle_webhook_envelope(envelope_for('TP-10', 'jira:issue_created', fields))
 
     event = OutboxEvent.objects.get(event_type='work_item.jira_release_event')
-    assert event.payload == {'kind': 'requested', 'jiraIssueKey': 'TP-10'}
-    assert WorkItem.objects.filter(external_key='TP-10').count() == 0, 'no canonical release type invented (scope carve-out)'
+    assert event.payload == {'kind': 'requested', 'jiraIssueKey': 'TP-10'}, \
+        'unchanged from before BF-01 — handlers.js reads Target Project/Candidate SHA off a fresh jira.getIssue() call, not this payload'
+
+    item = WorkItem.objects.get(external_key='TP-10')
+    assert item.type == 'release'
+    assert item.status == 'proposed'
+    assert item.project == 'engineering-app', 'Target Project custom field maps onto the work item\'s own project (REQ-01), not the ticket\'s own containing Jira project'
+
+    detail = WorkItemReleaseDetail.objects.get(work_item_id=item.id)
+    assert detail.release_notes == 'Fixes login bug.'
+    assert detail.candidate_sha is None, 'automation-populated field — empty until candidate cut (REQ-01)'
+    assert detail.build_identifier is None
+    assert detail.preview_url is None
+
+
+def test_release_ticket_created_without_target_project_field_falls_back_to_the_containing_jira_project(clean_db, monkeypatch):
+    _set_release_field_env(monkeypatch)
+    fields = _release_fields(target_project=None)
+    handle_webhook_envelope(envelope_for('TP-14', 'jira:issue_created', fields))
+
+    item = WorkItem.objects.get(external_key='TP-14')
+    assert item.project == registry.normalize_project_name(PROJECT)
+
+
+def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
+    _set_release_field_env(monkeypatch)
+    env = envelope_for('TP-15', 'jira:issue_created', _release_fields())
+    handle_webhook_envelope(env)
+    handle_webhook_envelope(env)  # redelivery — must not create a second work item.
+
+    assert WorkItem.objects.filter(external_key='TP-15').count() == 1
+    assert WorkItemReleaseDetail.objects.filter(work_item__external_key='TP-15').count() == 1
+
+
+def test_release_ticket_update_resyncs_candidate_fields_written_back_by_jenkins(clean_db, monkeypatch):
+    _set_release_field_env(monkeypatch)
+    handle_webhook_envelope(envelope_for('TP-16', 'jira:issue_created', _release_fields()))
+    item = WorkItem.objects.get(external_key='TP-16')
+
+    # The release-candidate Jenkins job writes Candidate SHA, Build
+    # Identifier, and Preview URL directly onto the Jira ticket
+    # (scripts/create-release-fields.sh) — an ordinary issue_updated
+    # webhook the same as any other Jira field edit.
+    updated_fields = _release_fields(candidate_sha='abc1234', build_identifier='build-42',
+                                      preview_url='https://preview.example.com/abc1234')
+    body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-16', 'fields': updated_fields},
+            'changelog': {'items': [{'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha',
+                                      'from': None, 'to': 'abc1234'}]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    detail = WorkItemReleaseDetail.objects.get(work_item_id=item.id)
+    assert detail.candidate_sha == 'abc1234'
+    assert detail.build_identifier == 'build-42'
+    assert detail.preview_url == 'https://preview.example.com/abc1234'
+    assert detail.release_notes == 'Fixes login bug.', 'unrelated field carried through from the same full-snapshot resync'
 
 
 def test_release_abandoned_is_recorded_and_republished(clean_db):

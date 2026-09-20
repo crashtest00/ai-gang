@@ -102,9 +102,30 @@ def parse_agent_field(fields: dict) -> Optional[str]:
     return value
 
 
+# The four Release fields (besides Target Project) that are plain
+# text/textarea custom fields — same env-var-driven lookup as
+# parse_story_fields's REQUIRED_STORY_FIELDS, keyed to the canonical
+# work_item_release_detail column names (BUGFIXES.md BF-01).
+RELEASE_TEXT_FIELDS = (
+    ('releaseNotes', 'JIRA_RELEASE_NOTES_FIELD_ID'),
+    ('candidateSha', 'JIRA_CANDIDATE_SHA_FIELD_ID'),
+    ('buildIdentifier', 'JIRA_BUILD_IDENTIFIER_FIELD_ID'),
+    ('previewUrl', 'JIRA_PREVIEW_URL_FIELD_ID'),
+)
+
+
 def parse_release_fields(fields: dict) -> dict[str, Optional[str]]:
-    """Release ticket fields.
-    Target Project is a Jira project-picker field: {key, name, ...}."""
+    """The five-field Release schema contract
+    (`scripts/create-release-fields.sh`): Target Project, Release Notes,
+    Candidate SHA, Build Identifier, Preview URL. Target Project is a Jira
+    project-picker field: {key, name, ...} — the caller maps it onto the
+    work item's own `project` (canonical-release-workflow.md REQ-01;
+    `work_item_release_detail` has no column for it). The other four are
+    plain text/textarea fields, read via `_text_field` exactly like
+    parse_story_fields's text fields — `adf_to_text` already handles a
+    plain string (Jira Cloud's textarea/textfield custom field types
+    return a plain string, not ADF, unlike the native description/comment
+    fields)."""
     fields = fields or {}
     target_project_field = _field_id('JIRA_TARGET_PROJECT_FIELD_ID')
     target_project_value = fields.get(target_project_field) if target_project_field else None
@@ -115,10 +136,10 @@ def parse_release_fields(fields: dict) -> dict[str, Optional[str]]:
         target_project_key = target_project_value
         target_project_name = None
 
-    candidate_sha_field = _field_id('JIRA_CANDIDATE_SHA_FIELD_ID')
-
-    return {
+    result: dict[str, Optional[str]] = {
         'targetProjectKey': target_project_key,
         'targetProjectName': target_project_name,
-        'candidateSha': (fields.get(candidate_sha_field) or None) if candidate_sha_field else None,
     }
+    for key, env_name in RELEASE_TEXT_FIELDS:
+        result[key] = _text_field(fields, env_name)
+    return result
