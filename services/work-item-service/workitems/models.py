@@ -224,6 +224,102 @@ class WorkItemArtifact(models.Model):
         return f'{self.artifact_type}:{self.reference}'
 
 
+class WorkItemSpecificationLink(models.Model):
+    """work-items.md REQ-01 — a work item's link BACK to the artifact and
+    requirement id it was created to satisfy. The opposite direction from
+    `WorkItemArtifact` (REQ-06, above), which records what a work item
+    PRODUCED; deliberately a separate table rather than reusing that one
+    (work-items.md §4, "Why not reuse REQ-06's table"). At most one per
+    work item (work-items.md §4, "Cardinality"), so this is a 1:1 optional
+    child table keyed by the parent's own primary key — the same shape as
+    `WorkItemStoryDetail`/`WorkItemReleaseDetail`, not new in kind, just new
+    in this version. Not part of the original Node port (module docstring);
+    added by V4.
+
+    `artifact` is a real foreign key into the ingress app's own table
+    (`artifacts.Artifact`) rather than a bare UUID column — this is the
+    schema-level "a referenced artifact must resolve" guarantee (REQ-04):
+    the database itself refuses a row naming an artifact id that does not
+    exist. `on_delete=PROTECT`, not CASCADE: V4 never deletes an artifact
+    record, but if that ever changed, silently dropping a work item's
+    specification link because someone deleted the artifact it points to
+    would be the wrong failure mode — refusing the delete is.
+    """
+
+    work_item = models.OneToOneField(
+        WorkItem, primary_key=True, on_delete=models.CASCADE,
+        db_column='work_item_id', related_name='specification_link',
+    )
+    artifact = models.ForeignKey(
+        # No reverse accessor onto Artifact (related_name='+'): the
+        # artifacts app owns Artifact's own field set (see its own
+        # test_no_record_field_is_derived_from_content, which enumerates
+        # it exactly) and nothing in this app ever queries FROM an
+        # artifact backward — every lookup here starts from the
+        # work-item side.
+        'artifacts.Artifact', on_delete=models.PROTECT, db_column='artifact_id', related_name='+',
+    )
+    # Opaque, unvalidated string (e.g. "REQ-18") — work-items.md §4, "The
+    # requirement id is a string by design".
+    requirement_id = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'work_item_specification_link'
+        indexes = [
+            # Backs the REQ-06 forward query: enumerate every work item
+            # recording a given (artifact id, requirement id) pair.
+            models.Index(fields=['artifact', 'requirement_id'], name='idx_wi_spec_link_artifact_req'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.work_item_id} -> {self.artifact_id} ({self.requirement_id})'
+
+
+class WorkItemArtifactLink(models.Model):
+    """work-items.md REQ-02 — the ordered list of artifacts that INFORM a
+    work item (what it depends on), as distinct from `WorkItemArtifact`
+    (what it produced). A small child table with a `position` column,
+    per work-items.md §4's open storage choice — the natural fit for
+    "returns all three by its canonical id, in the order recorded"
+    (REQ-02's acceptance). Not part of the original Node port; added by V4.
+
+    Same schema-level REQ-04 guarantee as `WorkItemSpecificationLink`: a
+    real foreign key to `artifacts.Artifact`, `on_delete=PROTECT`.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    work_item = models.ForeignKey(
+        WorkItem, on_delete=models.DO_NOTHING, db_column='work_item_id', related_name='artifact_links',
+    )
+    artifact = models.ForeignKey(
+        # See WorkItemSpecificationLink.artifact's comment on related_name='+'.
+        'artifacts.Artifact', on_delete=models.PROTECT, db_column='artifact_id', related_name='+',
+    )
+    # 0-based, assigned as len(existing links) at insertion time — "the
+    # order recorded" (REQ-02), not a value callers supply.
+    position = models.PositiveIntegerField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'work_item_artifact_link'
+        ordering = ['position']
+        indexes = [
+            models.Index(fields=['work_item', 'position'], name='idx_wi_artifact_link_item'),
+        ]
+        constraints = [
+            # The same artifact is not linked to the same work item twice;
+            # also the idempotent-redelivery guard `add_artifact_link`
+            # relies on, mirroring `WorkItemLink`'s own unique-edge
+            # constraint (store.create_link's precedent).
+            models.UniqueConstraint(fields=['work_item', 'artifact'], name='idx_wi_artifact_link_unique'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.work_item_id} -> artifact {self.artifact_id} (#{self.position})'
+
+
 class WorkItemComment(models.Model):
     """Comment-thread communication contract.
     `source_message_id` is the idempotency key for redelivered

@@ -14,7 +14,8 @@ from __future__ import annotations
 from typing import Any
 
 from .models import (
-    WorkItemArtifact, WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail, WorkItemStoryDetail,
+    WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail,
+    WorkItemSpecificationLink, WorkItemStoryDetail,
 )
 
 
@@ -100,6 +101,30 @@ def serialize_artifact(row: WorkItemArtifact) -> dict:
     }
 
 
+def serialize_specification_link(link: WorkItemSpecificationLink | None) -> dict | None:
+    """work-items.md REQ-01. `None` when the work item carries no
+    specification link — the field is optional (§3, "A work item MAY
+    carry one link")."""
+    if link is None:
+        return None
+    return {
+        'work_item_id': str(link.work_item_id),
+        'artifact_id': str(link.artifact_id),
+        'requirement_id': link.requirement_id,
+    }
+
+
+def serialize_artifact_link(link: WorkItemArtifactLink) -> dict:
+    """work-items.md REQ-02."""
+    return {
+        'id': str(link.id),
+        'work_item_id': str(link.work_item_id),
+        'artifact_id': str(link.artifact_id),
+        'position': link.position,
+        'created_at': _iso(link.created_at),
+    }
+
+
 def serialize_comment(row: WorkItemComment) -> dict:
     return {
         'id': str(row.id),
@@ -115,7 +140,8 @@ def serialize_comment(row: WorkItemComment) -> dict:
 
 def serialize_work_item_full(full: dict) -> dict:
     """`full` is readstore.get_work_item_full()'s return shape:
-    {'item', 'storyDetail', 'links', 'history', 'artifacts', 'comments'}."""
+    {'item', 'storyDetail', 'links', 'history', 'artifacts', 'comments',
+    'specificationLink', 'artifactLinks'}."""
     body = serialize_work_item(full['item'])
     body['storyDetail'] = serialize_story_detail(full['storyDetail'])
     body['releaseDetail'] = serialize_release_detail(full.get('releaseDetail'))
@@ -123,4 +149,35 @@ def serialize_work_item_full(full: dict) -> dict:
     body['history'] = [serialize_history(h) for h in full['history']]
     body['artifacts'] = [serialize_artifact(a) for a in full['artifacts']]
     body['comments'] = [serialize_comment(c) for c in full['comments']]
+    body['specification_link'] = serialize_specification_link(full.get('specificationLink'))
+    body['artifact_links'] = [serialize_artifact_link(a) for a in full.get('artifactLinks', [])]
+    return body
+
+
+def serialize_work_item_with_references(item, specification_link, artifact_links: list) -> dict:
+    """work-items.md REQ-01/REQ-02/REQ-05 — both references appear on the
+    BARE (non-`?full=true`) single-item read too, not only the full one:
+    "any agent handling that work item can read them by its canonical id"
+    (REQ-05) should not require opting into the full record. Used by
+    views.get_work_item's non-full branch only — the plain `GET
+    /work-items` list endpoint keeps calling serialize_work_item() directly
+    and is therefore unaffected (compatibility, PRD §10)."""
+    body = serialize_work_item(item)
+    body['specification_link'] = serialize_specification_link(specification_link)
+    body['artifact_links'] = [serialize_artifact_link(a) for a in artifact_links]
+    return body
+
+
+def serialize_work_item_with_associations(item) -> dict:
+    """work-items.md REQ-06's forward query only (views.list_work_items,
+    when `specArtifactId`/`requirementId` are supplied): "every work item
+    recording that link, and every delivery artifact associated with each,
+    is enumerable" — so this list variant includes the specification link
+    and the REQ-06 delivery associations (`work_item_artifact`) alongside
+    the bare fields. `item.specification_link`/`item.artifacts` are
+    expected to already be select_related/prefetch_related by the caller
+    (readstore.list_work_items) — see that function's own comment."""
+    body = serialize_work_item(item)
+    body['specification_link'] = serialize_specification_link(getattr(item, 'specification_link', None))
+    body['artifacts'] = [serialize_artifact(a) for a in item.artifacts.all()]
     return body

@@ -22,6 +22,26 @@ generally.
 WorkItemHistory, AccessLog, and OutboxEvent are registered read-only:
 they are this service's own append-only/operational records, not things a
 human should hand-edit.
+
+**work-items.md REQ-03/REQ-08 tension (V4).** REQ-03 requires recording a
+specification link or artifact link to "travel as a durably queued Streams
+command... whether the caller is a human-facing interface or an agent."
+Read narrowly, that would require WorkItemSpecificationLinkAdmin/
+WorkItemArtifactLinkAdmin (below) to publish onto Streams from inside a
+request handler and wait for the async consumer to apply it before the
+admin page can report success — a synchronous-write-over-an-async-channel
+shape nothing else in this file does. Every other admin-UI write in this
+module instead calls store.py directly (internal-work-item-service.md
+REQ-08's carve-out: REQ-03 is scoped to writes where "at least one party is
+an agent," and an authenticated admin session has no agent party), and
+still gets REQ-05/REQ-06's history+outbox-event guarantee via store.py.
+The two new admins below follow that SAME established precedent rather
+than inventing a Streams round-trip found nowhere else in this codebase:
+a direct call to store.record_specification_link/store.add_artifact_link,
+which still enforces REQ-04's resolution check (both via the real foreign
+key and via that function's own pre-check) and still emits the same
+outbound event a Streams-originated write produces. Flagged for the
+audit rather than resolved silently, per this track's build brief.
 """
 
 from __future__ import annotations
@@ -37,7 +57,8 @@ from django.utils import timezone
 from . import project_config, store, write_gate
 from .models import (
     AccessLog, OutboxEvent, ProjectConfig, ProjectStatusConfig, WebhookFailure, WorkItem, WorkItemArtifact,
-    WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail, WorkItemStoryDetail,
+    WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail,
+    WorkItemSpecificationLink, WorkItemStoryDetail,
 )
 
 
@@ -164,6 +185,39 @@ class WorkItemCommentInline(admin.TabularInline):
         return False  # see WorkItemArtifactInline's comment — use WorkItemComment admin.
 
 
+class WorkItemSpecificationLinkInline(admin.StackedInline):
+    """work-items.md REQ-01. Read-only for visibility on the work item's
+    own change page, same reasoning as WorkItemArtifactInline just above:
+    adding/changing it here would bypass store.record_specification_link's
+    REQ-04 check and outbox-event publication — use the dedicated
+    WorkItemSpecificationLink admin (below), which routes through
+    store.py."""
+
+    model = WorkItemSpecificationLink
+    can_delete = False
+    extra = 0
+    fields = ('artifact', 'requirement_id', 'created_at', 'updated_at')
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class WorkItemArtifactLinkInline(admin.TabularInline):
+    """work-items.md REQ-02. Same read-only-plus-dedicated-admin split as
+    WorkItemArtifactInline."""
+
+    model = WorkItemArtifactLink
+    fk_name = 'work_item'
+    extra = 0
+    can_delete = False
+    fields = ('artifact', 'position', 'created_at')
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(WorkItem)
 class WorkItemAdmin(admin.ModelAdmin):
     list_display = ('display_name', 'type', 'project', 'status', 'assignee_agent_id', 'priority', 'external_key', 'updated_at')
@@ -172,7 +226,8 @@ class WorkItemAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
     form = WorkItemAdminForm
     inlines = [WorkItemStoryDetailInline, WorkItemReleaseDetailInline, WorkItemLinkFromInline, WorkItemLinkToInline,
-               WorkItemArtifactInline, WorkItemCommentInline, WorkItemHistoryInline]
+               WorkItemArtifactInline, WorkItemCommentInline, WorkItemHistoryInline,
+               WorkItemSpecificationLinkInline, WorkItemArtifactLinkInline]
     fields = ('id', 'project', 'type', 'display_name', 'description', 'status', 'assignee_agent_id',
                'priority', 'writes_files', 'writes_services', 'parent', 'external_key', 'created_at', 'updated_at')
 
@@ -211,10 +266,14 @@ class WorkItemAdmin(admin.ModelAdmin):
         already has a real, saved pk (i.e., on the change/edit form, where
         `_create_formsets` builds inlines from an existing `obj` and there
         is no pre/post-validation id mismatch) — so they're hidden here on
-        add. Every other inline here (links, artifacts, comments, history)
-        is a normal FK, not a same-table pk, and unaffected."""
+        add. WorkItemSpecificationLinkInline has the exact same shape
+        (OneToOneField(primary_key=True) to WorkItem) and is hidden on add
+        for the identical reason. Every other inline here (links, artifacts,
+        artifact links, comments, history) is a normal FK, not a same-table
+        pk, and unaffected."""
         if obj is None:
-            return [i for i in self.inlines if i not in (WorkItemStoryDetailInline, WorkItemReleaseDetailInline)]
+            return [i for i in self.inlines
+                    if i not in (WorkItemStoryDetailInline, WorkItemReleaseDetailInline, WorkItemSpecificationLinkInline)]
         return self.inlines
 
     def get_readonly_fields(self, request, obj=None):
@@ -353,6 +412,76 @@ class WorkItemArtifactAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False  # artifacts are immutable associations once recorded.
+
+
+@admin.register(WorkItemSpecificationLink)
+class WorkItemSpecificationLinkAdmin(admin.ModelAdmin):
+    """work-items.md REQ-01/REQ-03 — where a human links a story (or any
+    work item) to the requirement it was created to satisfy. A direct
+    write, same as WorkItemArtifactAdmin/WorkItemCommentAdmin just above:
+    REQ-03's Streams-only rule ("whether the caller is a human-facing
+    interface or an agent") is written for the internal-work-item-service.md
+    REQ-08 carve-out this admin already operates under for every other
+    field — no agent is a party to an admin-UI write, so REQ-08 governs
+    here, not REQ-03. See this module's own top-of-file comment and the
+    build report for the fuller account of that tension.
+
+    `artifact` uses raw_id_fields rather than autocomplete_fields: the
+    Artifact admin (a different app, out of this track's ownership) has no
+    search_fields configured, which autocomplete_fields requires.
+    save_model still runs store.record_specification_link's REQ-04 check
+    on this path (the instance's own admin form validation already
+    enforces it too, since `artifact` is a real ForeignKey — this call is
+    the belt to that form-level braces, and the same call every other
+    write path uses)."""
+
+    list_display = ('work_item', 'artifact', 'requirement_id', 'updated_at')
+    autocomplete_fields = ('work_item',)
+    raw_id_fields = ('artifact',)
+    readonly_fields = ('created_at', 'updated_at')
+
+    def save_model(self, request, obj, form, change):
+        try:
+            store.record_specification_link(obj.work_item_id, obj.artifact_id, obj.requirement_id, actor=_actor(request))
+        except Exception as err:
+            _raise_as_form_error(err)
+
+
+@admin.register(WorkItemArtifactLink)
+class WorkItemArtifactLinkAdmin(admin.ModelAdmin):
+    """work-items.md REQ-02/REQ-03 — where a human links an artifact that
+    informs a work item. Same direct-write pattern and same REQ-03/REQ-08
+    reasoning as WorkItemSpecificationLinkAdmin above.
+
+    No dedupe-message branch here (contrast WorkItemLinkAdmin above, which
+    has one for its own idempotent create_link): WorkItemArtifactLink's
+    (work_item, artifact) UniqueConstraint makes Django's ModelForm reject
+    a duplicate submission during form validation, before save_model ever
+    runs — confirmed by test_work_item_references_admin.py's own dedupe
+    test, which observes a 200-with-form-error, never save_model's
+    `deduped` branch. store.add_artifact_link's own idempotent-redelivery
+    behavior still matters on the Streams command path (command_consumer.py),
+    which has no ModelForm to validate against."""
+
+    list_display = ('work_item', 'artifact', 'position', 'created_at')
+    autocomplete_fields = ('work_item',)
+    raw_id_fields = ('artifact',)
+    readonly_fields = ('position', 'created_at')
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            obj.save()
+            return
+        try:
+            result = store.add_artifact_link(obj.work_item_id, obj.artifact_id, actor=_actor(request))
+        except Exception as err:
+            _raise_as_form_error(err)
+            return
+        obj.id = uuid.UUID(result['id'])
+        obj.position = result['position']
+
+    def has_change_permission(self, request, obj=None):
+        return False  # artifact links are immutable associations once recorded, same as WorkItemArtifactAdmin.
 
 
 @admin.register(WorkItemComment)

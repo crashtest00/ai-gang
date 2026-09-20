@@ -25,7 +25,10 @@ from django.views.decorators.http import require_http_methods
 
 from . import project_config, readstore, registry, relay, store, write_gate
 from .envelope import Kind, build_envelope
-from .serializers import serialize_work_item, serialize_work_item_full
+from .serializers import (
+    serialize_work_item, serialize_work_item_full, serialize_work_item_with_associations,
+    serialize_work_item_with_references,
+)
 from .streams import classify_health, health as stream_health, publish
 
 CLIENT_ERROR_CODES = {
@@ -171,20 +174,46 @@ def get_work_item(request, work_item_id):
     item = readstore.get_work_item(work_item_id, actor=actor)
     if not item:
         return JsonResponse({'error': 'not found'}, status=404)
-    return JsonResponse(serialize_work_item(item))
+    specification_link = readstore.get_specification_link(work_item_id, actor=actor)
+    artifact_links = readstore.list_artifact_links(work_item_id, actor=actor)
+    return JsonResponse(serialize_work_item_with_references(item, specification_link, artifact_links))
 
 
 @require_http_methods(['GET'])
 def list_work_items(request):
+    """`specArtifactId`/`requirementId` are work-items.md REQ-06's forward
+    query (see urls.py's module docstring) — when either is supplied, each
+    result is serialized with its specification link and REQ-06 delivery
+    associations included, per that requirement's acceptance. Absent both,
+    behavior (and response shape) is unchanged."""
     actor = request.headers.get('X-Actor', 'http-client')
+    spec_artifact_id = request.GET.get('specArtifactId')
+    requirement_id = request.GET.get('requirementId')
     rows = readstore.list_work_items(
         project=request.GET.get('project'),
         status=request.GET.get('status'),
         assignee_agent_id=request.GET.get('assigneeAgentId'),
         parent_id=request.GET.get('parentId'),
+        spec_artifact_id=spec_artifact_id,
+        requirement_id=requirement_id,
         actor=actor,
     )
+    if spec_artifact_id or requirement_id:
+        return JsonResponse([serialize_work_item_with_associations(r) for r in rows], safe=False)
     return JsonResponse([serialize_work_item(r) for r in rows], safe=False)
+
+
+@require_http_methods(['GET'])
+def get_specification_link_for_delivery_artifact(request, work_item_artifact_id):
+    """work-items.md REQ-06 (AC-04) — backward traceability. Addressed by
+    the `work_item_artifact` association's OWN id (the delivery-evidence
+    row REQ-06 already links a work item forward to what it produced), not
+    by the work item's id — see urls.py's module docstring."""
+    actor = request.headers.get('X-Actor', 'http-client')
+    result = readstore.get_specification_link_for_delivery_artifact(work_item_artifact_id, actor=actor)
+    if result is None:
+        return JsonResponse({'error': 'not found'}, status=404)
+    return JsonResponse(result)
 
 
 @csrf_exempt
