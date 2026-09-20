@@ -14,14 +14,23 @@
  * arrives. request-artifact.js is run as a real child process talking to
  * real Redis throughout; no internal function is called in its place.
  *
- * Run (needs the `redis` package resolvable — the project containers get
- * it from a global npm install per Docker Templates/Dockerfile-node.template;
- * locally, install it the same way and point NODE_PATH at it):
+ * Run through setup/lib/test.sh (needs the `redis` package resolvable —
+ * the project containers get it from a global npm install per
+ * Docker Templates/Dockerfile-node.template; locally, install it the same
+ * way and point NODE_PATH at it):
  *   sudo npm install -g redis
- *   NODE_PATH=$(npm root -g) node --test setup/lib/request-artifact.test.js
+ *   setup/lib/test.sh
+ *
+ * setup/lib/test.sh, not a bare `node --test` invocation, because these
+ * tests share the real test Redis (REDIS_TEST_URL above) with
+ * services/work-item-service's own suite and write to the real
+ * aigang:librarian:requests/:responses stream names a live librarian
+ * consumer also reads (V4 audit Pass 2 row 35) — the script holds the
+ * same /tmp/v4-wis-suite.lock that suite's run_tests.sh does, so the two
+ * never run concurrently against the shared container.
  */
 
-const { test, before, beforeEach, after } = require('node:test');
+const { test, before, beforeEach, afterEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFile } = require('node:child_process');
 const path = require('node:path');
@@ -35,6 +44,8 @@ const REQUEST_STREAM = 'aigang:librarian:requests';
 const RESPONSE_STREAM = 'aigang:librarian:responses';
 
 let client;
+let requestStreamStartId;
+let responseStreamStartId;
 
 before(async () => {
   client = createClient({ url: REDIS_URL });
@@ -45,12 +56,33 @@ after(async () => {
   await client.quit();
 });
 
-// Flushed before each test, exactly like the Python suite's own
-// `redis_client` fixture (services/work-item-service/conftest.py) — a
-// Streams test must never see another test's leftover entries.
+// These streams are the real, shared aigang:librarian:requests/:responses
+// names a live librarian consumer also reads — `flushDb()` between tests
+// would be a bigger hammer than this file owns: it would erase whatever
+// unrelated state that consumer, or a concurrent test run of another
+// suite against this same test Redis, currently has. Instead, record each
+// stream's last-generated-id before the test runs...
 beforeEach(async () => {
-  await client.flushDb();
+  requestStreamStartId = await lastId(REQUEST_STREAM);
+  responseStreamStartId = await lastId(RESPONSE_STREAM);
 });
+
+// ...and afterward, delete exactly the entries this test added (V4 audit
+// Pass 2 row 35) — never entries any other producer or consumer put there
+// or left behind. This is what keeps a test's request/response envelopes
+// from lingering for a real librarian consumer to pick up after the test
+// process exits.
+afterEach(async () => {
+  await trimStreamSince(REQUEST_STREAM, requestStreamStartId);
+  await trimStreamSince(RESPONSE_STREAM, responseStreamStartId);
+});
+
+async function trimStreamSince(stream, sinceId) {
+  const entries = await client.xRange(stream, `(${sinceId}`, '+');
+  if (entries.length > 0) {
+    await client.xDel(stream, entries.map(e => e.id));
+  }
+}
 
 function runHelper(args, extraEnv = {}) {
   return new Promise(resolve => {

@@ -159,9 +159,12 @@ def serialize_work_item_with_references(item, specification_link, artifact_links
     BARE (non-`?full=true`) single-item read too, not only the full one:
     "any agent handling that work item can read them by its canonical id"
     (REQ-05) should not require opting into the full record. Used by
-    views.get_work_item's non-full branch only — the plain `GET
-    /work-items` list endpoint keeps calling serialize_work_item() directly
-    and is therefore unaffected (compatibility, PRD §10)."""
+    views.get_work_item's non-full branch, and by views.list_work_items'
+    `externalKey` branch (V4 audit Pass 2 row 33) for the same reason — a
+    dispatched agent resolving its canonical id from the issue key needs
+    the references in that same read. The plain, unfiltered `GET
+    /work-items` list keeps calling serialize_work_item() directly and is
+    therefore unaffected (compatibility, PRD §10)."""
     body = serialize_work_item(item)
     body['specification_link'] = serialize_specification_link(specification_link)
     body['artifact_links'] = [serialize_artifact_link(a) for a in artifact_links]

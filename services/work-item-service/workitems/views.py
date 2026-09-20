@@ -184,11 +184,20 @@ def list_work_items(request):
     """`specArtifactId`/`requirementId` are work-items.md REQ-06's forward
     query (see urls.py's module docstring) — when either is supplied, each
     result is serialized with its specification link and REQ-06 delivery
-    associations included, per that requirement's acceptance. Absent both,
-    behavior (and response shape) is unchanged."""
+    associations included, per that requirement's acceptance.
+
+    `externalKey` is work-items.md REQ-05's canonical-id lookup (V4 audit
+    Pass 2 row 33): a dispatched agent's prompt carries the issue key, not
+    the work item's canonical id (`services/scrummaster/src/prompt.js`), so
+    this filter's result carries the REQ-01/REQ-02 references too — the
+    same shape `get_work_item`'s bare (non-`?full=true`) read already
+    returns, via the same `serialize_work_item_with_references`.
+
+    Absent all three, behavior (and response shape) is unchanged."""
     actor = request.headers.get('X-Actor', 'http-client')
     spec_artifact_id = request.GET.get('specArtifactId')
     requirement_id = request.GET.get('requirementId')
+    external_key = request.GET.get('externalKey')
     rows = readstore.list_work_items(
         project=request.GET.get('project'),
         status=request.GET.get('status'),
@@ -196,10 +205,17 @@ def list_work_items(request):
         parent_id=request.GET.get('parentId'),
         spec_artifact_id=spec_artifact_id,
         requirement_id=requirement_id,
+        external_key=external_key,
         actor=actor,
     )
     if spec_artifact_id or requirement_id:
         return JsonResponse([serialize_work_item_with_associations(r) for r in rows], safe=False)
+    if external_key:
+        return JsonResponse([
+            serialize_work_item_with_references(
+                r, getattr(r, 'specification_link', None), list(r.artifact_links.all())
+            ) for r in rows
+        ], safe=False)
     return JsonResponse([serialize_work_item(r) for r in rows], safe=False)
 
 

@@ -30,12 +30,22 @@ browse or search for one: you are given its canonical id, and you ask for
 it by that id alone.
 
 **Finding the id.** The internal work-item record behind your ticket can
-carry a list of linked artifacts, but your dispatch prompt does not carry
-that record's own id — only the Jira issue key — and there is no lookup
-from the key to the record yet. Until that exists, an artifact your ticket
-depends on is named directly in the ticket text your prompt already gives
-you: its description, acceptance criteria, or comment thread. Only request
-an id you find stated there — never guess or invent one.
+carry a list of linked artifacts. Your dispatch prompt's `Jira issue key`
+line is the key to resolve that record with — look it up on the work-item
+service, reachable from your container on the shared `ai-gang` Docker
+network:
+
+```bash
+curl -s "http://work-item-service:9100/work-items?project=$PROJECT_NAME&externalKey=<the key from your prompt>"
+```
+
+A match comes back with its `specification_link` and `artifact_links`
+already attached — read the artifact ids straight from that response. An
+empty list means your project has no Jira integration, so the key your
+prompt gave you already IS the record's own canonical id: use it directly
+with `GET /work-items/<that id>` instead — same host and port. Either way,
+only request an `artifact_id` you found in that record — never guess or
+invent one, and never fall back to parsing the ticket text for one.
 
 **Asking for it:**
 
@@ -66,7 +76,7 @@ have it.
 
 **On failure**, the command exits non-zero and prints the reason to
 stderr: `unknown_artifact` (the id does not resolve — recheck it against
-the ticket text before retrying), `path_outside_repository` (the path you
+the work-item record before retrying), `path_outside_repository` (the path you
 asked for escaped `/workspace`, was absolute, or named `.git`/
 `node_modules` — retry with a plain path under your own working tree), or
 `copy_failed` (the librarian could not complete the write — worth one

@@ -32,8 +32,21 @@ You work inside a Docker container with:
 A ticket occasionally hands you an artifact instead of describing everything
 in prose — a signing profile, a CI config fragment, a build asset — already
 uploaded to the platform's artifact store. There is no browse or search:
-the ticket text names the artifact's canonical id, and you ask for it by
-that id alone.
+the work item behind your ticket names the artifact's canonical id, and you
+ask for it by that id alone.
+
+Your dispatch prompt's `Jira issue key` line resolves that work item, on
+the work-item service reachable from your container over the shared
+`ai-gang` Docker network:
+
+```bash
+curl -s "http://work-item-service:9100/work-items?project=$PROJECT_NAME&externalKey=<the key from your prompt>"
+```
+
+A match's `specification_link`/`artifact_links` name the ids to request. An
+empty list means your project has no Jira integration, so the key itself
+already IS the record's canonical id — call `GET /work-items/<that id>`
+instead, same host and port.
 
 ```bash
 node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
@@ -48,7 +61,7 @@ safe — you get that same path back, never a second copy. `requestedBy` is
 filled in automatically from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME`).
 
 On failure the command exits non-zero and names the reason on stderr:
-`unknown_artifact` (recheck the id against the ticket text),
+`unknown_artifact` (recheck the id against the work-item record),
 `path_outside_repository` (retry with a plain path under `/workspace`), or
 `copy_failed` (worth one retry). A timeout prints its own message.
 

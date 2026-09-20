@@ -114,6 +114,7 @@ def models_q_from_or_to(work_item_id):
 def list_work_items(*, project: Optional[str] = None, status: Optional[str] = None,
                      assignee_agent_id: Optional[str] = None, parent_id=None,
                      spec_artifact_id=None, requirement_id: Optional[str] = None,
+                     external_key: Optional[str] = None,
                      actor: Optional[str] = None) -> list[WorkItem]:
     """In Jira mode, the internal canonical store must remain
     queryable, using its own last-synced state regardless of whether
@@ -124,7 +125,15 @@ def list_work_items(*, project: Optional[str] = None, status: Optional[str] = No
     `spec_artifact_id`/`requirement_id` are work-items.md REQ-06's forward
     query: given an (artifact id, requirement id) pair, enumerate every
     work item recording that specification link. A direct read, like every
-    other filter this function already applies — no Streams involved."""
+    other filter this function already applies — no Streams involved.
+
+    `external_key` is work-items.md REQ-05's canonical-id lookup (V4 audit
+    Pass 2 row 33): a dispatched agent's prompt carries the issue key
+    (`services/scrummaster/src/prompt.js`), never the work item's canonical
+    id, and in Jira mode that key is this column's exact value — an
+    unambiguous filter, since `WorkItem.external_key` is unique. Combinable
+    with `project`, though the uniqueness already narrows the match to at
+    most one row."""
     qs = WorkItem.objects.all()
     if project:
         qs = qs.filter(project=project)
@@ -134,6 +143,8 @@ def list_work_items(*, project: Optional[str] = None, status: Optional[str] = No
         qs = qs.filter(assignee_agent_id=assignee_agent_id)
     if parent_id:
         qs = qs.filter(parent_id=parent_id)
+    if external_key:
+        qs = qs.filter(external_key=external_key)
     if spec_artifact_id:
         qs = qs.filter(specification_link__artifact_id=spec_artifact_id)
     if requirement_id:
@@ -144,6 +155,13 @@ def list_work_items(*, project: Optional[str] = None, status: Optional[str] = No
         # each result's work_item_artifact rows too, so fetch them
         # together rather than forcing a query per row.
         qs = qs.select_related('specification_link').prefetch_related('artifacts')
+    if external_key:
+        # REQ-05: "any agent handling that work item can read them by its
+        # canonical id" — the whole point of this filter is to let a
+        # dispatched agent read the REQ-01/REQ-02 references it needs, so
+        # fetch them together with the match rather than forcing the agent
+        # into a second request per reference.
+        qs = qs.select_related('specification_link').prefetch_related('artifact_links')
 
     from django.db.models import Case, When, Value, IntegerField
     # Most-urgent-first

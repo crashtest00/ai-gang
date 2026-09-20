@@ -6,17 +6,23 @@
 // the scrummaster package. Schema must stay identical to the ScrumMaster
 // copy.
 //
-// ARTIFACT_DELIVERY_REQUEST/ARTIFACT_DELIVERY_RESPONSE are this copy's one
-// intentional addition beyond that parity, added for request-artifact.js
-// (V4 agent-facing artifact access). They mirror
+// ARTIFACT_DELIVERY_REQUEST/ARTIFACT_DELIVERY_RESPONSE, added here for
+// request-artifact.js (V4 agent-facing artifact access), also carry over
+// to services/scrummaster/src/envelope.js's KIND (V4 audit Pass 2 row 34)
+// so that parity holds for this pair too. They mirror
 // services/work-item-service/workitems/envelope.py's Kind.ARTIFACT_DELIVERY_REQUEST /
 // Kind.ARTIFACT_DELIVERY_RESPONSE byte-for-byte (same strings), which
 // already validates a librarian delivery envelope exactly as it validates
-// a work-item command (that module's own docstring). services/scrummaster/src/envelope.js
-// does not yet carry them — ScrumMaster is out of this track's scope to
-// change — so this copy is, for now, not identical to it for this one
-// kind pair; see the request-artifact.js build report for the proposal to
-// reconcile that.
+// a work-item command (that module's own docstring). ScrumMaster consumes
+// neither kind; they exist in its copy only to keep the two schemas
+// identical.
+//
+// Not yet true of the whole KIND set, though: WORK_ITEM_COMMAND/
+// WORK_ITEM_EVENT are in the ScrumMaster copy's KIND but not this one — a
+// gap present since this file's initial import, unrelated to row 34 or PR
+// #21, and outside that fix's file ownership (row 34 covers this header
+// note only). Flagged as a proposal in that fix's report for its own
+// audit row rather than changed here.
 
 const crypto = require('crypto');
 
