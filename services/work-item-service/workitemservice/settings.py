@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     'django.contrib.postgres',
     'workitems',
     'artifacts',
+    'librarian',
 ]
 
 MIDDLEWARE = [
@@ -155,6 +156,22 @@ RELAY_ROW_DELAY_MS = int(os.environ.get('RELAY_ROW_DELAY_MS', '0'))  # test-only
 # docker-compose.yml; the test suite points it at a temp directory instead.
 # Layout under this root is documented in artifacts/README.md.
 ARTIFACT_ROOT = os.environ.get('ARTIFACT_ROOT', '/var/lib/aigang/artifacts')
+
+
+# --- Librarian (artifact delivery on request) ----------------------------
+# The root of the mounted projects directory. Every project repository is
+# one directory directly under it, which is what a delivery request's
+# `destination_repo` names (librarian/README.md). Mounted read-write in
+# docker-compose.yml (the librarian writes delivered files into a
+# repository's working tree) from the Source checkout's own `projects/`
+# directory, alongside the artifact volume mounted read-only.
+PROJECTS_ROOT = os.environ.get('PROJECTS_ROOT', '/var/lib/aigang/projects')
+
+# Test-only: milliseconds the librarian sleeps while holding its
+# per-(artifact, repository) advisory lock, so a test can make two
+# requests genuinely overlap. Zero in every deployment — the same knob
+# shape as RELAY_ROW_DELAY_MS above.
+LIBRARIAN_LOCK_HOLD_DELAY_MS = int(os.environ.get('LIBRARIAN_LOCK_HOLD_DELAY_MS', '0'))
 
 
 # --- Logging -------------------------------------------------------------

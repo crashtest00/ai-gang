@@ -11,6 +11,9 @@
 #   - relay      — outbox relay, its own container so it can be
 #                   killed/restarted independently of api/consumers
 #   - consumers  — Streams command + webhook consumers
+#   - librarian  — artifact-delivery subscriber, its own container because
+#                   it is the only one that mounts the project
+#                   repositories (strategy/v4.0/features/librarian.md §4)
 services:
   workitem-postgres:
     image: postgres:16-alpine
@@ -92,6 +95,40 @@ services:
     command: python manage.py run_consumers
     volumes:
       - ../scrummaster/config:/app/config:ro
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  librarian:
+    build: .
+    container_name: workitem-librarian
+    env_file: .env
+    command: python manage.py run_librarian
+    environment:
+      # Both roots the librarian works between, stated here so the mounts
+      # below and the settings they have to match are checkable in one
+      # place (same reason `api` states ARTIFACT_ROOT).
+      - ARTIFACT_ROOT=/var/lib/aigang/artifacts
+      - PROJECTS_ROOT=/var/lib/aigang/projects
+    volumes:
+      - ../scrummaster/config:/app/config:ro
+      # The artifact volume, READ-ONLY. The librarian only ever copies
+      # OUT of it; upload is the admin's, on `api` (PRD §7.1, "upload is
+      # the only way in"). `:ro` is what makes that a property of the
+      # deployment rather than of this app's good behaviour.
+      - artifact-data:/var/lib/aigang/artifacts:ro
+      # The projects root, read-write: delivery writes into a
+      # repository's working tree. One bind mount of the directory that
+      # holds every project repository, not a volume per repository —
+      # each project's own compose file bind-mounts its `src/` into that
+      # project's container as /workspace, so these are host
+      # directories, and there is nothing else to mount. A request's
+      # `destination_repo` is one directory name directly under here
+      # (librarian/README.md).
+      - ../../projects:/var/lib/aigang/projects
     networks:
       - ai-gang
     restart: unless-stopped
