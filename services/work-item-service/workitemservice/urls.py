@@ -29,5 +29,10 @@ from django.urls import include, path
 
 urlpatterns = [
     path('django-admin/', admin.site.urls),
+    # Artifact ingress (strategy/v4.0/features/artifact-ingress.md): a
+    # retrieval-only route space, `/artifacts/<id>`, disjoint from every
+    # path workitems.urls claims. Upload has no route of its own — it is
+    # the Django admin above, at /django-admin/artifacts/artifact/add/.
+    path('', include('artifacts.urls')),
     path('', include('workitems.urls')),
 ]

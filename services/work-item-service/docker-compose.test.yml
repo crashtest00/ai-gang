@@ -1,3 +1,10 @@
+# Ephemeral pytest fixtures: Postgres and Redis only.
+#
+# No artifact volume here, deliberately. The suite runs on the host, not in
+# a container, and the artifact-ingress tests point ARTIFACT_ROOT
+# (workitemservice/settings.py) at pytest's own per-test tmp_path — a
+# shared volume would only let one test's files leak into another's. The
+# real mount is docker-compose.yml's `artifact-data`.
 services:
   workitem-test-postgres:
     image: postgres:16-alpine

@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.postgres',
     'workitems',
+    'artifacts',
 ]
 
 MIDDLEWARE = [
@@ -144,6 +145,16 @@ WORKITEM_CONSUMER_ID = os.environ.get('WORKITEM_CONSUMER_ID') or os.uname().node
 RELAY_POLL_INTERVAL_MS = int(os.environ.get('RELAY_POLL_INTERVAL_MS', '1000'))
 RELAY_BATCH_SIZE = int(os.environ.get('RELAY_BATCH_SIZE', '20'))
 RELAY_ROW_DELAY_MS = int(os.environ.get('RELAY_ROW_DELAY_MS', '0'))  # test-only knob, see workitems/relay.py
+
+
+# --- Artifact ingress ----------------------------------------------------
+# The root of the mounted volume that holds artifact files. This is the
+# only authoritative copy of an artifact's bytes: a read resolves against
+# the file here, and a file edited in place from the host is returned by
+# the next read. Mounted as the named volume `artifact-data` in
+# docker-compose.yml; the test suite points it at a temp directory instead.
+# Layout under this root is documented in artifacts/README.md.
+ARTIFACT_ROOT = os.environ.get('ARTIFACT_ROOT', '/var/lib/aigang/artifacts')
 
 
 # --- Logging -------------------------------------------------------------

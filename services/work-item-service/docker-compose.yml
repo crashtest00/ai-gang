@@ -48,10 +48,22 @@ services:
     container_name: work-item-service
     env_file: .env
     command: gunicorn workitemservice.wsgi:application --bind 0.0.0.0:9100
+    environment:
+      # The artifact volume's mount point inside the container; matches
+      # workitemservice/settings.py's ARTIFACT_ROOT default. Stated here
+      # rather than left implicit so the mount below and the setting can
+      # be checked against each other in one place.
+      - ARTIFACT_ROOT=/var/lib/aigang/artifacts
     ports:
       - "127.0.0.1:9100:9100"
     volumes:
       - ../scrummaster/config:/app/config:ro
+      # Artifact ingress (strategy/v4.0/features/artifact-ingress.md
+      # REQ-02). Only `api` mounts it: `api` is the one service that
+      # uploads (the Django admin) and reads artifact bytes. Not read-only
+      # — an upload writes here — and a named volume rather than a bind
+      # mount so the bytes survive container recreation.
+      - artifact-data:/var/lib/aigang/artifacts
     networks:
       - ai-gang
     restart: unless-stopped
@@ -93,3 +105,8 @@ networks:
 
 volumes:
   workitem-postgres-data:
+  # Artifact files. The host path `docker volume inspect
+  # work-item-service_artifact-data` reports is where a human edits a
+  # stored artifact in place (REQ-02); see artifacts/README.md for the
+  # layout under it.
+  artifact-data:
