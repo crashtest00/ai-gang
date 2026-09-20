@@ -32,6 +32,15 @@ payload:
         URL onto the Jira ticket (`scripts/create-release-fields.sh`)
         reaches the canonical columns, regardless of which changelog field
         the webhook names.
+      - for a Release ticket with NO canonical `release` work item yet
+        (e.g. one created before BF-01 shipped, whose `jira:issue_created`
+        webhook came and went unmaterialized): materialized first, via the
+        same idempotent-on-`external_key` `_materialize_release` helper
+        `jira:issue_created` uses, before any of the field-specific
+        handling below runs — BUGFIXES.md BF-01 Pass 1 audit row 2, REQ-01
+        "create or update webhook". This does not publish a
+        `work_item.jira_release_event`; only the `jira:issue_created`
+        path does that.
       - `field == 'status'`: the existing validated transition
         path (`_apply_validated_status_change`), now also branching to a
         `work_item.jira_release_event` for a Release ticket's `Done`
@@ -351,19 +360,19 @@ def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work
         )
 
 
-def _handle_release_requested(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
-    """Handler 5 (handlers.js `handleReleaseRequested`) — BUT the
-    materialization half is new (BF-01): a Release ticket's `jira:issue_created`
-    now also creates the canonical `release` work item and its
-    `work_item_release_detail` row, mirroring `_handle_story_created`'s
-    idempotent-on-redelivery shape. The `work_item.jira_release_event`
-    republish that follows is UNCHANGED from before this fix — same
-    event_type, same `work_item_id=None`, same payload shape — because
-    `handlers.js`'s Jira-mode branch (`if (jiraIssueKey)`) reads Target
-    Project/Candidate SHA etc. straight off a fresh `jira.getIssue(issueKey)`
-    call, never off this event's payload or `workItemId`; the beta-queue
-    check and Jenkins trigger it does next are still out of scope here (see
-    module docstring)."""
+def _materialize_release(project: str, issue: dict, issue_key: str) -> WorkItem:
+    """Creates the canonical `release` work item and its
+    `work_item_release_detail` row from a Release ticket's current field
+    snapshot, if one doesn't already exist for `issue_key` — idempotent on
+    `external_key`, same shape as `_handle_story_created`'s redelivery
+    guard — then (re)syncs the detail row from `issue['fields']` either
+    way, so a caller that already had an item still picks up any fields
+    it hasn't seen yet. Shared by `_handle_release_requested`
+    (`jira:issue_created`) and `_handle_changelog_item` (an update webhook
+    for a Release ticket that was never materialized — BUGFIXES.md BF-01
+    Pass 1 audit row 2, REQ-01 "create or update webhook"). Must be called
+    from inside an existing `transaction.atomic()` block, same requirement
+    as `_publish_side_effect`."""
     fields = issue.get('fields') or {}
     detail = jira_interpret.parse_release_fields(fields)
     display_name = fields.get('summary') or issue_key
@@ -375,17 +384,33 @@ def _handle_release_requested(project: str, issue: dict, issue_key: str, envelop
         detail.get('targetProjectName') or detail.get('targetProjectKey') or project
     )
 
+    item = WorkItem.objects.filter(external_key=issue_key).first()
+    if item is None:
+        item = store.create_work_item(
+            {
+                'id': uuid.uuid4(), 'project': target_project, 'type': 'release',
+                'displayName': display_name, 'status': 'proposed', 'externalKey': issue_key,
+            },
+            actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
+        )
+    _sync_release_detail(item, fields)
+    return item
+
+
+def _handle_release_requested(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
+    """Handler 5 (handlers.js `handleReleaseRequested`) — BUT the
+    materialization half is new (BF-01): a Release ticket's `jira:issue_created`
+    now also creates the canonical `release` work item and its
+    `work_item_release_detail` row via `_materialize_release`. The
+    `work_item.jira_release_event` republish that follows is UNCHANGED
+    from before this fix — same event_type, same `work_item_id=None`, same
+    payload shape — because `handlers.js`'s Jira-mode branch
+    (`if (jiraIssueKey)`) reads Target Project/Candidate SHA etc. straight
+    off a fresh `jira.getIssue(issueKey)` call, never off this event's
+    payload or `workItemId`; the beta-queue check and Jenkins trigger it
+    does next are still out of scope here (see module docstring)."""
     with transaction.atomic():
-        item = WorkItem.objects.filter(external_key=issue_key).first()
-        if item is None:
-            item = store.create_work_item(
-                {
-                    'id': uuid.uuid4(), 'project': target_project, 'type': 'release',
-                    'displayName': display_name, 'status': 'proposed', 'externalKey': issue_key,
-                },
-                actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
-            )
-        _sync_release_detail(item, fields)
+        _materialize_release(project, issue, issue_key)
 
         store.write_outbox_event(
             project=project, event_type='work_item.jira_release_event', work_item_id=None,
@@ -429,7 +454,20 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
     issuetype = _issuetype_of(issue)
     item = store.get_work_item(work_item_id) if work_item_id is not None else None
 
-    if issuetype == 'Release' and item is not None and item.type == 'release':
+    if issuetype == 'Release' and item is None:
+        # An update webhook for a Release ticket that was never
+        # materialized — e.g. one created before BF-01 shipped, whose
+        # jira:issue_created webhook came and went with no canonical
+        # `release` work item to show for it. REQ-01 requires a "create
+        # OR update" webhook to materialize it (BUGFIXES.md BF-01 Pass 1
+        # audit row 2); without this branch, every later update for that
+        # ticket falls through to `_record_generic_event` forever.
+        # `_materialize_release` is idempotent on `external_key`, the same
+        # helper `_handle_release_requested` uses for the create path.
+        with transaction.atomic():
+            item = _materialize_release(project, issue, issue_key)
+        work_item_id = item.id
+    elif issuetype == 'Release' and item is not None and item.type == 'release':
         # The webhook's `issue` snapshot always carries the ticket's FULL
         # current field values, not just the one `change` names — re-sync
         # once per changelog item (idempotent; same value if nothing
