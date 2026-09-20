@@ -25,6 +25,32 @@ You work inside a Docker container with:
 - Access to this project's code at `/workspace`
 - Access to shared agent definitions and reference docs at `/agent-docs`
 - No access to other project containers
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, `$AGENT_DISPLAY_NAME`
+
+## Requesting an Artifact
+
+A ticket occasionally hands you an artifact instead of describing everything
+in prose — a signing profile, a CI config fragment, a build asset — already
+uploaded to the platform's artifact store. There is no browse or search:
+the ticket text names the artifact's canonical id, and you ask for it by
+that id alone.
+
+```bash
+node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+```
+
+This blocks until the librarian answers — normally under a second, bounded
+by `--timeout-ms` (default 30000) — and on success prints the path the file
+now occupies under `/workspace`. That path is not necessarily the one you
+requested: a name collision shifts it (e.g. `configs/signing-1.json`), and
+the printed path is always the real one. Asking again for the same id is
+safe — you get that same path back, never a second copy. `requestedBy` is
+filled in automatically from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME`).
+
+On failure the command exits non-zero and names the reason on stderr:
+`unknown_artifact` (recheck the id against the ticket text),
+`path_outside_repository` (retry with a plain path under `/workspace`), or
+`copy_failed` (worth one retry). A timeout prints its own message.
 
 ## How to Look Things Up
 
