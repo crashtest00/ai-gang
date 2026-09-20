@@ -17,8 +17,9 @@ from django.urls import Resolver404, resolve
 from workitems import readstore, store
 from workitems.command_consumer import create_command_consumer
 from workitems.envelope import Kind, build_envelope
-from workitems.stream_topology import command_stream_name
-from workitems.streams import dead_letter_stream_name, publish
+from workitems.models import OutboxEvent, WorkItemSpecificationLink
+from workitems.stream_topology import COMMAND_GROUP, command_stream_name
+from workitems.streams import dead_letter_stream_name, health, publish
 
 from tests.test_work_item_references_store import make_artifact
 
@@ -58,6 +59,43 @@ def test_req03_record_specification_link_command_over_streams_is_durably_applied
     link = readstore.get_specification_link(item_id)
     assert link.artifact_id == artifact.id
     assert link.requirement_id == 'REQ-18'
+
+
+def test_req03_record_specification_link_redelivery_over_streams_is_a_noop(clean_db, redis_client, redis_factory):
+    """Row 8 (work-items.md REQ-03): a redelivered recordSpecificationLink
+    command carrying the SAME (artifactId, requirementId) must be a safe
+    no-op through the real dispatch path — the same command published
+    twice yields exactly one `work_item.specification_link_recorded`
+    outbox event and one record, not two."""
+    artifact = make_artifact()
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
+
+    stream = command_stream_name(PROJECT)
+    consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='ref-test-6')
+    consumer.start()
+    try:
+        command = {
+            'command': 'recordSpecificationLink', 'actor': 'refinement-agent',
+            'workItemId': str(item_id), 'artifactId': str(artifact.id), 'requirementId': 'REQ-18',
+        }
+        publish_command(redis_client, command)
+        wait_for(lambda: readstore.get_specification_link(item_id) is not None)
+
+        publish_command(redis_client, command)
+        wait_for(lambda: redis_client.xlen(stream) == 2)
+        # Both entries fully processed (acked, none pending) before we
+        # inspect the durable outcome of the second, no-observable-effect
+        # delivery.
+        wait_for(lambda: health(redis_client, stream, COMMAND_GROUP)['pending'] == 0)
+    finally:
+        consumer.stop()
+
+    assert WorkItemSpecificationLink.objects.filter(work_item_id=item_id).count() == 1
+    events = OutboxEvent.objects.filter(
+        work_item_id=item_id, event_type='work_item.specification_link_recorded',
+    )
+    assert events.count() == 1
 
 
 def test_req03_add_artifact_link_command_over_streams_preserves_order(clean_db, redis_client, redis_factory):
