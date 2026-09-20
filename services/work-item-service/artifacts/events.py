@@ -20,11 +20,18 @@ an interested subscriber creates its own.
 
 **Envelope.** The same wire shape ``workitems/envelope.py`` defines, down
 to the single ``data`` field and the ``msg-<uuid>`` message id, and
-published through ``workitems.streams.publish`` — the one publish path
-this service has, which validates the envelope before it writes and
-carries the SET-NX dedupe. ``kind`` is ``Kind.ARTIFACT_EVENT``, in that
-module's ``VALID_KINDS``, so a consumer using its ``from_stream_fields``
-reads these entries like any other.
+published through ``workitems.streams.publish``, which validates the
+envelope against ``workitems.envelope`` before it writes — the same
+validation ``librarian/responses.py`` now goes through too, so this is no
+longer the one publish path this service has, only the one every V4
+stream write shares. No ``dedupe_key`` is passed, so there is no SET-NX
+here: ``publish``'s dedupe is opt-in and keyed by caller-supplied
+``dedupe_key`` (``workitems/streams.py``), and an upload has no natural
+key to dedupe on — a re-upload of the same bytes to the same path is a
+second, legitimate event (``action`` is ``replaced``, not a duplicate of
+the first). ``kind`` is ``Kind.ARTIFACT_EVENT``, in that module's
+``VALID_KINDS``, so a consumer using its ``from_stream_fields`` reads
+these entries like any other.
 
 One field is unlike a work item's: ``project`` carries the fixed sentinel
 ``_instance``, because the envelope requires a non-empty project and an
@@ -85,10 +92,10 @@ def publish_upload(artifact, *, created: bool, client: Optional[Any] = None) -> 
     outbox ``workitems`` uses for that guarantee is proposed, not built,
     because this spec does not require it.
 
-    ``workitems.streams.publish`` rather than a bare ``XADD``: it is this
-    service's one publish path, and it validates the envelope against
-    ``workitems.envelope`` before anything reaches the stream, so a
-    malformed event cannot be written here and rejected by every reader.
+    ``workitems.streams.publish`` rather than a bare ``XADD``: it validates
+    the envelope against ``workitems.envelope`` before anything reaches the
+    stream, so a malformed event cannot be written here and rejected by
+    every reader.
     """
     client = client or get_client()
     result = publish(client, ARTIFACT_EVENT_STREAM, _build_upload_envelope(artifact, created=created))

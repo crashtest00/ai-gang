@@ -107,7 +107,7 @@ Every response carries `status`, plus the request's `artifactId`,
 | --- | --- |
 | `missing_field` | A required field is absent or blank. `detail` names it. |
 | `unknown_artifact` | No artifact is registered under that id, or the id is not a canonical id. |
-| `unknown_destination_repo` | No such directory under the projects root, or the name is not a single directory name. |
+| `unknown_destination_repo` | No such directory under the projects root, the name is not a single directory name, or the project directory has no `PROJECTS_REPO_SUBDIR` (`src`) working tree. |
 | `path_outside_repository` | `requestedPath` is absolute, escapes the repository, names a directory, is under `.git` or `node_modules`, or resolves outside the repository through a symlink. |
 | `copy_failed` | The artifact has no file on the volume, the destination cannot be written, the file created turned out to be outside the repository, or the librarian could not complete the request. |
 
@@ -176,12 +176,14 @@ into the project's own Compose configuration on its next `up`.
 `requestedPath` must resolve inside the repository once normalized and
 once symlinks are followed — the containment check in `librarian/paths.py`
 is what makes `..`, an absolute path, a NUL byte and a symlink out of the
-tree all the same single failure. Its first component must also not be
-`.git` or `node_modules`: the content search never descends into either
-(see "The content search" below), so a file delivered inside one could
-never be found again, and `.git` is the repository's own object store. The
-write rule and the search rule are one list, `SKIPPED_DIRECTORIES` in
-`librarian/content.py`.
+tree all the same single failure. None of its components, at any depth,
+may be `.git` or `node_modules`: the content search prunes both at every
+level of its walk, not only the top (see "The content search" below), so
+a file delivered under either — even nested arbitrarily deep, as a
+submodule's own `.git` or a vendored package's `node_modules` would be —
+could never be found again, and `.git` is the repository's own object
+store. The write rule and the search rule are one list,
+`SKIPPED_DIRECTORIES` in `librarian/content.py`.
 
 The containment check resolves symlinks at one moment and the write
 happens at another, so the file's real path is checked **again** after it

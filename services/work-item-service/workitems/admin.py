@@ -23,25 +23,29 @@ WorkItemHistory, AccessLog, and OutboxEvent are registered read-only:
 they are this service's own append-only/operational records, not things a
 human should hand-edit.
 
-**work-items.md REQ-03/REQ-08 tension (V4).** REQ-03 requires recording a
-specification link or artifact link to "travel as a durably queued Streams
-command... whether the caller is a human-facing interface or an agent."
-Read narrowly, that would require WorkItemSpecificationLinkAdmin/
-WorkItemArtifactLinkAdmin (below) to publish onto Streams from inside a
-request handler and wait for the async consumer to apply it before the
-admin page can report success — a synchronous-write-over-an-async-channel
-shape nothing else in this file does. Every other admin-UI write in this
-module instead calls store.py directly (internal-work-item-service.md
-REQ-08's carve-out: REQ-03 is scoped to writes where "at least one party is
-an agent," and an authenticated admin session has no agent party), and
-still gets REQ-05/REQ-06's history+outbox-event guarantee via store.py.
-The two new admins below follow that SAME established precedent rather
-than inventing a Streams round-trip found nowhere else in this codebase:
-a direct call to store.record_specification_link/store.add_artifact_link,
-which still enforces REQ-04's resolution check (both via the real foreign
-key and via that function's own pre-check) and still emits the same
-outbound event a Streams-originated write produces. Flagged for the
-audit rather than resolved silently, per this track's build brief.
+**work-items.md REQ-03/REQ-08 — settled (V4).** REQ-03 requires that
+recording either reference "from an agent, or from any component acting
+on an agent's behalf, MUST travel as a durably queued Streams command
+through the internal work-item service's existing write path
+(`internal-work-item-service.md` REQ-03)," while "[t]he service's own
+human-facing administration interface MAY record them directly in the
+datastore, as `internal-work-item-service.md` REQ-08 permits for
+interactions with no agent party, applying the same resolution check
+(REQ-04)." WorkItemSpecificationLinkAdmin/WorkItemArtifactLinkAdmin
+(below) are exactly that carve-out: an authenticated admin session has no
+agent party, so they call store.record_specification_link/
+store.add_artifact_link directly — the SAME established precedent every
+other admin-UI write in this module follows — which still enforces
+REQ-04's resolution check (both via the real foreign key and via that
+function's own pre-check) and still emits the same outbound event a
+Streams-originated write produces.
+
+*The requirement's earlier wording read "whether the caller is a
+human-facing interface or an agent," which contradicted this carve-out and
+every existing admin write in the service; amended September 20, 2026
+(product owner decision 1-1, V4 doc-vs-code audit row 6) to the text
+quoted above. What this module's admin classes do was never in question —
+only the requirement's own wording was.*
 """
 
 from __future__ import annotations

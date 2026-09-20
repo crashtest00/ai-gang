@@ -195,6 +195,11 @@ def _copy_into(source: Path, repository_dir: Path, requested: str) -> str:
     actually occupies — read back from the file this created, never echoed
     from the request (REQ-04)."""
     destination_parent = paths.absolute_path(repository_dir, requested).parent
+    # Recorded BEFORE mkdir, since afterwards every one of these exists and
+    # the refusal path below needs to know which of them mkdir actually
+    # created for this delivery, as opposed to directories that were
+    # already there.
+    created_directories = _missing_ancestors(destination_parent, repository_dir)
     try:
         destination_parent.mkdir(parents=True, exist_ok=True)
     except OSError as err:
@@ -223,12 +228,50 @@ def _copy_into(source: Path, repository_dir: Path, requested: str) -> str:
             raise DeliveryFailure(failures.COPY_FAILED,
                                   f'copy to {candidate!r} is {written} bytes, the artifact is '
                                   f'{source.stat().st_size}')
-        _refuse_a_file_that_left_the_repository(repository_dir, destination, candidate)
+        try:
+            _refuse_a_file_that_left_the_repository(repository_dir, destination, candidate)
+        except DeliveryFailure:
+            _remove_directories_this_delivery_created(created_directories)
+            raise
         return candidate
 
     raise DeliveryFailure(failures.COPY_FAILED,
                           f'{requested!r} and {MAX_COLLISION_ATTEMPTS} adjusted names after it are all taken in '
                           f'this repository')
+
+
+def _missing_ancestors(path: Path, boundary: Path) -> list[Path]:
+    """Every prefix of ``path``, innermost first, that does not exist yet —
+    exactly the directories ``path.mkdir(parents=True)`` is about to create
+    as a side effect. Stops at ``boundary`` (the repository's working tree,
+    which ``resolve_repository`` already guarantees exists), so the walk
+    always terminates even when a planted symlink makes an intermediate
+    component "exist" by pointing somewhere else entirely — ``exists()``
+    follows it exactly as ``mkdir`` itself would, so what is reported
+    missing here is what mkdir will actually create."""
+    missing = []
+    current = path
+    while current != boundary and not current.exists():
+        missing.append(current)
+        current = current.parent
+    return missing
+
+
+def _remove_directories_this_delivery_created(directories: list[Path]) -> None:
+    """``rmdir`` each directory ``mkdir(parents=True)`` created for this
+    delivery, innermost first, and only while still empty — so a directory
+    that picked up an unrelated entry from anywhere else in the meantime is
+    left alone rather than silently deleted. Best-effort: this runs after
+    the delivery has already failed, and a directory that cannot be removed
+    is not a reason to hide that failure. ``rmdir`` refuses a non-empty
+    directory on its own, which is also why the walk stops at the first
+    failure — a directory whose child is still there cannot be empty
+    either."""
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            break
 
 
 def _refuse_a_file_that_left_the_repository(repository_dir: Path, destination: Path, candidate: str) -> None:
@@ -241,9 +284,12 @@ def _refuse_a_file_that_left_the_repository(repository_dir: Path, destination: P
 
     So the file that was just created is asked where it really is, and if
     the answer is outside this repository it is removed and the request is
-    answered ``copy_failed``. Nothing is left behind for the planter to
-    collect, and no confirmation ever names a path in a repository the
-    requester did not ask for.
+    answered ``copy_failed``. The caller also removes any now-empty
+    directories this delivery's own ``mkdir`` created along the way (V4
+    audit Pass 2 row 29) — a nested ``requestedPath`` walking through the
+    planted symlink would otherwise leave those behind in the victim
+    repository even though the file itself is gone. No confirmation ever
+    names a path in a repository the requester did not ask for.
     """
     try:
         real = destination.resolve()

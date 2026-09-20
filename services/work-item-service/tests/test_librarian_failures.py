@@ -184,6 +184,25 @@ def test_a_requested_path_under_a_directory_the_search_skips_is_refused(libraria
     assert files_in(repo) == []
 
 
+@pytest.mark.parametrize('skipped', sorted(SKIPPED_DIRECTORIES))
+def test_a_requested_path_under_a_skipped_directory_nested_below_the_top_is_refused(librarian_env, skipped):
+    """content.py's walk prunes SKIPPED_DIRECTORIES at every depth, not
+    only the top level (its ``dirnames[:] = ...`` filter runs on every
+    recursion of ``os.walk``) — a submodule's own ``.git`` or a nested
+    package's ``node_modules`` is exactly as invisible to REQ-03's search
+    as a top-level one. The write rule has to walk every path component to
+    match, not just the first."""
+    artifact = seed_artifact(MOCKUP)
+    repo = make_repo(librarian_env, 'hello-web')
+
+    response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
+                                requested_path=f'packages/app/{skipped}/nested/planted.png')
+
+    payload = _failure(response, PATH_OUTSIDE_REPOSITORY)
+    assert skipped in payload['detail']
+    assert files_in(repo) == []
+
+
 def test_a_requested_path_through_a_symlink_that_leaves_the_repository(librarian_env, tmp_path):
     artifact = seed_artifact(MOCKUP)
     repo = make_repo(librarian_env, 'hello-web')
@@ -273,6 +292,36 @@ def test_a_symlink_planted_after_the_check_delivers_nothing_outside_the_reposito
     assert 'containment check' in payload['detail']
     assert files_in(victim) == []
     assert not (victim / 'mockup.png').exists()
+    assert not ArtifactDelivery.objects.exists()
+
+
+def test_a_symlink_planted_after_the_check_leaves_no_directories_in_the_victim(librarian_env, settings):
+    """Same window as the test above, but with a ``requestedPath`` nested
+    one level deeper than the planted symlink itself (``designs/sub/...``
+    rather than ``designs/...``). ``mkdir(parents=True)`` then has to
+    create ``sub`` too, and — since ``designs`` now points through the
+    symlink — it creates it INSIDE the victim repository. The refusal path
+    already removed the planted file; before V4 audit Pass 2 row 29 it left
+    that ``sub`` directory behind for the planter to collect, contradicting
+    ``_refuse_a_file_that_left_the_repository``'s own docstring."""
+    settings.LIBRARIAN_LOCK_HOLD_DELAY_MS = 2000
+    artifact = seed_artifact(MOCKUP)
+    repo = make_repo(librarian_env, 'hello-web')
+    victim = make_repo(librarian_env, 'hello-desktop')
+
+    message_id, cursor = publish_request(librarian_env, {
+        'requestedBy': 'frontend-agent', 'artifactId': str(artifact.id),
+        'destinationRepo': 'hello-web', 'requestedPath': 'designs/sub/mockup.png',
+    })
+    await_lock_granted(str(artifact.id), 'hello-web')
+    (repo / 'designs').symlink_to(victim)
+
+    response = await_response(librarian_env, message_id, cursor)
+
+    payload = _failure(response, COPY_FAILED)
+    assert 'containment check' in payload['detail']
+    assert files_in(victim) == []
+    assert list(victim.rglob('*')) == [], 'no directories were left in the victim repository either'
     assert not ArtifactDelivery.objects.exists()
 
 
