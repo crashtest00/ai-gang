@@ -108,9 +108,18 @@ def _await_group_member(env, name: str) -> None:
 
 
 def make_repo(env, name: str, files: dict | None = None) -> Path:
-    """A project repository: one directory directly under the projects
-    root, which is what `destination_repo` names."""
-    repo = env.projects_root / name
+    """A project repository, laid out the way `scripts/init-project.sh`
+    lays one out: `<projects root>/<name>/` is the project directory (its
+    compose file, Dockerfile and .env live there) and `<name>/src/` is the
+    git working tree, bind-mounted into the project container as
+    /workspace.
+
+    `destination_repo` names the project; the returned path — and every
+    path in a request or an answer — is the working tree. `repo.parent` is
+    the project directory, for a test that needs to assert nothing was
+    written beside the scaffolding.
+    """
+    repo = env.projects_root / name / 'src'
     repo.mkdir(parents=True, exist_ok=True)
     for relative, content in (files or {}).items():
         target = repo / relative
@@ -183,3 +192,43 @@ def all_responses(env) -> list:
 
 def files_in(repo: Path) -> list:
     return sorted(p.relative_to(repo).as_posix() for p in repo.rglob('*') if p.is_file())
+
+
+def advisory_lock_holders(artifact_id: str, repository: str) -> tuple:
+    """(granted, waiting) sessions on this pair's advisory lock, read from
+    Postgres's own ``pg_locks``. The key comes from the same
+    ``advisory_lock_key`` the production path locks with, so a test
+    observes the lock the librarian actually takes rather than one it
+    derived for itself."""
+    from django.db import connection
+
+    from librarian.delivery import advisory_lock_key
+
+    key = advisory_lock_key(artifact_id, repository)
+    classid = (key >> 32) & 0xFFFFFFFF
+    objid = key & 0xFFFFFFFF
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FILTER (WHERE granted), count(*) FILTER (WHERE NOT granted) "
+            "FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s AND objsubid = 1",
+            [classid, objid],
+        )
+        granted, waiting = cursor.fetchone()
+    return granted, waiting
+
+
+def await_lock_granted(artifact_id: str, repository: str, timeout: float = 10) -> None:
+    """Block until the librarian holds this pair's advisory lock.
+
+    That is the only synchronisation point a test needs to be *inside* a
+    request: the lock is taken after the repository and the requested path
+    have been resolved and before anything is written, so a test that acts
+    here acts between the containment check and the write.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        granted, _waiting = advisory_lock_holders(artifact_id, repository)
+        if granted:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f'the librarian never took the advisory lock for ({artifact_id}, {repository})')

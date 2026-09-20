@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import time
 
-from django.db import connection
-
 from librarian.delivery import ACTION_ALREADY_PRESENT, ACTION_COPIED, advisory_lock_key
 from librarian.models import ArtifactDelivery
 from librarian.responses import STATUS_DELIVERED
 from tests.librarian_support import (  # noqa: F401 - librarian_env is a fixture
-    await_response, files_in, librarian_env, make_repo, publish_request, seed_artifact, start_consumer,
+    advisory_lock_holders, await_response, files_in, librarian_env, make_repo, publish_request, seed_artifact,
+    start_consumer,
 )
 
 MOCKUP = b'-a design export-' * 4096
@@ -47,28 +46,11 @@ def _two_subscribers(env):
     start_consumer(env, 'librarian-b', block_ms=30000)
 
 
-def _advisory_lock_holders(artifact_id: str, repository: str) -> tuple[int, int]:
-    """(granted, waiting) sessions on this pair's advisory lock, read from
-    Postgres's own ``pg_locks``. The key comes from the same
-    ``advisory_lock_key`` the production path locks with."""
-    key = advisory_lock_key(artifact_id, repository)
-    classid = (key >> 32) & 0xFFFFFFFF
-    objid = key & 0xFFFFFFFF
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT count(*) FILTER (WHERE granted), count(*) FILTER (WHERE NOT granted) "
-            "FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s AND objsubid = 1",
-            [classid, objid],
-        )
-        granted, waiting = cursor.fetchone()
-    return granted, waiting
-
-
 def _await_contention(artifact_id: str, repository: str, timeout: float = 10) -> tuple[int, int]:
     deadline = time.time() + timeout
     best = (0, 0)
     while time.time() < deadline:
-        granted, waiting = _advisory_lock_holders(artifact_id, repository)
+        granted, waiting = advisory_lock_holders(artifact_id, repository)
         if granted and waiting:
             return granted, waiting
         best = max(best, (granted, waiting))
@@ -84,11 +66,11 @@ def test_two_simultaneous_requests_produce_one_file_and_one_path(librarian_env, 
 
     first_id, first_cursor = publish_request(librarian_env, {
         'requestedBy': 'frontend-agent', 'artifactId': str(artifact.id),
-        'destinationRepo': 'hello-web', 'requestedPath': 'src/designs/mockup.png',
+        'destinationRepo': 'hello-web', 'requestedPath': 'designs/mockup.png',
     })
     second_id, second_cursor = publish_request(librarian_env, {
         'requestedBy': 'backend-agent', 'artifactId': str(artifact.id),
-        'destinationRepo': 'hello-web', 'requestedPath': 'src/designs/mockup.png',
+        'destinationRepo': 'hello-web', 'requestedPath': 'designs/mockup.png',
     })
 
     granted, waiting = _await_contention(str(artifact.id), 'hello-web')
@@ -100,11 +82,11 @@ def test_two_simultaneous_requests_produce_one_file_and_one_path(librarian_env, 
     second = await_response(librarian_env, second_id, second_cursor, timeout=30)
 
     assert first['payload']['status'] == second['payload']['status'] == STATUS_DELIVERED
-    assert first['payload']['path'] == second['payload']['path'] == 'src/designs/mockup.png'
+    assert first['payload']['path'] == second['payload']['path'] == 'designs/mockup.png'
     assert sorted([first['payload']['action'], second['payload']['action']]) == \
         sorted([ACTION_ALREADY_PRESENT, ACTION_COPIED])
-    assert files_in(repo) == ['README.md', 'src/designs/mockup.png']
-    assert (repo / 'src/designs/mockup.png').read_bytes() == MOCKUP
+    assert files_in(repo) == ['README.md', 'designs/mockup.png']
+    assert (repo / 'designs/mockup.png').read_bytes() == MOCKUP
     assert ArtifactDelivery.objects.filter(artifact_id=artifact.id, repository='hello-web').count() == 1
 
 

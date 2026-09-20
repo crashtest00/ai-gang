@@ -107,12 +107,20 @@ services:
     container_name: workitem-librarian
     env_file: .env
     command: python manage.py run_librarian
+    # Project images run as uid 1000 (`Docker Templates/Dockerfile-node.template`)
+    # and the host's `projects/*` are owned by 1000:1000. A delivered file
+    # is one a building agent has to be able to edit, delete and
+    # `git clean`; written as root it would be none of those. Only this
+    # service needs it — the artifact volume it also mounts is `:ro`.
+    user: "1000:1000"
     environment:
-      # Both roots the librarian works between, stated here so the mounts
+      # Both roots the librarian works between, plus the subdirectory of a
+      # project directory that is the repository, stated here so the mounts
       # below and the settings they have to match are checkable in one
       # place (same reason `api` states ARTIFACT_ROOT).
       - ARTIFACT_ROOT=/var/lib/aigang/artifacts
       - PROJECTS_ROOT=/var/lib/aigang/projects
+      - PROJECTS_REPO_SUBDIR=src
     volumes:
       - ../scrummaster/config:/app/config:ro
       # The artifact volume, READ-ONLY. The librarian only ever copies
@@ -126,7 +134,9 @@ services:
       # each project's own compose file bind-mounts its `src/` into that
       # project's container as /workspace, so these are host
       # directories, and there is nothing else to mount. A request's
-      # `destination_repo` is one directory name directly under here
+      # `destination_repo` is one directory name directly under here, and
+      # the repository it names is that directory's `src/` — the same
+      # directory the project container sees as /workspace
       # (librarian/README.md).
       - ../../projects:/var/lib/aigang/projects
     networks:

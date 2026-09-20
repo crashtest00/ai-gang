@@ -19,6 +19,7 @@ class or content, with no metadata supplied alongside it" (REQ-01).
 
 from __future__ import annotations
 
+import logging
 from functools import partial
 
 from django.contrib import admin
@@ -27,6 +28,35 @@ from django.utils import timezone
 
 from . import events
 from .models import Artifact, ArtifactAccessLog
+
+logger = logging.getLogger(__name__)
+
+
+def _announce_upload(artifact, *, created: bool) -> None:
+    """Publish REQ-06's event, and survive a Redis that cannot take it.
+
+    This runs from ``transaction.on_commit``, and Django's admin wraps the
+    whole ``changeform_view`` in ``transaction.atomic`` — so the callback
+    fires as that atomic block exits, inside the view, and an exception
+    here propagates out of it. The row is already committed by then: the
+    uploader would get a server error for an upload that succeeded, and
+    re-uploading mints a second artifact id for the same file.
+
+    So the failure is caught and logged instead. The event is genuinely
+    lost, and that is a known limitation with the transactional outbox
+    ``workitems`` uses as its answer — proposed, not built, because
+    neither `artifact-ingress.md` nor the PRD asks for it here. What the
+    log line leaves behind is the artifact id and what happened to it, so
+    a lost announcement can be replayed by hand.
+    """
+    action = events.ACTION_CREATED if created else events.ACTION_REPLACED
+    try:
+        events.publish_upload(artifact, created=created)
+    except Exception:  # noqa: BLE001 - the upload committed; nothing here may undo that
+        logger.error(
+            'artifact %s: the %s upload event could not be published to %s; the upload is committed and the '
+            'event is lost', artifact.id, action, events.ARTIFACT_EVENT_STREAM, exc_info=True,
+        )
 
 
 def _actor(request) -> str:
@@ -84,8 +114,10 @@ class ArtifactAdmin(admin.ModelAdmin):
         if file_uploaded:
             # REQ-06: one event per upload and per re-upload, and none for
             # an edit that did not bring new bytes. on_commit so a rolled
-            # back admin save announces nothing.
-            transaction.on_commit(partial(events.publish_upload, obj, created=not change))
+            # back admin save announces nothing, and `_announce_upload` so
+            # a publish that fails after the commit does not turn a
+            # successful upload into a 500.
+            transaction.on_commit(partial(_announce_upload, obj, created=not change))
 
 
 @admin.register(ArtifactAccessLog)

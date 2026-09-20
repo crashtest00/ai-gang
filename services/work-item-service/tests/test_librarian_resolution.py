@@ -27,7 +27,7 @@ def delivered(librarian_env):
     artifact = seed_artifact(MOCKUP)
     repo = make_repo(librarian_env, 'hello-web', {'README.md': '# hello\n'})
     response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                                requested_path='src/designs/mockup.png', task_id='task-1')
+                                requested_path='designs/mockup.png', task_id='task-1')
     assert response['payload']['action'] == ACTION_COPIED
     return artifact, repo, response
 
@@ -39,14 +39,33 @@ def test_a_first_request_copies_the_bytes_and_answers_with_the_path(librarian_en
     repo = make_repo(librarian_env, 'hello-web')
 
     response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                                requested_path='src/designs/mockup.png')
+                                requested_path='designs/mockup.png')
 
     payload = response['payload']
     assert payload['status'] == STATUS_DELIVERED
     assert payload['action'] == ACTION_COPIED
-    assert payload['path'] == 'src/designs/mockup.png'
+    assert payload['path'] == 'designs/mockup.png'
     assert (repo / payload['path']).read_bytes() == MOCKUP
-    assert files_in(repo) == ['src/designs/mockup.png']
+    assert files_in(repo) == ['designs/mockup.png']
+
+
+def test_the_delivery_lands_in_the_working_tree_the_agent_sees_as_workspace(librarian_env):
+    """Row 9 of the V4 doc-vs-code audit. The project container
+    bind-mounts `projects/<name>/src` as /workspace and the git root is
+    that same directory, so the answered path is relative to it and the
+    bytes are inside it — not one level up, beside the project's own
+    compose file, where neither git nor the agent would ever see them."""
+    artifact = seed_artifact(MOCKUP)
+    repo = make_repo(librarian_env, 'hello-web')
+    project_dir = repo.parent
+
+    response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
+                                requested_path='designs/mockup.png')
+
+    assert response['payload']['path'] == 'designs/mockup.png'
+    assert repo == librarian_env.projects_root / 'hello-web' / 'src'
+    assert (repo / 'designs' / 'mockup.png').read_bytes() == MOCKUP
+    assert sorted(p.name for p in project_dir.iterdir()) == ['src']
 
 
 # --- REQ-03 steps 1-3, the record fast path ------------------------------
@@ -55,11 +74,11 @@ def test_a_repeat_request_returns_the_recorded_path_without_a_second_copy(delive
     artifact, repo, first = delivered
 
     second = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                              requested_path='src/designs/mockup.png')
+                              requested_path='designs/mockup.png')
 
     assert second['payload']['action'] == ACTION_ALREADY_PRESENT
     assert second['payload']['path'] == first['payload']['path']
-    assert files_in(repo) == ['README.md', 'src/designs/mockup.png']
+    assert files_in(repo) == ['README.md', 'designs/mockup.png']
 
 
 def test_step_three_is_an_existence_check_not_a_content_comparison(delivered, librarian_env):
@@ -70,12 +89,12 @@ def test_step_three_is_an_existence_check_not_a_content_comparison(delivered, li
     edited.write_bytes(b'a human changed this after delivery')
 
     second = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                              requested_path='src/designs/mockup.png')
+                              requested_path='designs/mockup.png')
 
     assert second['payload']['action'] == ACTION_ALREADY_PRESENT
     assert second['payload']['path'] == first['payload']['path']
     assert edited.read_bytes() == b'a human changed this after delivery'
-    assert files_in(repo) == ['README.md', 'src/designs/mockup.png']
+    assert files_in(repo) == ['README.md', 'designs/mockup.png']
 
 
 # --- REQ-02 --------------------------------------------------------------
@@ -90,8 +109,8 @@ def test_a_second_request_naming_a_different_path_gets_the_first_path_back(deliv
     second = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
                               requested_path='completely/elsewhere/other-name.png')
 
-    assert second['payload']['path'] == first['payload']['path'] == 'src/designs/mockup.png'
-    assert files_in(repo) == ['README.md', 'src/designs/mockup.png']
+    assert second['payload']['path'] == first['payload']['path'] == 'designs/mockup.png'
+    assert files_in(repo) == ['README.md', 'designs/mockup.png']
     assert not (repo / 'completely').exists()
 
 
@@ -113,18 +132,18 @@ def test_the_same_artifact_reaches_a_second_repository_independently(delivered, 
 
 def test_a_file_moved_within_the_repository_is_found_and_the_record_corrected(delivered, librarian_env):
     artifact, repo, first = delivered
-    moved_to = repo / 'src' / 'assets' / 'renamed-by-an-agent.png'
+    moved_to = repo / 'assets' / 'renamed-by-an-agent.png'
     moved_to.parent.mkdir(parents=True)
     (repo / first['payload']['path']).rename(moved_to)
 
     second = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                              requested_path='src/designs/mockup.png')
+                              requested_path='designs/mockup.png')
 
     assert second['payload']['action'] == ACTION_RELOCATED
-    assert second['payload']['path'] == 'src/assets/renamed-by-an-agent.png'
-    assert files_in(repo) == ['README.md', 'src/assets/renamed-by-an-agent.png']
+    assert second['payload']['path'] == 'assets/renamed-by-an-agent.png'
+    assert files_in(repo) == ['README.md', 'assets/renamed-by-an-agent.png']
     record = ArtifactDelivery.objects.get(artifact_id=artifact.id, repository='hello-web')
-    assert record.path == 'src/assets/renamed-by-an-agent.png'
+    assert record.path == 'assets/renamed-by-an-agent.png'
 
 
 def test_an_artifact_already_in_the_repository_with_no_record_is_not_copied_again(librarian_env):
@@ -136,7 +155,7 @@ def test_an_artifact_already_in_the_repository_with_no_record_is_not_copied_agai
     repo = make_repo(librarian_env, 'hello-web', {'vendor/already-here.png': MOCKUP})
 
     response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                                requested_path='src/designs/mockup.png')
+                                requested_path='designs/mockup.png')
 
     assert response['payload']['action'] == ACTION_ALREADY_PRESENT
     assert response['payload']['path'] == 'vendor/already-here.png'
@@ -146,15 +165,15 @@ def test_an_artifact_already_in_the_repository_with_no_record_is_not_copied_agai
 
 def test_the_content_search_does_not_match_a_file_that_only_shares_a_name(librarian_env):
     artifact = seed_artifact(MOCKUP)
-    repo = make_repo(librarian_env, 'hello-web', {'src/designs/mockup.png': b'an unrelated image'})
+    repo = make_repo(librarian_env, 'hello-web', {'designs/mockup.png': b'an unrelated image'})
 
     response = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                                requested_path='src/designs/mockup.png')
+                                requested_path='designs/mockup.png')
 
     assert response['payload']['action'] == ACTION_COPIED
-    assert response['payload']['path'] == 'src/designs/mockup-1.png'
-    assert (repo / 'src/designs/mockup.png').read_bytes() == b'an unrelated image'
-    assert (repo / 'src/designs/mockup-1.png').read_bytes() == MOCKUP
+    assert response['payload']['path'] == 'designs/mockup-1.png'
+    assert (repo / 'designs/mockup.png').read_bytes() == b'an unrelated image'
+    assert (repo / 'designs/mockup-1.png').read_bytes() == MOCKUP
 
 
 def test_the_content_search_skips_the_git_directory(librarian_env):
@@ -257,23 +276,23 @@ def test_ac06_end_to_end(librarian_env):
     repo = make_repo(librarian_env, 'hello-web', {'README.md': '# hello\n'})
 
     first = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                             requested_path='src/designs/design-export.png')
+                             requested_path='designs/design-export.png')
     delivered_path = repo / first['payload']['path']
     assert first['payload']['action'] == ACTION_COPIED
     assert delivered_path.read_bytes() == MOCKUP
 
     second = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                              requested_path='src/designs/design-export.png')
+                              requested_path='designs/design-export.png')
     assert second['payload']['path'] == first['payload']['path']
     assert second['payload']['action'] == ACTION_ALREADY_PRESENT
-    assert files_in(repo) == ['README.md', 'src/designs/design-export.png']
+    assert files_in(repo) == ['README.md', 'designs/design-export.png']
 
     delivered_path.unlink()
 
     third = request_delivery(librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-                             requested_path='src/designs/design-export.png')
+                             requested_path='designs/design-export.png')
     assert third['payload']['action'] == ACTION_COPIED
     assert third['payload']['path'] == first['payload']['path']
     assert delivered_path.read_bytes() == MOCKUP
-    assert files_in(repo) == ['README.md', 'src/designs/design-export.png']
+    assert files_in(repo) == ['README.md', 'designs/design-export.png']
     assert ArtifactDelivery.objects.filter(artifact_id=artifact.id).count() == 1

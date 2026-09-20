@@ -167,10 +167,14 @@ not a work-item id.
 ## Deployment
 
 `docker-compose.yml` mounts the named volume `artifact-data` at
-`/var/lib/aigang/artifacts` on the `api` service, which is the one service
-that uploads and reads artifact bytes. `docker-compose.test.yml` mounts
-nothing: the test suite runs on the host with `ARTIFACT_ROOT` pointed at a
-per-test temporary directory.
+`/var/lib/aigang/artifacts` on the `api` service, which is the only
+service that **writes** artifact bytes — upload is the admin's, and the
+admin is `api` (PRD §7.1, "upload is the only way in"). Since the
+librarian merged, the `librarian` service mounts that same volume
+**read-only** at the same path and copies out of it
+(`librarian/delivery.py`); `librarian/README.md` states that side.
+`docker-compose.test.yml` mounts nothing: the test suite runs on the host
+with `ARTIFACT_ROOT` pointed at a per-test temporary directory.
 
 ## Tests
 

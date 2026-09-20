@@ -12,6 +12,13 @@ webhooks as, and which webhook_consumer.py reads) are meaningful to this
 service, but every kind is listed so an envelope produced by any other AI
 Gang component still validates here if it ever needs to (mirrors
 envelope.js's own VALID_KINDS covering kinds this service doesn't use).
+
+V4's three kinds — artifact_event (artifacts/events.py) and the librarian's
+request/response pair — are in that list for exactly this reason. They are
+published from apps in this same instance, onto streams this module's own
+publish path carries; a kind missing here does not make a stream private,
+it only forces the app that owns it to bypass streams.publish's validation
+and dedupe, which is what both of them had done.
 """
 
 from __future__ import annotations
@@ -30,11 +37,18 @@ class Kind:
     WEBHOOK_EVENT = 'webhook_event'
     WORK_ITEM_COMMAND = 'work_item_command'
     WORK_ITEM_EVENT = 'work_item_event'
+    # V4 — artifact custody. ARTIFACT_EVENT is artifacts/events.py's upload
+    # announcement; the delivery pair is the librarian's request/response
+    # contract (librarian/envelope.py, librarian/README.md).
+    ARTIFACT_EVENT = 'artifact_event'
+    ARTIFACT_DELIVERY_REQUEST = 'artifact_delivery_request'
+    ARTIFACT_DELIVERY_RESPONSE = 'artifact_delivery_response'
 
 
 VALID_KINDS = {
     Kind.TASK, Kind.TASK_STATUS, Kind.JIRA_OPERATION,
     Kind.WEBHOOK_EVENT, Kind.WORK_ITEM_COMMAND, Kind.WORK_ITEM_EVENT,
+    Kind.ARTIFACT_EVENT, Kind.ARTIFACT_DELIVERY_REQUEST, Kind.ARTIFACT_DELIVERY_RESPONSE,
 }
 
 # Kinds that carry A2A task identity and therefore require taskId/contextId.

@@ -167,6 +167,16 @@ ARTIFACT_ROOT = os.environ.get('ARTIFACT_ROOT', '/var/lib/aigang/artifacts')
 # directory, alongside the artifact volume mounted read-only.
 PROJECTS_ROOT = os.environ.get('PROJECTS_ROOT', '/var/lib/aigang/projects')
 
+# The subdirectory of a project directory that IS the repository: the git
+# working tree, and the directory each project's own docker-compose.yml
+# bind-mounts into its container as /workspace (scripts/init-project.sh).
+# A delivered file therefore lands where the building agent and git both
+# see it, and never beside the project's own docker-compose.yml,
+# Dockerfile or .env, which sit one level up and are not repository
+# content. A project directory without this subdirectory is
+# `unknown_destination_repo` (librarian/paths.py).
+PROJECTS_REPO_SUBDIR = os.environ.get('PROJECTS_REPO_SUBDIR', 'src')
+
 # Test-only: milliseconds the librarian sleeps while holding its
 # per-(artifact, repository) advisory lock, so a test can make two
 # requests genuinely overlap. Zero in every deployment — the same knob

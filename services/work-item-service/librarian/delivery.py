@@ -113,14 +113,14 @@ def deliver(request: DeliveryRequest) -> dict[str, Any]:
     makes the record visible.
     """
     artifact = _artifact_or_failure(request.artifact_id)
-    repository_dir = paths.resolve_repository(request.destination_repo)
-    requested = paths.resolve_requested_path(repository_dir, request.requested_path)
+    repository = paths.resolve_repository(request.destination_repo)
+    requested = paths.resolve_requested_path(repository, request.requested_path)
     source = _source_file(artifact)
 
     with transaction.atomic():
-        _lock(str(artifact.id), repository_dir.name)
+        _lock(str(artifact.id), repository.name)
         _test_only_hold_delay()
-        return _resolve(request, artifact, repository_dir, requested, source)
+        return _resolve(request, artifact, repository, requested, source)
 
 
 # --- REQ-07: one copy, whatever the arrival order ------------------------
@@ -160,9 +160,13 @@ def _test_only_hold_delay() -> None:
 
 # --- REQ-03's five steps -------------------------------------------------
 
-def _resolve(request: DeliveryRequest, artifact, repository_dir: Path, requested: str,
+def _resolve(request: DeliveryRequest, artifact, repository: paths.Repository, requested: str,
              source: Path) -> dict[str, Any]:
-    record = ArtifactDelivery.objects.filter(artifact_id=artifact.id, repository=repository_dir.name).first()
+    # Every path below — the record's, the search's and the copy's — is
+    # relative to the repository's working tree, which is the requesting
+    # agent's /workspace (paths.py).
+    repository_dir = repository.directory
+    record = ArtifactDelivery.objects.filter(artifact_id=artifact.id, repository=repository.name).first()
 
     # Steps 1-3. An existence check, deliberately: see the module docstring.
     if record is not None and paths.absolute_path(repository_dir, record.path).is_file():
@@ -179,11 +183,11 @@ def _resolve(request: DeliveryRequest, artifact, repository_dir: Path, requested
                               f'artifact {artifact.id} could not be read from the artifact volume: {err}') from err
     if found is not None:
         action = ACTION_RELOCATED if record is not None else ACTION_ALREADY_PRESENT
-        return _confirmation(found, action, _record(request, artifact, repository_dir.name, found))
+        return _confirmation(found, action, _record(request, artifact, repository.name, found))
 
     # Step 5.
     delivered = _copy_into(source, repository_dir, requested)
-    return _confirmation(delivered, ACTION_COPIED, _record(request, artifact, repository_dir.name, delivered))
+    return _confirmation(delivered, ACTION_COPIED, _record(request, artifact, repository.name, delivered))
 
 
 def _copy_into(source: Path, repository_dir: Path, requested: str) -> str:
@@ -219,11 +223,44 @@ def _copy_into(source: Path, repository_dir: Path, requested: str) -> str:
             raise DeliveryFailure(failures.COPY_FAILED,
                                   f'copy to {candidate!r} is {written} bytes, the artifact is '
                                   f'{source.stat().st_size}')
+        _refuse_a_file_that_left_the_repository(repository_dir, destination, candidate)
         return candidate
 
     raise DeliveryFailure(failures.COPY_FAILED,
                           f'{requested!r} and {MAX_COLLISION_ATTEMPTS} adjusted names after it are all taken in '
                           f'this repository')
+
+
+def _refuse_a_file_that_left_the_repository(repository_dir: Path, destination: Path, candidate: str) -> None:
+    """The containment check in ``paths.py`` runs before the lock is even
+    taken, and both ``mkdir(parents=True)`` and ``os.link`` follow symlinks
+    in the parent components. A symlink planted into the working tree
+    between the check and the write would therefore have landed the
+    artifact in another project's repository, with this librarian
+    answering as though it were in this one.
+
+    So the file that was just created is asked where it really is, and if
+    the answer is outside this repository it is removed and the request is
+    answered ``copy_failed``. Nothing is left behind for the planter to
+    collect, and no confirmation ever names a path in a repository the
+    requester did not ask for.
+    """
+    try:
+        real = destination.resolve()
+    except OSError as err:  # pragma: no cover - resolve() on a created file
+        raise DeliveryFailure(failures.COPY_FAILED,
+                              f'copy to {candidate!r} could not be located after it was written: {err}') from err
+    if repository_dir in real.parents:
+        return
+    try:
+        destination.unlink()
+    except OSError:
+        pass
+    raise DeliveryFailure(
+        failures.COPY_FAILED,
+        f'copy to {candidate!r} landed at {real}, outside the repository: a path component changed '
+        f'between the containment check and the write, so the file was removed and nothing was delivered',
+    )
 
 
 def _collision_candidates(repository_dir: Path, requested: str):

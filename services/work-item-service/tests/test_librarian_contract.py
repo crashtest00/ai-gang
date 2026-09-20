@@ -43,7 +43,7 @@ def test_a_request_with_every_field_is_processed(librarian_env):
 
     response = request_delivery(
         librarian_env, artifact_id=artifact.id, destination_repo='hello-web',
-        requested_path='src/designs/mockup.png', requested_by='frontend-agent', task_id='task-77',
+        requested_path='designs/mockup.png', requested_by='frontend-agent', task_id='task-77',
     )
 
     assert response['kind'] == RESPONSE_KIND

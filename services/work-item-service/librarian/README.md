@@ -53,17 +53,19 @@ would hand it to whichever member read first.
 The envelope is `redis-streams.md`'s, byte-for-byte the shape
 `workitems/envelope.py` defines (`schemaVersion` `"1"`, `msg-<uuid>`
 message ids, the whole envelope JSON-encoded under the stream entry's
-single `data` field). Two kinds are this app's own:
+single `data` field). Two kinds are this app's:
 
 | `kind` | Direction |
 | --- | --- |
 | `artifact_delivery_request` | requester → librarian |
 | `artifact_delivery_response` | librarian → requester |
 
-Neither is in `workitems.envelope.VALID_KINDS`, so `librarian/envelope.py`
-carries its own kind set and validates against it. Adding the two kinds to
-that module is a two-line change in a package this track does not own; it
-is raised as a proposal rather than made here.
+Both are in `workitems.envelope.VALID_KINDS`, so the shared envelope
+validates a delivery message exactly as it validates a work-item command,
+and the subscriber is `workitems.streams`' own consumer with no envelope
+override of its own. `librarian/envelope.py` adds only what is this app's
+and not the platform's: the `project` sentinel below and the field
+spelling.
 
 `project` carries the fixed sentinel `_instance`: the envelope requires a
 non-empty project, and these streams are instance-wide. The destination
@@ -106,8 +108,8 @@ Every response carries `status`, plus the request's `artifactId`,
 | `missing_field` | A required field is absent or blank. `detail` names it. |
 | `unknown_artifact` | No artifact is registered under that id, or the id is not a canonical id. |
 | `unknown_destination_repo` | No such directory under the projects root, or the name is not a single directory name. |
-| `path_outside_repository` | `requestedPath` is absolute, escapes the repository, names a directory, or resolves outside it through a symlink. |
-| `copy_failed` | The artifact has no file on the volume, the destination cannot be written, or the librarian could not complete the request. |
+| `path_outside_repository` | `requestedPath` is absolute, escapes the repository, names a directory, is under `.git` or `node_modules`, or resolves outside the repository through a symlink. |
+| `copy_failed` | The artifact has no file on the volume, the destination cannot be written, the file created turned out to be outside the repository, or the librarian could not complete the request. |
 
 Defined in `librarian/failures.py`. There are no others.
 
@@ -142,7 +144,7 @@ requester, so there is nobody to answer: it goes to
 
 ## Repositories
 
-A repository is **one directory name directly under
+A repository is named by **one directory name directly under
 `settings.PROJECTS_ROOT`** (environment variable `PROJECTS_ROOT`, default
 `/var/lib/aigang/projects`). That is what `destinationRepo` names. A name
 that is not a directory there is `unknown_destination_repo`; there are no
@@ -152,18 +154,41 @@ In a Compose deployment the projects root is the Source checkout's own
 `projects/` directory, so `destinationRepo` is the project name:
 `projects/hello-web` is `hello-web`.
 
-**`requestedPath` is relative to that directory, not to the agent's
-`/workspace`.** Each project's own `docker-compose.yml` bind-mounts
-`projects/<name>/src` into the project container as `/workspace`, so a
-requester that wants the file in its working tree asks for
-`src/designs/mockup.png`, not `designs/mockup.png`. Stated here because it
-is the one thing about this contract a requester can get wrong and still
-receive a successful answer.
+**The repository is the project's working tree, one level further down.**
+`scripts/init-project.sh` gives every project a `projects/<name>/src`
+directory, makes it the git root, and bind-mounts it into that project's
+container as `/workspace`. `projects/<name>/` itself holds the project's
+own `docker-compose.yml`, `Dockerfile` and `.env` — deployment
+scaffolding, not repository content. The librarian delivers into
+`projects/<name>/src`, and **every path in a request, in an answer, in the
+content search and in the delivery record is relative to that directory,
+which is exactly the agent's `/workspace`.** A requester that wants
+`designs/mockup.png` in its working tree asks for `designs/mockup.png`.
+
+Which subdirectory that is comes from `settings.PROJECTS_REPO_SUBDIR`
+(environment variable `PROJECTS_REPO_SUBDIR`, default `src`). A project
+directory that does not have one is `unknown_destination_repo`: there is
+no working tree to deliver into, and the project directory is not a
+substitute for it — a file written there is invisible to both git and the
+agent, and a delivery named `docker-compose.override.yml` would be merged
+into the project's own Compose configuration on its next `up`.
 
 `requestedPath` must resolve inside the repository once normalized and
 once symlinks are followed — the containment check in `librarian/paths.py`
 is what makes `..`, an absolute path, a NUL byte and a symlink out of the
-tree all the same single failure.
+tree all the same single failure. Its first component must also not be
+`.git` or `node_modules`: the content search never descends into either
+(see "The content search" below), so a file delivered inside one could
+never be found again, and `.git` is the repository's own object store. The
+write rule and the search rule are one list, `SKIPPED_DIRECTORIES` in
+`librarian/content.py`.
+
+The containment check resolves symlinks at one moment and the write
+happens at another, so the file's real path is checked **again** after it
+is created. A file that a symlink planted in between put outside the
+repository is removed and the request answered `copy_failed`; no
+confirmation ever names a path in a repository the requester did not ask
+for.
 
 ## Resolution order
 
@@ -290,8 +315,10 @@ which the next request would simply correct.
 | --- | --- |
 | Service | `librarian` (container `workitem-librarian`) |
 | Command | `python manage.py run_librarian` |
+| User | `1000:1000` — the uid project images run as (`Docker Templates/Dockerfile-node.template`) and the owner of the host's `projects/*`. A delivered file has to be one the agent can edit, delete and `git clean`; as root it would not be. |
 | `artifact-data:/var/lib/aigang/artifacts` | **read-only** — the librarian only ever copies out of it. Upload is the admin's, on `api` (PRD §7.1, "upload is the only way in"). |
-| `../../projects:/var/lib/aigang/projects` | read-write — delivery writes into a repository's working tree. |
+| `../../projects:/var/lib/aigang/projects` | read-write — delivery writes into `<project>/src`, the repository's working tree. |
+| `PROJECTS_REPO_SUBDIR=src` | The working-tree subdirectory of each project directory — see "Repositories". |
 
 Its own container because it is the one service that mounts the project
 repositories, which is a privilege the rest of the instance does not need

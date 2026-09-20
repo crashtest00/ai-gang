@@ -19,19 +19,16 @@ with the project segment absent because there is no project. As with
 an interested subscriber creates its own.
 
 **Envelope.** The same wire shape ``workitems/envelope.py`` defines, down
-to the single ``data`` field and the ``msg-<uuid>`` message id, which is
-why ``to_stream_fields``/``new_message_id`` are imported from there rather
-than reimplemented. Two fields differ, both because that envelope was
-written for work items:
+to the single ``data`` field and the ``msg-<uuid>`` message id, and
+published through ``workitems.streams.publish`` — the one publish path
+this service has, which validates the envelope before it writes and
+carries the SET-NX dedupe. ``kind`` is ``Kind.ARTIFACT_EVENT``, in that
+module's ``VALID_KINDS``, so a consumer using its ``from_stream_fields``
+reads these entries like any other.
 
-- ``kind`` is ``artifact_event``, which is NOT in
-  ``workitems.envelope.VALID_KINDS`` — so a consumer using that module's
-  ``from_stream_fields`` would reject these entries. Adding the kind there
-  is a one-line change in a package this track does not own; it is raised
-  as a proposal rather than made here. No consumer of this stream exists
-  yet.
-- ``project`` carries the fixed sentinel ``_instance`` because the
-  envelope requires a non-empty project and an artifact has none.
+One field is unlike a work item's: ``project`` carries the fixed sentinel
+``_instance``, because the envelope requires a non-empty project and an
+artifact has none.
 """
 
 from __future__ import annotations
@@ -39,11 +36,12 @@ from __future__ import annotations
 from datetime import datetime, timezone as dt_timezone
 from typing import Any, Optional
 
-from workitems.envelope import SCHEMA_VERSION, new_message_id, to_stream_fields
+from workitems.envelope import SCHEMA_VERSION, Kind, new_message_id
 from workitems.redis_client import get_client
+from workitems.streams import publish
 
 ARTIFACT_EVENT_STREAM = 'aigang:artifacts:events'
-ARTIFACT_EVENT_KIND = 'artifact_event'
+ARTIFACT_EVENT_KIND = Kind.ARTIFACT_EVENT
 ARTIFACT_UPLOADED = 'artifact.uploaded'
 
 # The envelope's `project` field is required and an artifact belongs to no
@@ -82,10 +80,16 @@ def publish_upload(artifact, *, created: bool, client: Optional[Any] = None) -> 
     Called from the admin's ``save_model`` through
     ``transaction.on_commit``, so nothing is announced for an upload whose
     record did not commit. The converse gap — a commit whose publish then
-    fails — is real and is reported rather than papered over; the
-    transactional outbox ``workitems`` uses for that guarantee is proposed,
-    not built, because this spec does not require it.
+    fails — is real: the caller catches and logs it (``artifacts/admin.py``)
+    so the committed upload still answers success, and the transactional
+    outbox ``workitems`` uses for that guarantee is proposed, not built,
+    because this spec does not require it.
+
+    ``workitems.streams.publish`` rather than a bare ``XADD``: it is this
+    service's one publish path, and it validates the envelope against
+    ``workitems.envelope`` before anything reaches the stream, so a
+    malformed event cannot be written here and rejected by every reader.
     """
     client = client or get_client()
-    entry_id = client.xadd(ARTIFACT_EVENT_STREAM, to_stream_fields(_build_upload_envelope(artifact, created=created)))
-    return entry_id.decode() if isinstance(entry_id, bytes) else entry_id
+    result = publish(client, ARTIFACT_EVENT_STREAM, _build_upload_envelope(artifact, created=created))
+    return result['entryId']
