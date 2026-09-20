@@ -24,6 +24,7 @@ from django.db import connection
 
 from workitems import registry
 from workitems.models import WorkItem
+from workitems.webhook_consumer import handle_webhook_envelope
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANAGE_PY = REPO_ROOT / 'manage.py'
@@ -96,6 +97,99 @@ def test_jira_webhook_rejects_a_payload_missing_project(clean_db, monkeypatch):
     payload = {'webhookEvent': 'jira:issue_created', 'issue': {'key': 'TP-9', 'fields': {}}}
     resp = client.post('/webhooks/jira', data=json.dumps(payload), content_type='application/json')
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# BF-01 (v2.1/BUGFIXES.md) — REQ-01's acceptance criterion end to end: a
+# Jira Release ticket's create webhook, then an update webhook with changed
+# fields, both posted to the real view and consumed through the real
+# webhook_consumer.handle_webhook_envelope (the exact function
+# create_webhook_consumer's Streams handler wraps with zero difference —
+# the durability/consumer-group mechanics around it are already covered by
+# the kill-mid-batch test below and REQ-09), then read back through the
+# real GET /work-items/<id>?full=true the same internal API local-mode
+# releases use.
+# ---------------------------------------------------------------------------
+
+RELEASE_FIELD_IDS = {
+    'JIRA_TARGET_PROJECT_FIELD_ID': 'customfield_target_project',
+    'JIRA_RELEASE_NOTES_FIELD_ID': 'customfield_release_notes',
+    'JIRA_CANDIDATE_SHA_FIELD_ID': 'customfield_candidate_sha',
+    'JIRA_BUILD_IDENTIFIER_FIELD_ID': 'customfield_build_id',
+    'JIRA_PREVIEW_URL_FIELD_ID': 'customfield_preview_url',
+}
+
+
+def _latest_envelope(redis_client, stream):
+    entries = redis_client.xrange(stream, '-', '+')
+    return json.loads(entries[-1][1]['data']), len(entries)
+
+
+def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_columns_local_mode_uses(
+    clean_db, monkeypatch, redis_client,
+):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    for env_name, field_id in RELEASE_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+    client = Client()
+    stream = registry.webhook_stream_name(PROJECT)
+
+    created = jira_payload(
+        'REL-1', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes login bug.',
+        },
+    )
+    resp = client.post('/webhooks/jira', data=json.dumps(created), content_type='application/json')
+    assert resp.status_code == 200
+
+    envelope, count = _latest_envelope(redis_client, stream)
+    assert count == 1
+    handle_webhook_envelope(envelope)
+
+    item = WorkItem.objects.get(external_key='REL-1')
+    assert item.type == 'release'
+
+    read_after_create = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read_after_create.status_code == 200
+    detail_after_create = read_after_create.json()['releaseDetail']
+    assert detail_after_create['release_notes'] == 'Fixes login bug.'
+    assert detail_after_create['candidate_sha'] is None
+    assert detail_after_create['build_identifier'] is None
+    assert detail_after_create['preview_url'] is None
+
+    # The release-candidate Jenkins job writes Candidate SHA, Build
+    # Identifier, and Preview URL back onto the ticket once cut
+    # (scripts/create-release-fields.sh) — an ordinary issue_updated
+    # webhook naming the changed field.
+    updated = jira_payload(
+        'REL-1', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes login bug.',
+            'customfield_candidate_sha': 'abc1234',
+            'customfield_build_id': 'build-42',
+            'customfield_preview_url': 'https://preview.example.com/abc1234',
+        },
+        changelog={'id': 'cl-rel-1', 'items': [
+            {'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha', 'from': None, 'to': 'abc1234'},
+        ]},
+        timestamp=2000,
+    )
+    resp2 = client.post('/webhooks/jira', data=json.dumps(updated), content_type='application/json')
+    assert resp2.status_code == 200
+
+    envelope2, count2 = _latest_envelope(redis_client, stream)
+    assert count2 == 2
+    handle_webhook_envelope(envelope2)
+
+    read_after_update = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    detail_after_update = read_after_update.json()['releaseDetail']
+    assert detail_after_update['candidate_sha'] == 'abc1234'
+    assert detail_after_update['build_identifier'] == 'build-42'
+    assert detail_after_update['preview_url'] == 'https://preview.example.com/abc1234'
+    assert detail_after_update['release_notes'] == 'Fixes login bug.'
 
 
 # ---------------------------------------------------------------------------
