@@ -10,18 +10,11 @@ unchanged:
     both the specification link and the ordered artifact links appear on
     this read, bare or full.
   GET  /work-items?project=&status=&assigneeAgentId=&parentId=
-       [&specArtifactId=&requirementId=|&externalKey=]  — the specArtifactId/
-    requirementId pair is work-items.md REQ-06's forward query: every work
-    item recording that (artifact id, requirement id) specification link,
-    each with its own REQ-06 delivery associations included. `externalKey`
-    is REQ-05's canonical-id lookup (V4 audit Pass 2 row 33): exact match
-    on the work item's unique `external_key` column — the issue key a
-    dispatched agent's prompt carries in Jira mode
-    (`services/scrummaster/src/prompt.js`), which is not that agent's
-    canonical id — returned with its specification link and artifact
-    links, the same shape the bare single-item read below returns. A
-    direct read (REQ-04), not a Streams command — same access-logging as
-    every other read here.
+       [&specArtifactId=&requirementId=]  — the trailing pair is
+    work-items.md REQ-06's forward query: every work item recording that
+    (artifact id, requirement id) specification link, each with its own
+    REQ-06 delivery associations included. A direct read (REQ-04), not a
+    Streams command — same access-logging as every other read here.
   GET  /work-item-artifacts/<uuid>/specification-link  — work-items.md
     REQ-06's backward query (AC-04): resolve the specification link of the
     work item a `work_item_artifact` delivery association belongs to, in
