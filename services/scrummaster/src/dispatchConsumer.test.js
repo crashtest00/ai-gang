@@ -18,6 +18,7 @@ const {
   maybeRedispatchForRework,
   handleStoryIntake,
   handleBlockedClearedSideEffect,
+  issueLikeFromCanonical,
 } = require('./dispatchConsumer');
 
 const PROJECT = 'hello-world';
@@ -73,6 +74,84 @@ test('a local-mode Story reaching ready dispatches to refinement-agent with no J
   assert.deepEqual(published.map(c => [c.payload.command, c.payload.status]), [['transitionStatus', 'in-progress']],
     'the item must stop reading as waiting to be picked up once an agent has it');
   assert.equal(published[0].payload.workItemId, 'wi-local-1');
+});
+
+// v4.1 agent-artifact-automation.md REQ-04 (build brief §1b carry-forward
+// 1) — issueLikeFromCanonical is the one place the `?full=true` read's
+// specification_link/artifact_links were being dropped before reaching the
+// prompt builder.
+
+test('issueLikeFromCanonical carries the specification link and artifact links from the canonical record', () => {
+  const full = {
+    id: 'wi-refs-unit', project: PROJECT, display_name: 'X', status: 'ready',
+    specification_link: { work_item_id: 'wi-refs-unit', artifact_id: 'art-1', requirement_id: 'REQ-9' },
+    artifact_links: [
+      { id: 'l1', work_item_id: 'wi-refs-unit', artifact_id: 'art-2', position: 0 },
+      { id: 'l2', work_item_id: 'wi-refs-unit', artifact_id: 'art-3', position: 1 },
+    ],
+    comments: [],
+  };
+
+  const issueLike = issueLikeFromCanonical(full);
+
+  assert.deepEqual(issueLike.specificationLink, { artifactId: 'art-1', requirementId: 'REQ-9' });
+  assert.deepEqual(issueLike.artifactLinks, ['art-2', 'art-3']);
+});
+
+test('issueLikeFromCanonical maps an absent specification link to null and absent artifact links to an empty array', () => {
+  const full = { id: 'wi-norefs-unit', project: PROJECT, display_name: 'X', status: 'ready', comments: [] };
+
+  const issueLike = issueLikeFromCanonical(full);
+
+  assert.equal(issueLike.specificationLink, null);
+  assert.deepEqual(issueLike.artifactLinks, []);
+});
+
+// The enforcement point per the build brief's gate 1: the real dispatch
+// path (maybeDispatch -> issueLikeFor -> issueLikeFromCanonical ->
+// buildTaskPrompt) produces a prompt naming the references, not a
+// reimplementation of the mapping alone.
+
+test('a local-mode item with references dispatches with a prompt naming its specification link and artifact ids', async (t) => {
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: 'wi-refs-1', project: PROJECT, type: 'task', status: 'ready',
+    assignee_agent_id: 'backend-agent', external_key: null, parent_id: 'wi-parent',
+    display_name: 'X', description: 'desc', comments: [],
+    specification_link: { work_item_id: 'wi-refs-1', artifact_id: 'art-spec-1', requirement_id: 'REQ-7' },
+    artifact_links: [{ id: 'l1', work_item_id: 'wi-refs-1', artifact_id: 'art-link-1', position: 0 }],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
+  t.mock.method(canonicalWorkItems, 'publishCommand', async () => {});
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issue, agent, opts) => {
+    dispatched.push(opts.promptFactory({ id: issue.key, contextId: issue.key }, { messageId: 'm-refs' }));
+  });
+
+  await maybeDispatch('wi-refs-1', { messageId: 'env-refs' });
+
+  assert.equal(dispatched.length, 1);
+  assert.match(dispatched[0], /Specification link: art-spec-1 \(REQ-7\)/);
+  assert.match(dispatched[0], /Artifact links: art-link-1/);
+});
+
+test('a local-mode item with no references dispatches with a prompt saying so, not omitting the lines', async (t) => {
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: 'wi-norefs-1', project: PROJECT, type: 'task', status: 'ready',
+    assignee_agent_id: 'backend-agent', external_key: null, parent_id: null,
+    display_name: 'X', description: 'desc', comments: [],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
+  t.mock.method(canonicalWorkItems, 'publishCommand', async () => {});
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issue, agent, opts) => {
+    dispatched.push(opts.promptFactory({ id: issue.key, contextId: issue.key }, { messageId: 'm-norefs' }));
+  });
+
+  await maybeDispatch('wi-norefs-1', { messageId: 'env-norefs' });
+
+  assert.equal(dispatched.length, 1);
+  assert.match(dispatched[0], /Specification link: none/);
+  assert.match(dispatched[0], /Artifact links: none/);
 });
 
 test('a Jira-mode item reaching ready dispatches through the identical maybeDispatch code path', async (t) => {

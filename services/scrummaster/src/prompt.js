@@ -178,6 +178,20 @@ function buildA2AInstructions(issue, task, message) {
   lines.push(`Context ID: ${task.contextId}`);
   lines.push(`Last Message ID: ${message.messageId}`);
   lines.push(`Jira issue key: ${issue.key}`);
+  // v4.1 agent-artifact-automation.md REQ-04 — named here, not in a
+  // conditionally-omitted block: a work item with neither reference must
+  // still produce a prompt that SAYS so ("none"), not one that is merely
+  // silent about them (REQ-04's acceptance). `issue.specificationLink`/
+  // `issue.artifactLinks` come from dispatchConsumer.js's
+  // issueLikeFromCanonical for a local-mode dispatch; a Jira-mode issue
+  // (jira.getIssue()) carries neither, so those dispatches read "none" —
+  // harmless, since this builder is shared across both modes
+  // (build brief §1b carry-forward 2) and REQ-04 scopes the requirement to
+  // the canonical path only. Every value here is an AI Gang canonical id —
+  // never a delivered path, which the building agent obtains by asking the
+  // librarian itself.
+  lines.push(`Specification link: ${issue.specificationLink ? `${issue.specificationLink.artifactId} (${issue.specificationLink.requirementId})` : 'none'}`);
+  lines.push(`Artifact links: ${(issue.artifactLinks && issue.artifactLinks.length > 0) ? issue.artifactLinks.join(', ') : 'none'}`);
   lines.push('');
 
   lines.push(`## INSTRUCTIONS`);
@@ -212,7 +226,7 @@ function buildA2AInstructions(issue, task, message) {
   lines.push('  |------------------|------------------------------|-------------|');
   lines.push('  | comment          | working                      | progress update, no PR yet |');
   lines.push('  | reassign         | working                      | hand the ticket\'s Agent field to another registered agent — data: {"operation":"reassign","agentFieldValue":"<agent>"} |');
-  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"<Role>: ...","description":"...","agentFieldValue":"<agent>"}. All three fields are required; agentFieldValue must be one of the allowed agent ids listed above |');
+  lines.push('  | create_subtask   | working                      | (Refinement Agent only) request a new subtask under THIS ticket — data: {"operation":"create_subtask","summary":"<Role>: ...","description":"...","agentFieldValue":"<agent>","specificationLink":{"artifactId":"<id>","requirementId":"<REQ-n>"} (optional),"artifactLinks":["<id>", "..."] (optional)}. summary, description and agentFieldValue are required and agentFieldValue must be one of the allowed agent ids listed above; specificationLink and artifactLinks are optional and travel onto the created subtask\'s own record unchanged |');
   lines.push('  | (blocked)        | input-required / auth-required | you need human clarification (input-required) or missing credentials/authorization (auth-required) — omit "operation", put the precise question in the text part; do not block without a precise, located question |');
   lines.push('  | (complete)       | completed                    | your work is fully done — omit "operation", include a summary text part |');
   lines.push('- To open a pull request: set "state" to "completed" and add this sibling "artifacts" array to your submission:');

@@ -31,6 +31,13 @@ fixture — already uploaded to the platform's artifact store. You never
 browse or search for one: you are given its canonical id, and you ask for
 it by that id alone.
 
+**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+section already names your work item's specification link and artifact
+ids (`Specification link:` / `Artifact links:`, or `none` when it has
+neither), by canonical id, never a delivered path. When it names one, you
+may request it directly — no lookup needed. The record read below is the
+fallback, for when your prompt lists none.
+
 **Finding the id.** Your dispatch prompt's `Task ID` is your work item's
 canonical id. Read the record from the work-item service, reachable from
 your container on the shared `ai-gang` Docker network:

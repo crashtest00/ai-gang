@@ -37,6 +37,13 @@ uploaded to the platform's artifact store. There is no browse or search:
 the work item behind your ticket names the artifact's canonical id, and you
 ask for it by that id alone.
 
+**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+section already names your work item's specification link and artifact
+ids (`Specification link:` / `Artifact links:`, or `none` when it has
+neither), by canonical id, never a delivered path. When it names one, you
+may request it directly — no lookup needed. The record read below is the
+fallback, for when your prompt lists none.
+
 Your dispatch prompt's `Task ID` is that work item's canonical id. Read the
 record on the work-item service, reachable from your container over the
 shared `ai-gang` Docker network:
