@@ -12,9 +12,10 @@ without a line in `.env.example` documenting it (V4 audit Pass 2 row 26).
 This asserts the missing direction from this side of the fence instead,
 since `setup/` belongs to a concurrent docs track this pass does not own:
 every environment variable `workitemservice/settings.py` itself reads via
-`os.environ.get(...)` is declared somewhere in `.env.example` (commented
-out or not) — so a setting can never be added to `settings.py` again
-without `.env.example` growing to document it.
+`os.environ.get(...)`, `os.getenv(...)` or `os.environ[...]` (single or
+double quotes) is declared somewhere in `.env.example` (commented out or
+not) — so a setting can never be added to `settings.py` again without
+`.env.example` growing to document it.
 
 The one documented exception in `.env.example`'s own header — the Jira
 custom-field ids, read directly via `os.environ` by
@@ -36,8 +37,14 @@ def test_every_setting_settings_py_reads_from_the_environment_is_declared_in_env
     settings_source = (SERVICE_ROOT / 'workitemservice' / 'settings.py').read_text()
     env_example = (SERVICE_ROOT / '.env.example').read_text()
 
-    read_names = set(re.findall(r"os\.environ\.get\(\s*'([A-Z][A-Z0-9_]*)'", settings_source))
-    assert read_names, 'expected settings.py to read at least one environment variable via os.environ.get'
+    read_names = set(re.findall(
+        r"(?:os\.environ\.get\(|os\.getenv\(|os\.environ\[)\s*['\"]([A-Z][A-Z0-9_]*)['\"]",
+        settings_source,
+    ))
+    assert read_names, (
+        'expected settings.py to read at least one environment variable via '
+        'os.environ.get(...), os.getenv(...) or os.environ[...]'
+    )
 
     declared_names = set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]*)=', env_example, re.MULTILINE))
 

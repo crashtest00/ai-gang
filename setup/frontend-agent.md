@@ -18,7 +18,9 @@ One task per invocation. Complete it fully before finishing.
 
 - `/workspace` — project codebase (read/write)
 - `/agent-docs` — agent definitions and reference docs (read-only)
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, `$AGENT_DISPLAY_NAME`
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
+  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
+  unset
 
 ---
 
@@ -76,11 +78,13 @@ have it.
 stderr: `unknown_artifact` (the id does not resolve — recheck it against
 the work-item record before retrying), `path_outside_repository` (the path you
 asked for escaped `/workspace`, was absolute, or named `.git`/
-`node_modules` — retry with a plain path under your own working tree), or
-`copy_failed` (the librarian could not complete the write — worth one
-retry, and a BLOCKED marker if it keeps failing). A timeout prints its own
-message; retry once with a longer `--timeout-ms` before treating it as a
-failure worth blocking on.
+`node_modules` — retry with a plain path under your own working tree),
+`unknown_destination_repo` (the project's working tree is not where the
+librarian expects it — a platform configuration problem, not yours to fix;
+report BLOCKED), or `copy_failed` (the librarian could not complete the
+write — worth one retry, and a BLOCKED marker if it keeps failing). A
+timeout prints its own message; retry once with a longer `--timeout-ms`
+before treating it as a failure worth blocking on.
 
 ---
 

@@ -59,13 +59,14 @@ The dev agent receives only the subtask. Include enough context that the agent c
 - What needs to be built or changed
 - Any constraints or acceptance criteria relevant to that role
 - Reference to the parent ticket key
-- Any artifact this subtask depends on — if the story you are decomposing
-  names an uploaded artifact (a design file, a spec document) by its
-  canonical id, and a given subtask is the one that needs it, copy that id
-  into the subtask's description verbatim. There is no separate structured
-  field for this yet, so the assigned agent finds it by reading your
-  description — not by a link recorded anywhere else. Never invent an id
-  that was not given to you.
+- Any artifact this subtask depends on — artifact links live on a work
+  item's own record, never in prose. A subtask inherits none from its
+  parent story; if one needs an artifact, the product owner records that
+  link on the subtask's own record before it is dispatched. Do not copy an
+  artifact id into the subtask's description — the assigned agent reads
+  its linked artifacts by its subtask's own canonical id, the way its role
+  doc describes. Recording the link for you automatically is a planned
+  follow-on, not something available today.
 
 ---
 

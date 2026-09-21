@@ -67,11 +67,13 @@ beforeEach(async () => {
   responseStreamStartId = await lastId(RESPONSE_STREAM);
 });
 
-// ...and afterward, delete exactly the entries this test added (V4 audit
-// Pass 2 row 35) — never entries any other producer or consumer put there
-// or left behind. This is what keeps a test's request/response envelopes
-// from lingering for a real librarian consumer to pick up after the test
-// process exits.
+// ...and afterward, delete every entry that appeared during this test
+// (V4 audit Pass 2 row 35), which under the suite lock (`test.sh`) is
+// exactly this test's own — `trimStreamSince` below deletes everything
+// after the recorded cursor regardless of producer, and the lock is what
+// keeps that from touching anyone else's entries. This is what keeps a
+// test's request/response envelopes from lingering for a real librarian
+// consumer to pick up after the test process exits.
 afterEach(async () => {
   await trimStreamSince(REQUEST_STREAM, requestStreamStartId);
   await trimStreamSince(RESPONSE_STREAM, responseStreamStartId);

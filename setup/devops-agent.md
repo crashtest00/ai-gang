@@ -25,7 +25,9 @@ You work inside a Docker container with:
 - Access to this project's code at `/workspace`
 - Access to shared agent definitions and reference docs at `/agent-docs`
 - No access to other project containers
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, `$AGENT_DISPLAY_NAME`
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
+  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
+  unset
 
 ## Requesting an Artifact
 
@@ -62,8 +64,11 @@ filled in automatically from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME`).
 
 On failure the command exits non-zero and names the reason on stderr:
 `unknown_artifact` (recheck the id against the work-item record),
-`path_outside_repository` (retry with a plain path under `/workspace`), or
-`copy_failed` (worth one retry). A timeout prints its own message.
+`path_outside_repository` (retry with a plain path under `/workspace`),
+`unknown_destination_repo` (the project's working tree is not where the
+librarian expects it — a platform configuration problem, not yours to fix;
+report BLOCKED), or `copy_failed` (worth one retry). A timeout prints its
+own message.
 
 ## How to Look Things Up
 
