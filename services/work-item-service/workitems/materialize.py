@@ -11,11 +11,14 @@ issues. Used for a project in LOCAL mode.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from django.db import transaction
 
 from . import assignment, store, write_gate
+
+logger = logging.getLogger(__name__)
 
 
 class MaterializationValidationError(Exception):
@@ -183,15 +186,44 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
         # when there is a parent to report it on — handleCreateSubtask
         # (gateway.js) always supplies one; materialize_decomposition's own
         # unit tests that omit parentWorkItemId never reach this path.
+        #
+        # Both writes below are best-effort: this report exists to help a
+        # human find the parent, it must never replace `err` itself, which
+        # is what command_consumer.py's dead-letter reason and
+        # is_permanent_rejection need intact (the latter via err.code) to
+        # dead-letter the command once instead of retrying it forever. Each
+        # write gets its own try/except so a failure in one does not skip
+        # the other, and either failing just logs and moves on.
+        #
+        # transition_status's own story-detail gate
+        # (store.py:443-451, `_assert_story_fields_present`) normally can't
+        # refuse this call: reaching materialize_decomposition at all means
+        # the parent already sits at 'ready', which that same gate already
+        # required the story fields for. If dispatch eligibility ever
+        # changes so a parent can decompose before 'ready', this transition
+        # could start being refused too — the try/except below is what
+        # keeps that refusal from masking `err` if that happens.
         if parent_work_item_id:
-            store.append_comment(
-                parent_work_item_id, actor,
-                f'[system] Subtask {err.subtask_id} could not be created: {err.artifact_error}. '
-                'No subtask was created for it; fix the reference and retry the decomposition.',
-            )
-            store.transition_status(
-                parent_work_item_id, 'needs-clarification', actor=actor, origin=write_gate.Origins.DIRECT,
-            )
+            try:
+                store.append_comment(
+                    parent_work_item_id, actor,
+                    f'[system] Subtask {err.subtask_id} could not be created: {err.artifact_error}. '
+                    'No subtask was created for it; fix the reference and retry the decomposition.',
+                )
+            except Exception:  # noqa: BLE001 - best-effort report; `err` below is what must propagate
+                logger.warning(
+                    'materialize_decomposition: could not append the unresolved-artifact comment to '
+                    'parent %s for subtask %s', parent_work_item_id, err.subtask_id, exc_info=True,
+                )
+            try:
+                store.transition_status(
+                    parent_work_item_id, 'needs-clarification', actor=actor, origin=write_gate.Origins.DIRECT,
+                )
+            except Exception:  # noqa: BLE001 - best-effort report; `err` below is what must propagate
+                logger.warning(
+                    'materialize_decomposition: could not transition parent %s to needs-clarification for '
+                    'subtask %s', parent_work_item_id, err.subtask_id, exc_info=True,
+                )
         raise
 
     return {'idToWorkItemId': id_to_work_item_id}

@@ -19,6 +19,7 @@ tests/test_work_item_references_command_consumer.py's own style.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 
@@ -201,3 +202,134 @@ def test_req01_materialize_decomposition_with_unresolved_specification_link_also
     assert store.get_work_item(subtask_id) is None
     parent = store.get_work_item(parent_id)
     assert parent.status == 'needs-clarification'
+
+
+def test_req01_materialize_decomposition_unresolved_artifact_report_reaches_a_story_parent_with_complete_fields(clean_db, redis_client, redis_factory):
+    """The reachable case named by the V4.1 doc-vs-code audit's row on
+    materialize.py's rejection report: dispatch only ever decomposes a
+    parent that already sits at 'ready', and reaching 'ready' already ran
+    `_transition_status_core`'s story-detail gate (store.py:443-451,
+    `_assert_story_fields_present`) — so a `story` parent with complete
+    story fields takes the rejection report's 'proposed' ->
+    'needs-clarification' transition exactly the way a `task` parent
+    does."""
+    parent_id = uuid.uuid4()
+    store.create_work_item({
+        'id': parent_id, 'project': PROJECT, 'type': 'story', 'displayName': 'Parent story',
+        'storyDetail': {
+            'behavior': 'b', 'acceptanceCriteria': 'ac', 'constraints': 'c',
+            'edgeCases': 'e', 'outOfScope': 'oos',
+        },
+    })
+
+    subtask_id = uuid.uuid4()
+    bogus_artifact_id = uuid.uuid4()
+    stream = command_stream_name(PROJECT)
+
+    consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='v41-test-4')
+    consumer.start()
+    try:
+        publish_command(redis_client, {
+            'command': 'materializeDecomposition', 'actor': 'refinement-agent',
+            'message': {
+                'parentWorkItemId': str(parent_id),
+                'subtasks': [{
+                    'id': str(subtask_id), 'displayName': 'Backend: implement endpoint', 'description': 'do it',
+                    'agent': 'backend-agent', 'Blocked By': [],
+                    'artifactLinks': [str(bogus_artifact_id)],
+                }],
+            },
+        })
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+    finally:
+        consumer.stop()
+
+    assert store.get_work_item(subtask_id) is None
+
+    # The dead-lettered command's error still names both ids.
+    entries = redis_client.xrange(dead_letter_stream_name(stream))
+    assert len(entries) == 1
+    _entry_id, fields = entries[0]
+    dead_letter = json.loads(fields['data'])
+    assert str(subtask_id) in dead_letter['reason']
+    assert str(bogus_artifact_id) in dead_letter['reason']
+
+    parent = store.get_work_item(parent_id)
+    assert parent.status == 'needs-clarification'
+
+    client = Client()
+    parent_body = client.get(f'/work-items/{parent_id}', {'full': 'true'}).json()
+    comment_bodies = [c['body'] for c in parent_body['comments']]
+    assert any(
+        str(subtask_id) in body and str(bogus_artifact_id) in body for body in comment_bodies
+    ), f'expected a comment naming both the subtask id and the artifact id, got: {comment_bodies}'
+
+
+def test_req01_materialize_decomposition_unresolved_artifact_report_survives_a_refused_transition(clean_db, redis_client, redis_factory, caplog):
+    """The row's central worry: if a parent's `needs-clarification`
+    transition is ever refused (here, a `story` parent missing every
+    required story-detail field, which `_assert_story_fields_present`
+    refuses at store.py:443-451 the same way it would refuse any other
+    incomplete story leaving 'proposed'), that refusal must not replace the
+    `MaterializationUnresolvedArtifactError` the dead letter and
+    `is_permanent_rejection` need. The comment write is independent of the
+    transition and still lands; the refused transition is logged once and
+    swallowed, not raised."""
+    parent_id = uuid.uuid4()
+    store.create_work_item({
+        'id': parent_id, 'project': PROJECT, 'type': 'story', 'displayName': 'Incomplete parent story',
+        # No storyDetail at all — every one of the five required fields is
+        # missing, which is what _assert_story_fields_present refuses.
+    })
+
+    subtask_id = uuid.uuid4()
+    bogus_artifact_id = uuid.uuid4()
+    stream = command_stream_name(PROJECT)
+
+    consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='v41-test-5')
+    consumer.start()
+    try:
+        with caplog.at_level(logging.WARNING, logger='workitems.materialize'):
+            publish_command(redis_client, {
+                'command': 'materializeDecomposition', 'actor': 'refinement-agent',
+                'message': {
+                    'parentWorkItemId': str(parent_id),
+                    'subtasks': [{
+                        'id': str(subtask_id), 'displayName': 'Backend: implement endpoint', 'description': 'do it',
+                        'agent': 'backend-agent', 'Blocked By': [],
+                        'artifactLinks': [str(bogus_artifact_id)],
+                    }],
+                },
+            })
+            wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+    finally:
+        consumer.stop()
+
+    assert store.get_work_item(subtask_id) is None
+
+    # The dead-lettered command's error is still the original
+    # MaterializationUnresolvedArtifactError, naming both ids — never
+    # replaced by the transition's own ValidationError.
+    entries = redis_client.xrange(dead_letter_stream_name(stream))
+    assert len(entries) == 1
+    _entry_id, fields = entries[0]
+    dead_letter = json.loads(fields['data'])
+    assert str(subtask_id) in dead_letter['reason']
+    assert str(bogus_artifact_id) in dead_letter['reason']
+
+    # The transition was refused — status is unchanged.
+    parent = store.get_work_item(parent_id)
+    assert parent.status == 'proposed'
+
+    # The comment write does not depend on the transition and still lands.
+    client = Client()
+    parent_body = client.get(f'/work-items/{parent_id}', {'full': 'true'}).json()
+    comment_bodies = [c['body'] for c in parent_body['comments']]
+    assert any(
+        str(subtask_id) in body and str(bogus_artifact_id) in body for body in comment_bodies
+    ), f'expected a comment naming both the subtask id and the artifact id, got: {comment_bodies}'
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == 'workitems.materialize']
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert str(parent_id) in warnings[0].getMessage()
+    assert str(subtask_id) in warnings[0].getMessage()
