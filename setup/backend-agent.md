@@ -27,23 +27,21 @@ fixture — already uploaded to the platform's artifact store. You never
 browse or search for one: you are given its canonical id, and you ask for
 it by that id alone.
 
-**Finding the id.** The internal work-item record behind your ticket can
-carry a list of linked artifacts. Your dispatch prompt's `Jira issue key`
-line is the key to resolve that record with — look it up on the work-item
-service, reachable from your container on the shared `ai-gang` Docker
-network:
+**Finding the id.** Your dispatch prompt's `Task ID` is your work item's
+canonical id. Read the record from the work-item service, reachable from
+your container on the shared `ai-gang` Docker network:
 
 ```bash
-curl -s "http://work-item-service:9100/work-items?project=$PROJECT_NAME&externalKey=<the key from your prompt>"
+curl -s "http://work-item-service:9100/work-items/<your Task ID>"
 ```
 
-A match comes back with its `specification_link` and `artifact_links`
-already attached — read the artifact ids straight from that response. An
-empty list means your project has no Jira integration, so the key your
-prompt gave you already IS the record's own canonical id: use it directly
-with `GET /work-items/<that id>` instead — same host and port. Either way,
-only request an `artifact_id` you found in that record — never guess or
-invent one, and never fall back to parsing the ticket text for one.
+It comes back with `specification_link` and `artifact_links`; read the
+artifact ids straight from `artifact_links`. If that request returns 404,
+your dispatch did not carry the record's canonical id — the platform, not
+you, supplies it, so do not look the record up any other way: treat any
+artifact the ticket depends on as unavailable and report BLOCKED. Only
+request an `artifact_id` you found in that record — never guess or invent
+one, and never parse the ticket text for one.
 
 **Asking for it:**
 

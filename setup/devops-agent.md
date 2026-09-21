@@ -35,18 +35,18 @@ uploaded to the platform's artifact store. There is no browse or search:
 the work item behind your ticket names the artifact's canonical id, and you
 ask for it by that id alone.
 
-Your dispatch prompt's `Jira issue key` line resolves that work item, on
-the work-item service reachable from your container over the shared
-`ai-gang` Docker network:
+Your dispatch prompt's `Task ID` is that work item's canonical id. Read the
+record on the work-item service, reachable from your container over the
+shared `ai-gang` Docker network:
 
 ```bash
-curl -s "http://work-item-service:9100/work-items?project=$PROJECT_NAME&externalKey=<the key from your prompt>"
+curl -s "http://work-item-service:9100/work-items/<your Task ID>"
 ```
 
-A match's `specification_link`/`artifact_links` name the ids to request. An
-empty list means your project has no Jira integration, so the key itself
-already IS the record's canonical id — call `GET /work-items/<that id>`
-instead, same host and port.
+Its `specification_link`/`artifact_links` name the ids to request. A 404
+means your dispatch did not carry the canonical id — the platform supplies
+it, not you — so treat the artifact as unavailable and report BLOCKED
+rather than looking the record up another way.
 
 ```bash
 node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>

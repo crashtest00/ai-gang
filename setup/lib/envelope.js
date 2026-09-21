@@ -17,13 +17,6 @@
 // neither kind; they exist in its copy only to keep the two schemas
 // identical.
 //
-// Not yet true of the whole KIND set, though: WORK_ITEM_COMMAND/
-// WORK_ITEM_EVENT are in the ScrumMaster copy's KIND but not this one — a
-// gap present since this file's initial import, unrelated to row 34 or PR
-// #21, and outside that fix's file ownership (row 34 covers this header
-// note only). Flagged as a proposal in that fix's report for its own
-// audit row rather than changed here.
-
 const crypto = require('crypto');
 
 const SCHEMA_VERSION = '1';
@@ -33,6 +26,11 @@ const KIND = Object.freeze({
   TASK_STATUS: 'task_status',
   JIRA_OPERATION: 'jira_operation',
   WEBHOOK_EVENT: 'webhook_event',
+  // A command into, or an outbound change/rejection event out of, the
+  // Internal Work-Item Service's canonical work-item store (V2). Carried
+  // here for parity with the ScrumMaster copy; no container-side caller.
+  WORK_ITEM_COMMAND: 'work_item_command',
+  WORK_ITEM_EVENT: 'work_item_event',
   // V4 — artifact custody. The librarian's request/response pair
   // (librarian/README.md, workitems/envelope.py's Kind class). Not a task:
   // TASK_KINDS below deliberately does not include either, so neither
