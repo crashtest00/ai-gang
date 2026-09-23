@@ -16,9 +16,13 @@ services:
     tty: true
     
     volumes:
-      # Mount this project directory to /workspace in container
-      - .:/workspace
-      
+      # Mount this project's src/ (the git repository) to /workspace in the
+      # container — not this directory itself, which also holds this
+      # compose file, the Dockerfile and .env. The agent must not see those
+      # (see scripts/init-project.sh, which generates each real project's
+      # compose file this way).
+      - ./src:/workspace
+
       # Mount shared agent definitions (read-only)
       # All containers can see these best practices
       - ../../setup:/agent-docs:ro

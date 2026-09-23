@@ -32,6 +32,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.postgres',
     'workitems',
+    'artifacts',
+    'librarian',
 ]
 
 MIDDLEWARE = [
@@ -144,6 +146,42 @@ WORKITEM_CONSUMER_ID = os.environ.get('WORKITEM_CONSUMER_ID') or os.uname().node
 RELAY_POLL_INTERVAL_MS = int(os.environ.get('RELAY_POLL_INTERVAL_MS', '1000'))
 RELAY_BATCH_SIZE = int(os.environ.get('RELAY_BATCH_SIZE', '20'))
 RELAY_ROW_DELAY_MS = int(os.environ.get('RELAY_ROW_DELAY_MS', '0'))  # test-only knob, see workitems/relay.py
+
+
+# --- Artifact ingress ----------------------------------------------------
+# The root of the mounted volume that holds artifact files. This is the
+# only authoritative copy of an artifact's bytes: a read resolves against
+# the file here, and a file edited in place from the host is returned by
+# the next read. Mounted as the named volume `artifact-data` in
+# docker-compose.yml; the test suite points it at a temp directory instead.
+# Layout under this root is documented in artifacts/README.md.
+ARTIFACT_ROOT = os.environ.get('ARTIFACT_ROOT', '/var/lib/aigang/artifacts')
+
+
+# --- Librarian (artifact delivery on request) ----------------------------
+# The root of the mounted projects directory. Every project repository is
+# one directory directly under it, which is what a delivery request's
+# `destination_repo` names (librarian/README.md). Mounted read-write in
+# docker-compose.yml (the librarian writes delivered files into a
+# repository's working tree) from the Source checkout's own `projects/`
+# directory, alongside the artifact volume mounted read-only.
+PROJECTS_ROOT = os.environ.get('PROJECTS_ROOT', '/var/lib/aigang/projects')
+
+# The subdirectory of a project directory that IS the repository: the git
+# working tree, and the directory each project's own docker-compose.yml
+# bind-mounts into its container as /workspace (scripts/init-project.sh).
+# A delivered file therefore lands where the building agent and git both
+# see it, and never beside the project's own docker-compose.yml,
+# Dockerfile or .env, which sit one level up and are not repository
+# content. A project directory without this subdirectory is
+# `unknown_destination_repo` (librarian/paths.py).
+PROJECTS_REPO_SUBDIR = os.environ.get('PROJECTS_REPO_SUBDIR', 'src')
+
+# Test-only: milliseconds the librarian sleeps while holding its
+# per-(artifact, repository) advisory lock, so a test can make two
+# requests genuinely overlap. Zero in every deployment — the same knob
+# shape as RELAY_ROW_DELAY_MS above.
+LIBRARIAN_LOCK_HOLD_DELAY_MS = int(os.environ.get('LIBRARIAN_LOCK_HOLD_DELAY_MS', '0'))
 
 
 # --- Logging -------------------------------------------------------------

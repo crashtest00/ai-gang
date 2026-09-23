@@ -1308,6 +1308,128 @@ test('local mode: create_subtask without agentFieldValue derives the agent from 
   assert.ok(!calls.some(c => c.payload.command === 'transitionStatus'), 'nothing was refused, so nothing is flagged');
 });
 
+// v4.1 agent-artifact-automation.md REQ-01 — the create_subtask request's
+// optional specificationLink/artifactLinks ride, unchanged, inside the
+// canonical materializeDecomposition command's subtasks entry.
+
+test('local mode: create_subtask forwards a well-formed specificationLink and artifactLinks onto the materialized subtask', async (t) => {
+  const calls = mockLocalMode(t);
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask: Backend: implement endpoint'),
+        buildDataPart({
+          operation: 'create_subtask',
+          summary: 'Backend: implement endpoint',
+          description: 'full desc',
+          agentFieldValue: 'backend-agent',
+          specificationLink: { artifactId: 'artifact-1', requirementId: 'REQ-9' },
+          artifactLinks: ['artifact-2', 'artifact-3'],
+        }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  const materialize = calls.find(c => c.payload.command === 'materializeDecomposition');
+  assert.ok(materialize, 'a well-formed reference must not block materialization');
+  const subtask = materialize.payload.message.subtasks[0];
+  assert.deepEqual(subtask.specificationLink, { artifactId: 'artifact-1', requirementId: 'REQ-9' });
+  assert.deepEqual(subtask.artifactLinks, ['artifact-2', 'artifact-3']);
+});
+
+test('local mode: create_subtask with neither reference materializes a subtask entry carrying neither key', async (t) => {
+  const calls = mockLocalMode(t);
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask: Backend: implement endpoint'),
+        buildDataPart({
+          operation: 'create_subtask', summary: 'Backend: implement endpoint', description: 'full desc', agentFieldValue: 'backend-agent',
+        }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  const materialize = calls.find(c => c.payload.command === 'materializeDecomposition');
+  const subtask = materialize.payload.message.subtasks[0];
+  assert.ok(!('specificationLink' in subtask), 'an unreferenced subtask entry must carry no specificationLink key at all');
+  assert.ok(!('artifactLinks' in subtask), 'an unreferenced subtask entry must carry no artifactLinks key at all');
+});
+
+test('local mode: create_subtask with a malformed specificationLink rejects the whole request, naming the field as refused rather than missing', async (t) => {
+  const calls = mockLocalMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({
+          operation: 'create_subtask',
+          summary: 'Backend: implement endpoint',
+          description: 'full desc',
+          agentFieldValue: 'backend-agent',
+          specificationLink: { artifactId: 'artifact-1' }, // requirementId missing — malformed, not absent
+        }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.ok(!calls.some(c => c.payload.command === 'materializeDecomposition'), 'a malformed reference must create nothing');
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  assert.ok(comment, 'the parent must carry a visible record of the rejection');
+  assert.match(comment.payload.body, /specificationLink/);
+  assert.match(comment.payload.body, /present, but not an object/, 'the field is present, so the comment must say why it was refused, not that it is missing');
+  const transition = calls.find(c => c.payload.command === 'transitionStatus');
+  assert.equal(transition.payload.status, 'needs-clarification');
+});
+
+test('local mode: create_subtask with a malformed artifactLinks rejects the whole request and creates nothing', async (t) => {
+  const calls = mockLocalMode(t);
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [
+        buildTextPart('Creating subtask'),
+        buildDataPart({
+          operation: 'create_subtask',
+          summary: 'Backend: implement endpoint',
+          description: 'full desc',
+          agentFieldValue: 'backend-agent',
+          artifactLinks: ['artifact-1', 42], // not all strings — malformed
+        }),
+      ],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.ok(!calls.some(c => c.payload.command === 'materializeDecomposition'));
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  assert.match(comment.payload.body, /artifactLinks/);
+});
+
 test('local mode: create_subtask with an invalid agent reports a visible failure and publishes nothing', async (t) => {
   const calls = mockLocalMode(t);
 

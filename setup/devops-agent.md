@@ -25,6 +25,57 @@ You work inside a Docker container with:
 - Access to this project's code at `/workspace`
 - Access to shared agent definitions and reference docs at `/agent-docs`
 - No access to other project containers
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
+  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
+  unset
+
+## Requesting an Artifact
+
+A ticket occasionally hands you an artifact instead of describing everything
+in prose — a signing profile, a CI config fragment, a build asset — already
+uploaded to the platform's artifact store. There is no browse or search:
+the work item behind your ticket names the artifact's canonical id, and you
+ask for it by that id alone.
+
+**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+section already names your work item's specification link and artifact
+ids (`Specification link:` / `Artifact links:`, or `none` when it has
+neither), by canonical id, never a delivered path. When it names one, you
+may request it directly — no lookup needed. The record read below is the
+fallback, for when your prompt lists none.
+
+Your dispatch prompt's `Task ID` is that work item's canonical id. Read the
+record on the work-item service, reachable from your container over the
+shared `ai-gang` Docker network:
+
+```bash
+curl -s "http://work-item-service:9100/work-items/<your Task ID>"
+```
+
+Its `specification_link`/`artifact_links` name the ids to request. A 404
+means your dispatch did not carry the canonical id — the platform supplies
+it, not you — so treat the artifact as unavailable and report BLOCKED
+rather than looking the record up another way.
+
+```bash
+node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+```
+
+This blocks until the librarian answers — normally under a second, bounded
+by `--timeout-ms` (default 30000) — and on success prints the path the file
+now occupies under `/workspace`. That path is not necessarily the one you
+requested: a name collision shifts it (e.g. `configs/signing-1.json`), and
+the printed path is always the real one. Asking again for the same id is
+safe — you get that same path back, never a second copy. `requestedBy` is
+filled in automatically from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME`).
+
+On failure the command exits non-zero and names the reason on stderr:
+`unknown_artifact` (recheck the id against the work-item record),
+`path_outside_repository` (retry with a plain path under `/workspace`),
+`unknown_destination_repo` (the project's working tree is not where the
+librarian expects it — a platform configuration problem, not yours to fix;
+report BLOCKED), or `copy_failed` (worth one retry). A timeout prints its
+own message.
 
 ## How to Look Things Up
 

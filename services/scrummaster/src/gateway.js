@@ -758,6 +758,44 @@ async function reportUnsupportedOperation(ticketKey, operation, ctx) {
   console.error(`[gateway] unsupported operation "${operation}" rejected on ${ticketKey}`);
 }
 
+// v4.1 agent-artifact-automation.md REQ-01 — a create_subtask request's
+// optional specificationLink/artifactLinks, validated for shape only (never
+// whether the artifact id actually resolves — that check lives in the
+// work-item service, work-items.md REQ-04, and its rejection is reported
+// through the materializeDecomposition dead-letter path, not this one).
+// Returns phrases, not bare field names — carry-forward 5 (build brief
+// §1b): reportMissingFields' "the request is missing ..." sentence must
+// read as a reason a PRESENT field was refused, not as an absent one, so a
+// malformed reference is never mistaken for a missing one.
+function validateReferenceShape(data) {
+  const problems = [];
+  const { specificationLink, artifactLinks } = data;
+
+  if (specificationLink !== undefined && specificationLink !== null) {
+    const isWellFormed = specificationLink
+      && typeof specificationLink === 'object'
+      && !Array.isArray(specificationLink)
+      && typeof specificationLink.artifactId === 'string' && specificationLink.artifactId.length > 0
+      && typeof specificationLink.requirementId === 'string' && specificationLink.requirementId.length > 0;
+    if (!isWellFormed) {
+      problems.push(
+        'a well-formed specificationLink (present, but not an object with non-empty "artifactId" and "requirementId" strings)'
+      );
+    }
+  }
+
+  if (artifactLinks !== undefined && artifactLinks !== null) {
+    const isWellFormed = Array.isArray(artifactLinks) && artifactLinks.every(id => typeof id === 'string' && id.length > 0);
+    if (!isWellFormed) {
+      problems.push(
+        'a well-formed artifactLinks list (present, but not an array of non-empty artifact id strings)'
+      );
+    }
+  }
+
+  return problems;
+}
+
 // Report a create_subtask request that cannot be acted on — reportMissingFields
 // with the create_subtask-specific context (the requested summary, and, when
 // agentFieldValue is what's missing, the project's permitted agent ids).
@@ -839,7 +877,7 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
 // so a from-scratch retry reuses the same id instead of materializing a
 // second work item.
 async function handleCreateSubtask(record, data, ctx) {
-  const { summary, description } = data;
+  const { summary, description, specificationLink, artifactLinks } = data;
   const parentTicketKey = record.jiraIssueKey;
 
   if (!parentTicketKey) {
@@ -869,6 +907,10 @@ async function handleCreateSubtask(record, data, ctx) {
   const missing = [];
   if (!summary) missing.push('summary');
   if (!agentFieldValue) missing.push('agentFieldValue');
+  // v4.1 REQ-01 — a malformed reference rejects the whole request the same
+  // way a missing required field does: nothing is created, and nothing is
+  // ever forwarded half-validated.
+  missing.push(...validateReferenceShape(data));
   if (missing.length > 0) {
     console.warn(`[gateway] create_subtask missing required fields (${missing.join(', ')}) — reporting on ${parentTicketKey}. Received:`, JSON.stringify(data));
     await reportSubtaskRejection(parentTicketKey, summary, missing, ctx);
@@ -889,12 +931,22 @@ async function handleCreateSubtask(record, data, ctx) {
     let subtaskId = await idempotency.getOutcome(client, 'subtask-create', messageId);
     if (subtaskId === undefined) {
       subtaskId = crypto.randomUUID();
+      // v4.1 REQ-01 — the two optional references ride inside this
+      // subtask entry untouched, forwarded unchanged to materialize.py,
+      // which passes them through create_work_item exactly as `create`
+      // does (work-items.md REQ-01, REQ-02). Included only when the
+      // request actually carried them, so an unreferenced subtask's
+      // canonical command is byte-for-byte what it was before this
+      // feature.
+      const subtaskEntry = { id: subtaskId, displayName: summary, description: description || '', agent: agentFieldValue };
+      if (specificationLink) subtaskEntry.specificationLink = specificationLink;
+      if (artifactLinks) subtaskEntry.artifactLinks = artifactLinks;
       await canonicalWorkItems.publishCommand(ctx.projectName, {
         command: 'materializeDecomposition',
         actor: agent.id,
         message: {
           parentWorkItemId: parentTicketKey,
-          subtasks: [{ id: subtaskId, displayName: summary, description: description || '', agent: agentFieldValue }],
+          subtasks: [subtaskEntry],
         },
       });
       await idempotency.recordOutcome(client, 'subtask-create', messageId, subtaskId);

@@ -59,6 +59,55 @@ The dev agent receives only the subtask. Include enough context that the agent c
 - What needs to be built or changed
 - Any constraints or acceptance criteria relevant to that role
 - Reference to the parent ticket key
+- Any artifact this subtask depends on — never copy an artifact id or a
+  requirement id into the description. References live on a work item's
+  own record; see "Deriving and Requesting Artifacts" below for how a
+  subtask gets its own.
+
+---
+
+## Deriving and Requesting Artifacts
+
+Before you create any subtask, read the story's own record — your
+prompt's `## A2A TASK CONTEXT` already names it (`Specification link:` /
+`Artifact links:`, or `none` when the story has neither), and the record
+itself is reachable by the same `Task ID`:
+
+```bash
+curl -s "http://work-item-service:9100/work-items/<Task ID>?full=true"
+```
+
+Its `specification_link` and `artifact_links` are the story's own; you
+never invent one or take one from ticket prose. For every subtask you
+create:
+
+- **`specificationLink`** — every subtask gets the story's own artifact
+  id. Its `requirementId` is the story's requirement id, unless the
+  story's own description explicitly splits its work across requirements,
+  in which case use the requirement id that authorizes that subtask's
+  work.
+- **`artifactLinks`** — assign each of the story's artifact links to
+  whichever subtask (or subtasks) actually needs it for its work. An
+  artifact link that no subtask needs is simply not assigned to any.
+
+Never write an artifact id or a requirement id into a subtask's
+`description` — the subtask's own record carries them, and the
+description must stand on its own without them.
+
+**Requesting delivery.** For every artifact link you assign to a subtask,
+request its delivery into the project's repository through the librarian
+*before* you submit that subtask's `create_subtask` request, so the file
+is already there once the subtask is dispatched:
+
+```bash
+node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+```
+
+A failed delivery does not stop you from creating the subtask — the link
+is still recorded on it, and the building agent can request the same
+artifact again once dispatched (the same helper, the same path returned
+either way). Report every artifact's outcome — the path it was delivered
+to, or the failure reason — in your final `completed` summary message.
 
 ---
 
@@ -74,14 +123,21 @@ For each subtask, submit a `create_subtask` operation. Your own Task stays
 `working` while you create subtasks — the parent ticket is implied by your
 Task, so you do not repeat its key.
 
-`summary`, `description` and `agentFieldValue` are all required on every
-`create_subtask` submission:
+`summary`, `description` and `agentFieldValue` are required on every
+`create_subtask` submission. Two more are optional, and carry the
+references you derived above:
 
 - `agentFieldValue` is the id of the agent that will implement the subtask.
   Use one of the ids listed under `## ALLOWED AGENTS` in your prompt, copied
   exactly — never a display name, a role word, or an id you invented.
 - `summary` starts with that agent's role followed by a colon, as in
   `Backend: <concise description>`.
+- `specificationLink` (optional) — `{"artifactId": "<id>", "requirementId": "<REQ-n>"}`,
+  the story's own artifact id and the requirement id that authorizes this
+  subtask.
+- `artifactLinks` (optional) — an ordered list of artifact canonical ids
+  this subtask needs, e.g. `["<id>", "<id>"]`. Omit it, or send an empty
+  list, when this subtask needs none of the story's artifacts.
 
 A submission that omits `agentFieldValue` is not created as sent. ScrumMaster
 recovers the id from the summary's role prefix only when that prefix names
@@ -89,7 +145,9 @@ exactly one agent this project has other than you; otherwise it creates
 nothing, posts a
 comment on the parent ticket naming the missing field, and leaves the parent
 Blocked for a human to look at. Send the field every time rather than relying
-on that recovery.
+on that recovery. A `specificationLink` or `artifactLinks` value that does
+not parse (not the shapes above) is refused the same way — nothing is
+created, and the comment names the field.
 
 ```bash
 cat > /tmp/msg.json << 'ENDJSON'
@@ -110,7 +168,9 @@ cat > /tmp/msg.json << 'ENDJSON'
           "operation": "create_subtask",
           "summary": "<Agent role>: <concise description>",
           "description": "<self-contained description of what this agent needs to do>",
-          "agentFieldValue": "<required — an agent id from ## ALLOWED AGENTS>"
+          "agentFieldValue": "<required — an agent id from ## ALLOWED AGENTS>",
+          "specificationLink": { "artifactId": "<optional — the story's specification_link artifact id>", "requirementId": "<optional — the requirement id that authorizes this subtask>" },
+          "artifactLinks": ["<optional — an artifact id this subtask needs>"]
         }
       }
     ]

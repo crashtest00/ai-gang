@@ -11,6 +11,9 @@
 #   - relay      — outbox relay, its own container so it can be
 #                   killed/restarted independently of api/consumers
 #   - consumers  — Streams command + webhook consumers
+#   - librarian  — artifact-delivery subscriber, its own container because
+#                   it is the only one that mounts the project
+#                   repositories (strategy/v4.0/features/librarian.md §4)
 services:
   workitem-postgres:
     image: postgres:16-alpine
@@ -48,10 +51,22 @@ services:
     container_name: work-item-service
     env_file: .env
     command: gunicorn workitemservice.wsgi:application --bind 0.0.0.0:9100
+    environment:
+      # The artifact volume's mount point inside the container; matches
+      # workitemservice/settings.py's ARTIFACT_ROOT default. Stated here
+      # rather than left implicit so the mount below and the setting can
+      # be checked against each other in one place.
+      - ARTIFACT_ROOT=/var/lib/aigang/artifacts
     ports:
       - "127.0.0.1:9100:9100"
     volumes:
       - ../scrummaster/config:/app/config:ro
+      # Artifact ingress (strategy/v4.0/features/artifact-ingress.md
+      # REQ-02). Only `api` mounts it: `api` is the one service that
+      # uploads (the Django admin) and reads artifact bytes. Not read-only
+      # — an upload writes here — and a named volume rather than a bind
+      # mount so the bytes survive container recreation.
+      - artifact-data:/var/lib/aigang/artifacts
     networks:
       - ai-gang
     restart: unless-stopped
@@ -87,9 +102,58 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  librarian:
+    build: .
+    container_name: workitem-librarian
+    env_file: .env
+    command: python manage.py run_librarian
+    # Project images run as uid 1000 (`Docker Templates/Dockerfile-node.template`)
+    # and the host's `projects/*` are owned by 1000:1000. A delivered file
+    # is one a building agent has to be able to edit, delete and
+    # `git clean`; written as root it would be none of those. Only this
+    # service needs it — the artifact volume it also mounts is `:ro`.
+    user: "1000:1000"
+    environment:
+      # Both roots the librarian works between, plus the subdirectory of a
+      # project directory that is the repository, stated here so the mounts
+      # below and the settings they have to match are checkable in one
+      # place (same reason `api` states ARTIFACT_ROOT).
+      - ARTIFACT_ROOT=/var/lib/aigang/artifacts
+      - PROJECTS_ROOT=/var/lib/aigang/projects
+      - PROJECTS_REPO_SUBDIR=src
+    volumes:
+      - ../scrummaster/config:/app/config:ro
+      # The artifact volume, READ-ONLY. The librarian only ever copies
+      # OUT of it; upload is the admin's, on `api` (PRD §7.1, "upload is
+      # the only way in"). `:ro` is what makes that a property of the
+      # deployment rather than of this app's good behaviour.
+      - artifact-data:/var/lib/aigang/artifacts:ro
+      # The projects root, read-write: delivery writes into a
+      # repository's working tree. One bind mount of the directory that
+      # holds every project repository, not a volume per repository —
+      # each project's own compose file bind-mounts its `src/` into that
+      # project's container as /workspace, so these are host
+      # directories, and there is nothing else to mount. A request's
+      # `destination_repo` is one directory name directly under here, and
+      # the repository it names is that directory's `src/` — the same
+      # directory the project container sees as /workspace
+      # (librarian/README.md).
+      - ../../projects:/var/lib/aigang/projects
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
 networks:
   ai-gang:
     external: true
 
 volumes:
   workitem-postgres-data:
+  # Artifact files. The host path `docker volume inspect
+  # work-item-service_artifact-data` reports is where a human edits a
+  # stored artifact in place (REQ-02); see artifacts/README.md for the
+  # layout under it.
+  artifact-data:

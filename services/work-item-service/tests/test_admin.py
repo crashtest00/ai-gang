@@ -66,6 +66,8 @@ def test_admin_add_work_item_routes_through_store_and_produces_history_and_outbo
         'comments-MIN_NUM_FORMS': '0', 'comments-MAX_NUM_FORMS': '1000',
         'history-TOTAL_FORMS': '0', 'history-INITIAL_FORMS': '0',
         'history-MIN_NUM_FORMS': '0', 'history-MAX_NUM_FORMS': '1000',
+        'artifact_links-TOTAL_FORMS': '0', 'artifact_links-INITIAL_FORMS': '0',
+        'artifact_links-MIN_NUM_FORMS': '0', 'artifact_links-MAX_NUM_FORMS': '1000',
     })
     assert resp.status_code == 302, f'expected a redirect after a successful add, got {resp.status_code}: {getattr(resp, "context", None) and resp.context["errors"] if hasattr(resp, "context") else ""}'
 
@@ -111,6 +113,8 @@ def test_admin_add_work_item_uses_admin_ui_origin(clean_db, monkeypatch):
         'comments-MIN_NUM_FORMS': '0', 'comments-MAX_NUM_FORMS': '1000',
         'history-TOTAL_FORMS': '0', 'history-INITIAL_FORMS': '0',
         'history-MIN_NUM_FORMS': '0', 'history-MAX_NUM_FORMS': '1000',
+        'artifact_links-TOTAL_FORMS': '0', 'artifact_links-INITIAL_FORMS': '0',
+        'artifact_links-MIN_NUM_FORMS': '0', 'artifact_links-MAX_NUM_FORMS': '1000',
     })
     assert resp.status_code == 302
     assert captured.get('origin') == write_gate.Origins.ADMIN_UI
@@ -127,6 +131,19 @@ _EMPTY_FORMSETS = {
     'comments-MIN_NUM_FORMS': '0', 'comments-MAX_NUM_FORMS': '1000',
     'history-TOTAL_FORMS': '0', 'history-INITIAL_FORMS': '0',
     'history-MIN_NUM_FORMS': '0', 'history-MAX_NUM_FORMS': '1000',
+    # work-items.md REQ-02 — WorkItemArtifactLinkInline (read-only, see
+    # admin.py); present on both add and change (a normal FK, not a
+    # same-table pk like story_detail/release_detail/specification_link).
+    'artifact_links-TOTAL_FORMS': '0', 'artifact_links-INITIAL_FORMS': '0',
+    'artifact_links-MIN_NUM_FORMS': '0', 'artifact_links-MAX_NUM_FORMS': '1000',
+}
+
+# work-items.md REQ-01 — WorkItemSpecificationLinkInline's management form.
+# Hidden on ADD (get_inlines) for the same 1:1-pk-corruption reason as
+# story_detail/release_detail, so only CHANGE-view POSTs need this.
+_SPECIFICATION_LINK_EMPTY_FORMSET = {
+    'specification_link-TOTAL_FORMS': '0', 'specification_link-INITIAL_FORMS': '0',
+    'specification_link-MIN_NUM_FORMS': '0', 'specification_link-MAX_NUM_FORMS': '1',
 }
 
 
@@ -179,6 +196,7 @@ def test_admin_add_then_edit_saves_story_detail_via_inline(clean_db):
         'release_detail-TOTAL_FORMS': '0', 'release_detail-INITIAL_FORMS': '0',
         'release_detail-MIN_NUM_FORMS': '0', 'release_detail-MAX_NUM_FORMS': '1',
         **_EMPTY_FORMSETS,
+        **_SPECIFICATION_LINK_EMPTY_FORMSET,
     })
     assert edit_resp.status_code == 302, f'expected a redirect after edit, got {edit_resp.status_code}: {getattr(edit_resp, "context", None) and edit_resp.context.get("errors")}'
 
@@ -228,6 +246,7 @@ def test_admin_add_then_edit_saves_release_detail_via_inline(clean_db):
         'release_detail-0-release_notes': 'Notes here', 'release_detail-0-candidate_sha': '',
         'release_detail-0-build_identifier': '', 'release_detail-0-preview_url': '',
         **_EMPTY_FORMSETS,
+        **_SPECIFICATION_LINK_EMPTY_FORMSET,
     })
     assert edit_resp.status_code == 302, f'expected a redirect after edit, got {edit_resp.status_code}: {getattr(edit_resp, "context", None) and edit_resp.context.get("errors")}'
 
@@ -297,6 +316,7 @@ def test_admin_rejected_status_transition_redisplays_form_instead_of_500(clean_d
         'release_detail-TOTAL_FORMS': '0', 'release_detail-INITIAL_FORMS': '0',
         'release_detail-MIN_NUM_FORMS': '0', 'release_detail-MAX_NUM_FORMS': '1',
         **_EMPTY_FORMSETS,
+        **_SPECIFICATION_LINK_EMPTY_FORMSET,
     })
     assert resp.status_code == 302, f'a rejected gated write must redirect, not 500 — got {resp.status_code}'
 

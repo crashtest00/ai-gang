@@ -88,6 +88,14 @@ function issueLikeFromCanonical(full) {
     edgeCases: detail.edge_cases || null,
     outOfScope: detail.out_of_scope || null,
     comments: (full.comments || []).map(c => ({ author: c.author, body: c.body, timestamp: c.created_at })),
+    // v4.1 agent-artifact-automation.md REQ-04 (build brief §1b
+    // carry-forward 1) — the `?full=true` read already returns both
+    // (serializers.serialize_work_item_full), so no read-API change was
+    // needed; this mapping was the only place dropping them.
+    specificationLink: full.specification_link
+      ? { artifactId: full.specification_link.artifact_id, requirementId: full.specification_link.requirement_id }
+      : null,
+    artifactLinks: (full.artifact_links || []).map(l => l.artifact_id),
   };
 }
 

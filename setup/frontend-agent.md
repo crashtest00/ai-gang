@@ -18,7 +18,80 @@ One task per invocation. Complete it fully before finishing.
 
 - `/workspace` — project codebase (read/write)
 - `/agent-docs` — agent definitions and reference docs (read-only)
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
+  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
+  unset
+
+---
+
+## Requesting an Artifact
+
+Some tickets depend on an artifact — a design file, a spec document, a data
+fixture — already uploaded to the platform's artifact store. You never
+browse or search for one: you are given its canonical id, and you ask for
+it by that id alone.
+
+**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+section already names your work item's specification link and artifact
+ids (`Specification link:` / `Artifact links:`, or `none` when it has
+neither), by canonical id, never a delivered path. When it names one, you
+may request it directly — no lookup needed. The record read below is the
+fallback, for when your prompt lists none.
+
+**Finding the id.** Your dispatch prompt's `Task ID` is your work item's
+canonical id. Read the record from the work-item service, reachable from
+your container on the shared `ai-gang` Docker network:
+
+```bash
+curl -s "http://work-item-service:9100/work-items/<your Task ID>"
+```
+
+It comes back with `specification_link` and `artifact_links`; read the
+artifact ids straight from `artifact_links`. If that request returns 404,
+your dispatch did not carry the record's canonical id — the platform, not
+you, supplies it, so do not look the record up any other way: treat any
+artifact the ticket depends on as unavailable and report BLOCKED. Only
+request an `artifact_id` you found in that record — never guess or invent
+one, and never parse the ticket text for one.
+
+**Asking for it:**
+
+```bash
+node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+```
+
+This publishes the request and blocks until the librarian answers —
+normally under a second — bounded by a timeout (`--timeout-ms`, default
+30000) so it can never hang your session indefinitely. `requestedBy` is
+filled in for you from `$AGENT_DISPLAY_NAME` (or `$PROJECT_NAME` if that is
+unset); there is no flag to override it. On success it prints, and only
+prints, the path the file now occupies, relative to `/workspace`, and
+exits 0:
+
+```bash
+FILE_PATH=$(node /agent-docs/lib/request-artifact.js $PROJECT_NAME 3f9c2eab-1a2b-4c3d-9e8f-0a1b2c3d4e5f designs/mockup.png)
+```
+
+**What the answer means.** The printed path is where the file actually is —
+not necessarily the path you asked for. If something else already occupied
+that name, the librarian delivered it alongside instead (e.g.
+`designs/mockup-1.png`) and the adjusted path is what came back; always use
+the printed path, never the one you requested. Asking for the same
+artifact a second time returns that same path without writing a second
+copy, so it is safe to ask again if you are ever unsure whether you already
+have it.
+
+**On failure**, the command exits non-zero and prints the reason to
+stderr: `unknown_artifact` (the id does not resolve — recheck it against
+the work-item record before retrying), `path_outside_repository` (the path you
+asked for escaped `/workspace`, was absolute, or named `.git`/
+`node_modules` — retry with a plain path under your own working tree),
+`unknown_destination_repo` (the project's working tree is not where the
+librarian expects it — a platform configuration problem, not yours to fix;
+report BLOCKED), or `copy_failed` (the librarian could not complete the
+write — worth one retry, and a BLOCKED marker if it keeps failing). A
+timeout prints its own message; retry once with a longer `--timeout-ms`
+before treating it as a failure worth blocking on.
 
 ---
 
