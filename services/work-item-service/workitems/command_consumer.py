@@ -24,6 +24,9 @@ from .streams import PermanentError, create_consumer
 PERMANENT_REJECTION_CODES = {
     'VALIDATION_ERROR', 'ASSIGNMENT_REJECTED', 'DEPENDENCY_GATE_REJECTED', 'WRITE_GATE_REJECTED',
     'MATERIALIZATION_VALIDATION_ERROR', 'MATERIALIZATION_NO_PROGRESS', 'RELEASE_GATE_REJECTED',
+    # work-items.md REQ-04 — an artifact id that does not resolve is a
+    # well-formed rejection (bad input), not a transient failure.
+    'UNRESOLVED_ARTIFACT',
 }
 
 
@@ -38,11 +41,14 @@ def is_permanent_rejection(err: Exception) -> bool:
 def handle_command(envelope: dict[str, Any]) -> Any:
     """envelope['payload'] shape: { command, actor, ...commandArgs }.
     `command` is one of: create, assign, transitionStatus, attachArtifact,
-    appendComment, createLink, materializeDecomposition, recordExternalKey.
+    appendComment, createLink, materializeDecomposition, recordExternalKey,
+    recordSpecificationLink, addArtifactLink (work-items.md REQ-01/REQ-02 —
+    the only write path for these two references; see that spec's REQ-03).
     Origin is always DIRECT here — this consumer IS the "direct" internal-API
     write path the write-gate gates; a Jira-originated write instead goes through
-    webhook_consumer.py with origin JIRA_WEBHOOK. recordExternalKey is not
-    gated (it never touches status/assignment/dependency fields)."""
+    webhook_consumer.py with origin JIRA_WEBHOOK. recordExternalKey,
+    recordSpecificationLink and addArtifactLink are not gated (none of them
+    touches a status/assignment/dependency field)."""
     payload = envelope['payload']
     command = payload.get('command')
     actor = payload.get('actor')
@@ -72,6 +78,12 @@ def handle_command(envelope: dict[str, Any]) -> Any:
         # external_key is already set, per record_external_key's own
         # contract.
         return catchup.record_external_key(payload['workItemId'], payload['externalKey'], actor=actor or 'jira-catchup')
+    if command == 'recordSpecificationLink':
+        return store.record_specification_link(
+            payload['workItemId'], payload['artifactId'], payload['requirementId'], actor=actor,
+        )
+    if command == 'addArtifactLink':
+        return store.add_artifact_link(payload['workItemId'], payload['artifactId'], actor=actor)
     if command == 'materializeDecomposition':
         # Local-mode decomposition materialization, ported from the
         # dependency graph's contract — see materialize.py.

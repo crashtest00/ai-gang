@@ -404,7 +404,7 @@ what to do:
 | --- | --- | --- |
 | `working` | `comment` | Post comment |
 | `working` | `reassign` (`data.agentFieldValue`) | Set Agent field (validated against the agent roster) |
-| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue` — all required) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
+| `working` | `create_subtask` (`data.summary`, `data.description`, `data.agentFieldValue` — required; `data.specificationLink`, `data.artifactLinks` — optional, forwarded onto the created subtask's own record unchanged) | Create subtask under the sending Task's own ticket (agent value validated against the roster), then dispatch it |
 | `working` | *(none)* | Plain progress comment (the text Part is posted as-is) |
 | `working` | any other value | Refused: a comment naming the unsupported operation and the ones that are supported, and the ticket is left Blocked |
 | `input-required` / `auth-required` | *(none — state carries the meaning)* | Set Blocked field + comment |

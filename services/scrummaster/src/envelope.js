@@ -19,6 +19,16 @@ const KIND = Object.freeze({
   // format (not a new one) is what's meant to be reused here.
   WORK_ITEM_COMMAND: 'work_item_command',
   WORK_ITEM_EVENT: 'work_item_event',
+  // V4 — artifact custody. The librarian's request/response pair
+  // (librarian/README.md, workitems/envelope.py's Kind class). Not a task:
+  // TASK_KINDS below deliberately does not include either, so neither
+  // requires taskId/contextId. Added here (V4 audit Pass 2 row 34) to
+  // match setup/lib/envelope.js, the container-side copy of this file,
+  // which already carries them (PR #21) — this module consumes neither
+  // kind; they exist here only so the two copies' schemas stay identical,
+  // per this file's own contract with that copy.
+  ARTIFACT_DELIVERY_REQUEST: 'artifact_delivery_request',
+  ARTIFACT_DELIVERY_RESPONSE: 'artifact_delivery_response',
 });
 
 const VALID_KINDS = new Set(Object.values(KIND));
