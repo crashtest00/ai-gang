@@ -64,7 +64,7 @@ function parseEnvFile(file) {
   return out;
 }
 
-test("the work-item service's environment file carries its database, Redis and Django settings", () => {
+test("the core service's environment file carries its database, Redis and Django settings", () => {
   const root = makeRoot();
   const result = run(root);
   assert.equal(result.status, 0, result.stderr);
@@ -92,7 +92,7 @@ test('an operator override in the platform .env wins over the contract default',
 // BUGFIXES.md BF-01 Pass 1 audit row 1: workitems/jira_interpret.py and
 // workitems/webhook_consumer.py read these JIRA_*_FIELD_ID variables via
 // os.environ, but the documented startup flow never carried them from the
-// platform .env into the work-item service's own .env — they always saw
+// platform .env into the core service's own .env — they always saw
 // unconfigured ids. This is the full list jira_interpret.py and
 // webhook_consumer.py read (Story fields, the five BF-01 Release fields,
 // and the Agent/Blocked fields).
@@ -104,7 +104,7 @@ const ALL_JIRA_FIELD_ID_VARS = [
   'JIRA_BUILD_IDENTIFIER_FIELD_ID', 'JIRA_PREVIEW_URL_FIELD_ID',
 ];
 
-test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item service .env, and an unset one is left out entirely', () => {
+test('a JIRA_*_FIELD_ID set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
   const root = makeRoot({
     platformEnv: PLATFORM_ENV + 'JIRA_BEHAVIOR_FIELD_ID=customfield_10050\nJIRA_TARGET_PROJECT_FIELD_ID=customfield_10060\n',
   });
@@ -120,13 +120,13 @@ test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item s
   }
 });
 
-test('every JIRA_*_FIELD_ID the work-item service reads is wired through when the platform .env sets it', () => {
+test('every JIRA_*_FIELD_ID the core service reads is wired through when the platform .env sets it', () => {
   const extra = ALL_JIRA_FIELD_ID_VARS.map((name, i) => `${name}=customfield_${10000 + i}`).join('\n') + '\n';
   const root = makeRoot({ platformEnv: PLATFORM_ENV + extra });
   assert.equal(run(root).status, 0);
   const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   ALL_JIRA_FIELD_ID_VARS.forEach((name, i) => {
-    assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the work-item service .env`);
+    assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the core service .env`);
   });
 });
 

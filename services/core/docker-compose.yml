@@ -1,4 +1,4 @@
-# AI Gang Internal Work-Item Service — deployment stack, distinct from
+# AI Gang Core Service — deployment stack, distinct from
 # docker-compose.test.yml's ephemeral pytest fixtures.
 #
 # Six services, five of them from one image (see Dockerfile); the sixth,

@@ -151,7 +151,7 @@ async function dispatchGatewayOperation(envelope, projectName) {
 // Materialize a Refinement Agent decomposition, mode-aware:
 // dependencies.js's routeMaterialization sends a Jira-mode project through
 // the exact existing Jira-subtask-and-dependency-link path unchanged, and a
-// local-mode project to the Internal Work-Item Service instead. Validation and
+// local-mode project to the core service instead. Validation and
 // no-progress failures already post an explanatory Jira comment inside
 // dependencies.js's Jira-mode path — retrying an unmodified invalid/stalled
 // decomposition can't succeed, so those are re-thrown as permanent to
@@ -289,7 +289,7 @@ async function handlePipelineRetry(msg, _projectName) {
 // against Jira (comment, set_blocked, set_agent_field, create_subtask,
 // open_pr). Mode-aware: a Jira-mode project
 // keeps the exact existing Jira-write behavior; a local-mode project routes
-// the same decisions through the Internal Work-Item Service's Streams
+// the same decisions through the core service's Streams
 // command channel instead — the same split dependencies.js's
 // routeMaterialization already established for decomposition. `jiraIssueKey`
 // below is the Task's stable external-facing key regardless of mode: in
@@ -519,7 +519,7 @@ function referenceFields(reference) {
 // modes post — both modes must show the same body/reference content, so
 // this does not reformat per destination, only redirect it: Jira mode
 // keeps the existing jira.postComment call, local mode routes the same
-// text through the Internal Work-Item Service's appendComment Streams
+// text through the core service's appendComment Streams
 // command (no Jira call may be required to succeed). `ctx.messageId` is
 // threaded through as the comment's
 // sourceMessageId so a redelivered gateway entry can't double-post it
@@ -761,7 +761,7 @@ async function reportUnsupportedOperation(ticketKey, operation, ctx) {
 // v4.1 agent-artifact-automation.md REQ-01 — a create_subtask request's
 // optional specificationLink/artifactLinks, validated for shape only (never
 // whether the artifact id actually resolves — that check lives in the
-// work-item service, work-items.md REQ-04, and its rejection is reported
+// core service, work-items.md REQ-04, and its rejection is reported
 // through the materializeDecomposition dead-letter path, not this one).
 // Returns phrases, not bare field names — carry-forward 5 (build brief
 // §1b): reportMissingFields' "the request is missing ..." sentence must
@@ -859,7 +859,7 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
 // separately protects the agent dispatch).
 //
 // Local mode: this operation has no bespoke local-mode counterpart — it
-// reuses the exact same Internal Work-Item Service materializeDecomposition
+// reuses the exact same core service materializeDecomposition
 // command dependencies.js's routeMaterialization already sends for
 // Refinement Agent decompositions (a single-subtask, no-dependency
 // decomposition is a degenerate case of the same contract; materialize.py

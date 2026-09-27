@@ -14,7 +14,7 @@ Three naming decisions, each with a reason the README states in full:
   consumer group and dead-letters kinds it does not know, so a delivery
   request published there would be destroyed rather than delivered.
 - **Not** under ``aigang:workitems:``. Delivery is not a work-item command;
-  the work-item service's own command consumer would reject it the same way.
+  the core service's own command consumer would reject it the same way.
 - **No ``{project}`` segment.** One librarian serves every repository on the
   machine and a request names its destination repository in the payload, so
   there is nothing for the segment to carry that the payload does not

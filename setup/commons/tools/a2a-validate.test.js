@@ -395,6 +395,21 @@ test('REQ-05: a reference on an operation that does not consume it is not refuse
   assert.equal(await client.xLen(STREAM), 1);
 });
 
+test('F-2: a terminal submission carrying an unrouted operation still publishes — handleA2ASubmission never reads operation there', async () => {
+  // `set_blocked` is exactly what the row-37 case above refuses on a
+  // `working` submission, because gateway.js's non-terminal, non-interrupted
+  // branch switches on it. A `failed` submission is handled by
+  // handleTerminalFailure instead, which never destructures `operation` at
+  // all — so the same value here must not be refused. Refusing it would
+  // refuse input the gateway simply ignores, which this file's header
+  // promises it does not do.
+  const payload = OPERATIONS.terminal();
+  payload.message.parts.push({ kind: 'data', data: { operation: 'set_blocked' } });
+  const result = await publish(payload);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(await client.xLen(STREAM), 1);
+});
+
 // ---------------------------------------------------------------------------
 // REQ-07 — a further structured action is a definition, not a second checker
 // ---------------------------------------------------------------------------

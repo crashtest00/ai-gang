@@ -389,7 +389,7 @@ test('a MaterializationValidationError from dependencies.js is dead-lettered, no
 // in production while everything written to cover it still passed. This test
 // exercises gateway.js's real, unmocked entry point end to end and would
 // have failed against that bug.
-test('a materializeDecomposition operation for a local-mode project publishes to the Internal Work-Item Service, not Jira', async () => {
+test('a materializeDecomposition operation for a local-mode project publishes to the core service, not Jira', async () => {
   const originalGetMode = canonicalWorkItems.getMode;
   const originalPublishCommand = canonicalWorkItems.publishCommand;
   const originalCreateSubtask = jira.createSubtaskForProposal;

@@ -289,7 +289,7 @@ test('inspectable state distinguishes a fully-completed group from one with a pa
   assert.equal(byAddress.b.reason, 'nope');
 });
 
-test('Coordination exposes no interface that calls the canonical work-item store, Jira, or Streams', () => {
+test('Coordination exposes no interface that calls the core service, Jira, or Streams', () => {
   const c = new Coordination();
   const publicMethods = Object.getOwnPropertyNames(Coordination.prototype).filter((m) => m !== 'constructor');
   for (const m of publicMethods) {

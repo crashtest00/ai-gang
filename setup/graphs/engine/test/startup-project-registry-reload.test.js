@@ -3,11 +3,11 @@
 // The reload that makes the configured project reachable, and the health
 // check that proves it happened.
 //
-// Both the work-item service and ScrumMaster read
+// Both the core service and ScrumMaster read
 // services/scrummaster/config/projects.json once, when they start, and
 // both are started before the step that registers the configured project
 // in it. ScrumMaster has always been restarted at the end of the step
-// that starts the project container; the work-item service was not, and
+// that starts the project container; the core service was not, and
 // on a live run that was the whole of the failure: a story was
 // dispatched, the commands it produced landed on
 // aigang:workitems:<project> with no consumer group reading them, no
@@ -168,7 +168,7 @@ function completeStepsBefore(id, env) {
 
 // ---- the reload ----
 
-test('the step that starts the project reloads the work-item service too, and waits for it', () => {
+test('the step that starts the project reloads the core service too, and waits for it', () => {
   const root = makeRoot();
   const env = environment(root);
   const result = runStep('start-project.sh', env);
@@ -205,7 +205,7 @@ test('the outbox relay is left running — it never reads the project list', () 
   );
 });
 
-test('a work-item service that comes back still not serving the project fails the step, by name', () => {
+test('a core service that comes back still not serving the project fails the step, by name', () => {
   const root = makeRoot();
   const env = environment(root, { restartCreatesGroup: false });
   const result = runStep('start-project.sh', env);
@@ -218,7 +218,7 @@ test('a work-item service that comes back still not serving the project fails th
 
 // ---- the health check ----
 
-test('health confirms the work-item service is serving the configured project', () => {
+test('health confirms the core service is serving the configured project', () => {
   const root = makeRoot();
   const env = environment(root);
   fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');

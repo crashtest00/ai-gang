@@ -1,4 +1,4 @@
-# AI Gang Internal Work-Item Service — Django implementation, built as a
+# AI Gang Core Service — Django implementation, built as a
 # Django application with PostgreSQL as its datastore.
 Django>=5.0,<5.1
 psycopg2-binary>=2.9,<3.0

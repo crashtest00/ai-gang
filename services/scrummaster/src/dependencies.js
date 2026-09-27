@@ -253,7 +253,7 @@ async function routeMaterialization(message, projectName, deps = {}) {
   }
 
   // Local mode: no Jira ticket exists to materialize into. Publish a single
-  // Streams command to the Internal Work-Item Service's command channel —
+  // Streams command to the core service's command channel —
   // the service's own materialize.js applies the identical
   // order-independent, atomic-rejection algorithm against its own store.
   // This function does not itself validate agents or write anything: the

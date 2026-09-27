@@ -1,4 +1,4 @@
-# AI Gang Internal Work-Item Service — production/deployment image.
+# AI Gang Core Service — production/deployment image.
 # (Django + PostgreSQL.)
 #
 # Not to be confused with docker-compose.test.yml, which only stands up

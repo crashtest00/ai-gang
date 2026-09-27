@@ -10,7 +10,7 @@
 // Jira issue and reports the resulting key back via recordExternalKey,
 // itself idempotent."
 //
-// One durable consumer per project on the internal work-item service's
+// One durable consumer per project on the core service's
 // outbound event stream (aigang:workitems:{project}:events, group
 // "jira-catchup") — the same "any interested subscriber creates its own
 // group" pattern, mirroring gateway.js's per-project

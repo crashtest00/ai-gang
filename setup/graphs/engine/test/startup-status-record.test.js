@@ -240,9 +240,9 @@ test('a step that failed and is re-run clears the failure, so the record blames 
 
   status(dir, 'step-done', 'start-redis');
   status(dir, 'step-start', 'start-core');
-  status(dir, 'fail', 'the work-item service did not answer /health');
+  status(dir, 'fail', 'the core service did not answer /health');
   doc = record(dir);
-  assert.equal(doc.error, 'the work-item service did not answer /health');
+  assert.equal(doc.error, 'the core service did not answer /health');
 });
 
 test('a re-run step does not keep a finish time from the attempt that failed', () => {

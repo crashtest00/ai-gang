@@ -6,9 +6,10 @@
  * strategy/v4.0/features/librarian.md, Management repository) for one
  * artifact by canonical id and blocks until it answers.
  *
- * Usage:
- *   node /agent-docs/commons/tools/request-artifact.js <project-name> <artifact-id> <requested-path> [--task-id <id>] [--timeout-ms <ms>]
- *   node /agent-docs/commons/tools/request-artifact.js <project-name> -   (read a JSON request from stdin:
+ * Usage (from an agent session — it is first on the session's PATH, so
+ * invoke it by that bare name: no `node`, no directory, no path):
+ *   request-artifact.js <project-name> <artifact-id> <requested-path> [--task-id <id>] [--timeout-ms <ms>]
+ *   request-artifact.js <project-name> -   (read a JSON request from stdin:
  *     { "artifactId": "...", "requestedPath": "...", "taskId": "..." (optional), "timeoutMs": 30000 (optional) })
  *
  * There is no listing, search or browse: this takes exactly one artifact id

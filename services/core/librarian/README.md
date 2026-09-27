@@ -2,7 +2,7 @@
 
 The Django application that implements
 `strategy/v4.0/features/librarian.md` (Management repository) in the
-internal work-item service.
+core service.
 
 An agent that needs an artifact present in a repository **asks** for it.
 The librarian copies it in once, and answers with the path the file

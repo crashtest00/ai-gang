@@ -5,7 +5,7 @@
 // (startDispatchConsumers/stopDispatchConsumers) — the real consumer group,
 // the real handler, the real envelopes, the real publishes.
 //
-// The canonical work-item service does not run in this process, so it is
+// The core service does not run in this process, so it is
 // stood in for at its two real boundaries and nowhere else:
 //
 //  - its HTTP reads (canonicalWorkItems.getWorkItem/getMode) are answered

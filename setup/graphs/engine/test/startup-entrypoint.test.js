@@ -325,7 +325,7 @@ function runToAgent(root, binDir) {
 }
 
 // The line an operator would want and, until now, never got.
-const LAST_WORDS = 'waiting for the work-item service to answer, and it never did';
+const LAST_WORDS = 'waiting for the core service to answer, and it never did';
 
 // Stops while a step is still in progress, exit status 0 — the shape of
 // the real thing, which ends its turn without saying so. The earlier

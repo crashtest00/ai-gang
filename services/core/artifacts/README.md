@@ -2,7 +2,7 @@
 
 The Django application that implements
 `strategy/v4.0/features/artifact-ingress.md` (Management repository) in the
-internal work-item service.
+core service.
 
 An artifact is a file a human hands to a running AI Gang. This app stores
 it, fixes its path, gives it a canonical id, and hands the bytes back when

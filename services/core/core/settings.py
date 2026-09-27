@@ -1,5 +1,5 @@
 """
-Django settings for the AI Gang Internal Work-Item Service.
+Django settings for the AI Gang Core Service.
 
 This service is implemented as a Django application, with PostgreSQL as
 its datastore. Django is expected to also host the human-facing admin UI.
@@ -125,7 +125,7 @@ STORAGES = {
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-# --- Internal Work-Item Service configuration ---------------------------
+# --- Core Service configuration ------------------------------------------
 # Redis (Streams command channel / event stream / webhook consumer). Same
 # env var names and default as the Node implementation's src/redis.js.
 REDIS_URL = os.environ.get(

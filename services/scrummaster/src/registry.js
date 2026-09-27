@@ -220,7 +220,7 @@ function getEffectiveAgents(projectName) {
 // already bound to (a Jira issue's own project, or the stream a consumer is
 // reading), not from message content.
 const GATEWAY_GROUP = 'scrummaster';
-// This service's own consumer group on the internal work-item service's
+// This service's own consumer group on the core service's
 // outbound event stream (any interested subscriber creates its own group —
 // see services/core/workitems/stream_topology.py's module comment).
 const JIRA_CATCHUP_GROUP = 'jira-catchup';
@@ -248,7 +248,7 @@ function gatewayStreamName(projectName) {
   return `aigang:gateway:${normalizeProjectName(projectName)}`;
 }
 
-// Internal work-item service -> ScrumMaster (outbound events): matches
+// Core service -> ScrumMaster (outbound events): matches
 // services/core/workitems/stream_topology.py's event_stream_name()
 // exactly — the shared naming contract both sides agree on (same reasoning
 // as commandStreamName in canonicalWorkItems.js).

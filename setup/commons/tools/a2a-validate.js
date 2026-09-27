@@ -120,6 +120,18 @@ function checkSubtaskReferences(data, errors, path) {
 // path and is not in this list because absence is not a value.
 const ROUTED_OPERATIONS = ['comment', 'reassign', 'create_subtask'];
 
+// `handleA2ASubmission` only reaches that switch, and so only reads
+// `data.operation`, in the non-terminal, non-interrupted branch: a
+// `completed`/`failed`/`canceled`/`rejected` submission is handled by
+// handleCompleted/handleTerminalFailure, and an `input-required`/
+// `auth-required` one by handleInterrupted — neither branch looks at
+// `operation` at all, routed or not. Refusing an unrouted operation on one
+// of those submissions would refuse input the gateway simply ignores,
+// which the header above promises this file does not do.
+function gatewayReadsOperation(state) {
+  return !schema.TERMINAL_STATES.includes(state) && !schema.INTERRUPTED_STATES.includes(state);
+}
+
 // REQ-02 — the fields the corresponding gateway handler requires for the
 // requested operation, on top of the message shape REQ-01 checks.
 function checkOperationFields(payload, errors) {
@@ -130,7 +142,7 @@ function checkOperationFields(payload, errors) {
 
   const operation = data ? data.operation : undefined;
 
-  if (operation !== undefined && !ROUTED_OPERATIONS.includes(operation)) {
+  if (gatewayReadsOperation(payload.state) && operation !== undefined && !ROUTED_OPERATIONS.includes(operation)) {
     errors.push(
       `${path}.operation must be one of ${ROUTED_OPERATIONS.join('/')}, or absent for a plain progress note` +
       ` — the gateway refuses any other operation after the submission is already durably written`

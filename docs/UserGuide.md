@@ -139,7 +139,7 @@ if you want them — leave them blank.
 
 `docker compose up --exit-code-from ai-gang` builds and starts one
 container, and streams what it is doing. That container brings up the rest
-— Redis, the work-item service, ScrumMaster, and your project's own
+— Redis, the core service, ScrumMaster, and your project's own
 container — and then exits, and the command exits with the same status.
 Status 0 means AI Gang is up. Nothing to run in between. (The
 `--exit-code-from` flag is what carries the container's status out to your

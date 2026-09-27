@@ -27,7 +27,7 @@ const KIND = Object.freeze({
   JIRA_OPERATION: 'jira_operation',
   WEBHOOK_EVENT: 'webhook_event',
   // A command into, or an outbound change/rejection event out of, the
-  // Internal Work-Item Service's canonical work-item store (V2). Carried
+  // core service's canonical work-item store (V2). Carried
   // here for parity with the ScrumMaster copy; no container-side caller.
   WORK_ITEM_COMMAND: 'work_item_command',
   WORK_ITEM_EVENT: 'work_item_event',

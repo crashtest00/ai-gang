@@ -1,6 +1,6 @@
 'use strict';
 
-// ScrumMaster's client onto the Internal Work-Item Service. Two interfaces:
+// ScrumMaster's client onto the core service. Two interfaces:
 //
 //  - getMode(): a direct, synchronous HTTP read — not a Streams
 //    round-trip, since it has no state-changing effect.

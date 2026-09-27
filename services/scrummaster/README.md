@@ -1,6 +1,6 @@
 # ScrumMaster
 
-The routing service between the work-item store and the agent containers. It
+The routing service between the core service and the agent containers. It
 consumes canonical work-item events, decides what to dispatch and to whom,
 publishes the dispatch onto the assigned agent's stream, and applies what the
 agents send back — comments, subtasks, reassignments, outcomes — to the work

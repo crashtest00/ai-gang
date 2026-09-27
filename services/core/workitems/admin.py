@@ -26,7 +26,7 @@ human should hand-edit.
 **work-items.md REQ-03/REQ-08 — settled (V4).** REQ-03 requires that
 recording either reference "from an agent, or from any component acting
 on an agent's behalf, MUST travel as a durably queued Streams command
-through the internal work-item service's existing write path
+through the core service's existing write path
 (`internal-work-item-service.md` REQ-03)," while "[t]he service's own
 human-facing administration interface MAY record them directly in the
 datastore, as `internal-work-item-service.md` REQ-08 permits for

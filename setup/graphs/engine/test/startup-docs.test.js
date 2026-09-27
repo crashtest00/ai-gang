@@ -253,7 +253,7 @@ test('the end-to-end leg uses the work-item type and status the service actually
   assert.match(leg.replace(/\s+/g, ' '), /External key.{0,40}leave it empty/i);
 });
 
-// ---- the work-item service's own environment example ----
+// ---- the core service's own environment example ----
 
 test('every variable the .env.example declares is one settings.py reads, or a documented os.environ reader names directly', () => {
   const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));

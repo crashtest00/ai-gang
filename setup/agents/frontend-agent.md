@@ -50,7 +50,8 @@ It comes back with `specification_link` and `artifact_links`; read the
 artifact ids straight from `artifact_links`. If that request returns 404,
 your dispatch did not carry the record's canonical id — the platform, not
 you, supplies it, so do not look the record up any other way: treat any
-artifact the ticket depends on as unavailable and report BLOCKED. Only
+artifact the ticket depends on as unavailable — leave a BLOCKED marker and
+report it with `input-required` (see `## If You Are Blocked` below). Only
 request an `artifact_id` you found in that record — never guess or invent
 one, and never parse the ticket text for one.
 
@@ -88,8 +89,8 @@ the work-item record before retrying), `path_outside_repository` (the path you
 asked for escaped `/workspace`, was absolute, or named `.git`/
 `node_modules` — retry with a plain path under your own working tree),
 `unknown_destination_repo` (the project's working tree is not where the
-librarian expects it — a platform configuration problem, not yours to fix;
-report BLOCKED), or `copy_failed` (the librarian could not complete the
+librarian expects it — a platform configuration problem, not yours to fix:
+leave a BLOCKED marker and report it with `input-required`), or `copy_failed` (the librarian could not complete the
 write — worth one retry, and a BLOCKED marker if it keeps failing). A
 timeout prints its own message; retry once with a longer `--timeout-ms`
 before treating it as a failure worth blocking on.

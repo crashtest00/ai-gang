@@ -13,7 +13,7 @@ const KIND = Object.freeze({
   JIRA_OPERATION: 'jira_operation',
   WEBHOOK_EVENT: 'webhook_event',
   // A command into, or an outbound change/rejection event out of, the
-  // Internal Work-Item Service's canonical work-item store. Added for V2
+  // core service's canonical work-item store. Added for V2
   // rather than reusing WEBHOOK_EVENT/JIRA_OPERATION — neither name
   // describes a canonical work-item command/event, and this envelope
   // format (not a new one) is what's meant to be reused here.
