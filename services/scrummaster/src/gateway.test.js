@@ -3,6 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
+const { createClient: createRedisClient } = require('redis');
 
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '../config/agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json');
@@ -18,6 +22,7 @@ const taskStore = require('./a2a/taskStore');
 const { newMessageId, newArtifactId } = require('./a2a/ids');
 const { buildTextPart, buildDataPart, buildMessage, buildTask, buildArtifact } = require('./a2a/parts');
 const { buildTaskPrompt } = require('./prompt');
+const { fromStreamFields } = require('./envelope');
 const { _handleA2ASubmission: handleA2ASubmission, _handlePipelineRetry: handlePipelineRetry, _handleTaskStatus: handleTaskStatus } = require('./gateway');
 
 const ISSUE_KEY = 'GANG-42';
@@ -560,32 +565,142 @@ test('create_subtask without agentFieldValue derives the agent from the summary 
 // to the same role prefix mean the request implies neither of them, and the
 // requesting agent is never a candidate for its own request.
 
-// The prompt is the only place an agent learns what to call the field that
-// carries a subtask's owner, and the gateway is the only thing that reads
-// it. Naming it one thing in the allowed-agent list and another in the
-// submission shape is how the field comes back omitted. This takes the name
-// straight out of the rendered prompt and sends a request under it.
+// What an agent is taught about naming a subtask's owner, end to end.
+//
+// Before V5.0 the dispatch prompt was where an agent learned what to call
+// that field, and this test took the name out of the rendered prompt. The
+// prompt no longer names any submission field: the a2a-submit skill is the
+// one agent-facing description of submitting, and the constructor is what
+// turns the argument it teaches into the field the gateway reads
+// (deterministic-gateway-message-tooling.md REQ-04). The property is
+// unchanged — the name an agent is taught must be the name the gateway reads
+// (gateway.js's `agentFieldValue` at :896 and :920) — so the chain under test
+// is the whole one: the skill's own text supplies the argument, the real
+// constructor runs as a child process and publishes to the real test Redis,
+// and the entry that lands on the gateway stream is what this file's own
+// gateway entry point then consumes. Nothing is retyped in between, which is
+// what makes a rename anywhere in that chain fail here.
 
-test('the field the prompt tells an agent to send an agent id in is the field the gateway reads', async (t) => {
+const SKILL_PATH = path.join(__dirname, '../../../setup/commons/skills/a2a-submit/SKILL.md');
+const CONSTRUCTOR_PATH = path.join(__dirname, '../../../setup/commons/tools/a2a-submit.js');
+const TEST_REDIS = {
+  host: process.env.REDIS_TEST_HOST || 'localhost',
+  port: process.env.REDIS_TEST_PORT || '16399',
+};
+
+// The skill's create-subtask arguments, read out of the skill rather than
+// restated here: one list entry per argument, each marked required or
+// optional and saying what it sets.
+function skillCreateSubtaskArguments() {
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+  const heading = skill.indexOf('## create-subtask');
+  assert.ok(heading !== -1, 'the skill must document the create-subtask operation');
+  const next = skill.indexOf('\n## ', heading + 1);
+  const section = skill.slice(heading, next === -1 ? undefined : next);
+
+  // One entry per list item, continuation lines folded in, so the skill stays
+  // free to wrap its prose wherever it reads best.
+  const entries = [];
+  for (const line of section.split('\n')) {
+    const match = line.match(/^- `(--[a-z-]+)`(.*)$/);
+    if (match) entries.push({ flag: match[1], text: match[2] });
+    else if (entries.length && /^\s+\S/.test(line)) entries[entries.length - 1].text += ` ${line.trim()}`;
+  }
+  assert.ok(entries.length > 0, 'the skill must list create-subtask\'s arguments');
+  return entries;
+}
+
+function requiredFlags(entries) {
+  return entries.filter(e => e.text.includes('(required)')).map(e => e.flag);
+}
+
+// The one optional argument the skill says sets a given field of the subtask.
+function optionalFlagsFor(entries, field) {
+  const entry = entries.find(e => e.text.includes('(optional') && e.text.includes(field));
+  assert.ok(entry, `the skill must document an optional argument that sets ${field}`);
+  const flags = [entry.flag, ...[...entry.text.matchAll(/`(--[a-z-]+)`/g)].map(m => m[1])];
+  return [...new Set(flags)];
+}
+
+// One dispatch's worth of session state: the constructor reads its context
+// from the environment the subscriber exports and keeps its chain in a
+// `state/` directory beside the commons snapshot.
+function dispatchEnv({ contextId, messageId }) {
+  const dispatchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v5-skill-chain-'));
+  fs.mkdirSync(path.join(dispatchDir, 'state'));
+  return {
+    dispatchDir,
+    env: {
+      ...process.env,
+      PROJECT_NAME: PROJECT_NAME,
+      REDIS_HOST: TEST_REDIS.host,
+      REDIS_PORT: TEST_REDIS.port,
+      A2A_TASK_ID: ISSUE_KEY,
+      A2A_CONTEXT_ID: contextId,
+      A2A_LAST_MESSAGE_ID: messageId,
+      AIGANG_COMMONS_DIR: path.join(dispatchDir, 'commons'),
+      // The constructor is mounted read-only beside `services/`, outside this
+      // package, so its own `redis` comes from here.
+      NODE_PATH: path.join(__dirname, '../node_modules'),
+    },
+  };
+}
+
+// Runs the real constructor and returns the envelope it published, read back
+// off the gateway stream exactly as ScrumMaster's own consumer reads it.
+async function submitThroughConstructor(args, { contextId, messageId }) {
+  const stream = `aigang:gateway:${PROJECT_NAME}`;
+  const { dispatchDir, env } = dispatchEnv({ contextId, messageId });
+  const client = createRedisClient({ url: `redis://${TEST_REDIS.host}:${TEST_REDIS.port}` });
+  await client.connect();
+  try {
+    await client.del(stream);
+    const run = await new Promise(resolve => {
+      execFile(process.execPath, [CONSTRUCTOR_PATH, ...args], { env }, (error, stdout, stderr) =>
+        resolve({ code: error ? error.code : 0, stdout, stderr }));
+    });
+    assert.equal(run.code, 0, `the constructor must publish: ${run.stderr}`);
+    const entries = await client.xRange(stream, '-', '+');
+    assert.equal(entries.length, 1, 'exactly one message must reach the gateway stream');
+    await client.del(stream);
+    return fromStreamFields(entries[0].message);
+  } finally {
+    await client.quit().catch(() => {});
+    fs.rmSync(dispatchDir, { recursive: true, force: true });
+  }
+}
+
+test('the argument the skill teaches for a subtask\'s owner is the field the gateway reads', async (t) => {
   mockJiraMode(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
-  const issue = {
-    key: ISSUE_KEY, summary: 'Parent story', projectName: PROJECT_NAME, parent: null, comments: [],
-  };
-  const prompt = buildTaskPrompt(issue, registry.getAgent('refinement-agent'), {
-    allowedAgents: registry.getEffectiveAgents(PROJECT_NAME),
-    task: { id: ISSUE_KEY, contextId },
-    message: { messageId },
-  });
+  const entries = skillCreateSubtaskArguments();
+  const required = requiredFlags(entries);
+  assert.deepEqual([...required].sort(), ['--agent', '--description', '--summary'],
+    'the skill must document exactly three required arguments for a subtask request');
+  // Derived, not named: the required argument that is neither the summary nor
+  // the description is the one that carries the owner.
+  const ownerFlag = required.find(flag => flag !== '--summary' && flag !== '--description');
 
-  const allowedSection = prompt.slice(prompt.indexOf('## ALLOWED AGENTS'), prompt.indexOf('## A2A TASK CONTEXT'));
-  assert.match(allowedSection, /agentFieldValue/, 'the allowed-agent list must name the field the submission uses');
-  assert.doesNotMatch(allowedSection, /"agent"/, 'and must not name it a second way');
+  // The prompt must not teach a second name for it. The allowed-agent list is
+  // the only place a prompt still speaks about choosing an agent, and after
+  // REQ-04 it names ids, never a field of a submission.
+  const prompt = buildTaskPrompt(
+    { key: ISSUE_KEY, summary: 'Parent story', projectName: PROJECT_NAME, parent: null, comments: [] },
+    registry.getAgent('refinement-agent'),
+    { allowedAgents: registry.getEffectiveAgents(PROJECT_NAME), task: { id: ISSUE_KEY, contextId }, message: { messageId } }
+  );
+  const allowedSection = prompt.slice(prompt.indexOf('## ALLOWED AGENTS'), prompt.indexOf('## WORK ITEM REFERENCES'));
+  assert.match(allowedSection, /backend-agent/, 'the allowed-agent list must name the project\'s agent ids');
+  assert.doesNotMatch(allowedSection, /agentFieldValue/,
+    'the prompt must not name a submission field an agent never writes');
 
-  const declared = prompt.match(/"operation":"create_subtask"[^}]*"([A-Za-z]+)":"<agent>"/);
-  assert.ok(declared, 'the prompt must show a create_subtask submission carrying an agent id');
-  const fieldName = declared[1];
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    ownerFlag, 'backend-agent',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+  ], { contextId, messageId });
 
   t.mock.method(jira, 'getIssue', async (key) => ({
     key, project: 'GANG', projectName: PROJECT_NAME, parent: key === 'GANG-43' ? ISSUE_KEY : null,
@@ -597,30 +712,86 @@ test('the field the prompt tells an agent to send an agent id in is the field th
     return 'GANG-43';
   });
   t.mock.method(jira, 'transitionIssue', async () => {});
-  t.mock.method(jira, 'postComment', async () => { throw new Error('a request using the documented field name must not be refused'); });
+  t.mock.method(jira, 'postComment', async () => { throw new Error('a request built by the constructor must not be refused'); });
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(streams, 'publish', async (_client, _stream, e) => ({ deduped: false, entryId: '0-1', messageId: e.messageId }));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
 
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask'),
-        buildDataPart({
-          operation: 'create_subtask',
-          summary: 'Backend: implement endpoint',
-          description: 'full desc',
-          [fieldName]: 'backend-agent',
-        }),
-      ],
-    }),
-    PROJECT_NAME
-  );
+  await handleA2ASubmission(envelope, PROJECT_NAME);
 
   assert.equal(createdWith, 'backend-agent',
-    `the gateway must read the agent id from "${fieldName}", the field the prompt declares`);
+    `the gateway must read the agent id the skill's ${ownerFlag} carried`);
+});
+
+// v4.1 agent-artifact-automation.md REQ-01, a Locked contract: the
+// create_subtask request shape an agent is shown documents specificationLink
+// and artifactLinks as optional beside the three required fields. That shape
+// used to be an operations table in the dispatch prompt
+// (prompt.test.js asserted it there); it is the skill's now, so the clause is
+// asserted against the skill — and against the canonical command the gateway
+// forwards, so "documented as optional" means the two really do travel and
+// really are optional, rather than merely being written down.
+
+test('the skill documents a subtask\'s two references as optional, and they travel onto the subtask', async (t) => {
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const entries = skillCreateSubtaskArguments();
+  const specificationFlags = optionalFlagsFor(entries, 'specificationLink');
+  const artifactFlags = optionalFlagsFor(entries, 'artifactLinks');
+  assert.equal(specificationFlags.length, 2,
+    'a specification reference is two arguments, an artifact id and a requirement id');
+  assert.equal(artifactFlags.length, 1);
+
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+    '--agent', 'backend-agent',
+    specificationFlags[0], 'art-spec-1',
+    specificationFlags[1], 'REQ-7',
+    artifactFlags[0], 'art-1',
+    artifactFlags[0], 'art-2',
+  ], { contextId, messageId });
+
+  let command = null;
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(envelope, PROJECT_NAME);
+
+  const subtask = command.message.subtasks[0];
+  assert.deepEqual(subtask.specificationLink, { artifactId: 'art-spec-1', requirementId: 'REQ-7' });
+  assert.deepEqual(subtask.artifactLinks, ['art-1', 'art-2']);
+  assert.equal(subtask.agent, 'backend-agent');
+});
+
+test('a subtask request that leaves both references out is created all the same — they are optional', async (t) => {
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+    '--agent', 'backend-agent',
+  ], { contextId, messageId });
+
+  let command = null;
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(envelope, PROJECT_NAME);
+
+  const subtask = command.message.subtasks[0];
+  assert.equal(subtask.specificationLink, undefined);
+  assert.equal(subtask.artifactLinks, undefined);
+  assert.equal(subtask.displayName, 'Backend: implement endpoint');
 });
 
 test('create_subtask does not derive an agent when two of the project\'s agents answer to the same role prefix', async (t) => {

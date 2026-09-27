@@ -484,30 +484,31 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    Your note: {blocked marker text}
    Continue from this point using the clarification provided above.
 
-5. A2A TASK CONTEXT
-   Task ID: {task.id}
-   Context ID: {task.contextId}
-   Last Message ID: {message.messageId}
+5. ALLOWED AGENTS (only when the dispatch supplies an allowed-agent set,
+   which task dispatches do and continuations and retries do not)
+   - {agent id}: {agent card description}   (one line per permitted agent)
+
+   Project data for delegation, rendered from the canonical catalog filtered
+   to what the project enables — not an instruction about messaging. The
+   Refinement Agent names one of these ids as the agent a subtask is for.
+
+6. WORK ITEM REFERENCES
    Jira issue key: {issue.key}
+   Specification link: {artifact id} ({requirement id})   — or "none"
+   Artifact links: {artifact id}, {artifact id}           — or "none"
 
-   These identify the Task this dispatch belongs to. The agent must echo them
-   back (with a freshly generated messageId per submission, referencing the
-   previous one) in every gateway submission it sends for this ticket — see
-   A2A Messaging.
-
-6. INSTRUCTIONS
-   - Read your agent definition fully before taking any action
-   - All Jira interactions must go through the ScrumMaster gateway stream as
-     a canonical A2A submission (see Redis Message Contract) — never a bare
-     {"type": ...} payload
-   - Use: node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME <path-to-json-file>
-   - If you need clarification, publish a submission with "state" set to
-     input-required (missing information) or auth-required (missing
-     authorization) and the exact file/function reference in the message
-   - Do not block without a precise, located question
-   - When your work is complete, publish a submission with "state" set to
-     completed and a summary text Part
+   The work item's own references, which the agent reads to ask the librarian
+   for an artifact. AI Gang canonical ids and a tracker key, never a delivered
+   path; a work item carrying neither reference renders "none" rather than
+   omitting the line (v4.1 agent-artifact-automation.md REQ-04).
 ```
+
+No prompt instructs an agent how to construct a submission, and none carries
+an identifier for an agent to copy into one. An agent submits through the
+constructor in the agent commons, which the `a2a-submit` skill describes; the
+task, the context and the chain reach it as environment variables the
+subscriber exports into the session (V5.0 Deterministic Gateway Message
+Tooling REQ-04, Agent Commons REQ-02, REQ-03).
 
 ---
 

@@ -25,9 +25,9 @@ You work inside a Docker container with:
 - Access to this project's code at `/workspace`
 - Access to shared agent definitions and reference docs at `/agent-docs`
 - No access to other project containers
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
-  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
-  unset
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`,
+  `$A2A_TASK_ID` — your work item's canonical id — and optionally
+  `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when unset
 
 ## Requesting an Artifact
 
@@ -37,19 +37,19 @@ uploaded to the platform's artifact store. There is no browse or search:
 the work item behind your ticket names the artifact's canonical id, and you
 ask for it by that id alone.
 
-**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+**Check your prompt first.** Your dispatch prompt's `## WORK ITEM REFERENCES`
 section already names your work item's specification link and artifact
 ids (`Specification link:` / `Artifact links:`, or `none` when it has
 neither), by canonical id, never a delivered path. When it names one, you
 may request it directly — no lookup needed. The record read below is the
 fallback, for when your prompt lists none.
 
-Your dispatch prompt's `Task ID` is that work item's canonical id. Read the
-record on the core service, reachable from your container over the
+`$A2A_TASK_ID` is that work item's canonical id, and your session is given
+it. Read the record on the core service, reachable from your container over the
 shared `ai-gang` Docker network:
 
 ```bash
-curl -s "http://core:9100/work-items/<your Task ID>"
+curl -s "http://core:9100/work-items/$A2A_TASK_ID"
 ```
 
 Its `specification_link`/`artifact_links` name the ids to request. A 404

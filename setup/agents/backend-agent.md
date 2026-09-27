@@ -10,15 +10,15 @@ One task per invocation. Complete it fully before finishing.
 
 - Frontend UI, components, styles — that is the Frontend Agent
 - CI/CD pipelines, test framework selection or installation — that is the DevOps Agent
-- Direct Jira access — all Jira interactions go through the ScrumMaster gateway stream (see Gateway Message Reference)
+- Direct Jira access — everything you report goes through the ScrumMaster gateway (see `## Reporting to ScrumMaster`)
 
 ## Working Environment
 
 - `/workspace` — project codebase (read/write)
 - `/agent-docs` — agent definitions and reference docs (read-only)
-- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`, and
-  optionally `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when
-  unset
+- Environment variables available: `$REDIS_HOST`, `$PROJECT_NAME`,
+  `$A2A_TASK_ID` — your work item's canonical id — and optionally
+  `$AGENT_DISPLAY_NAME`, which defaults to `$PROJECT_NAME` when unset
 
 ---
 
@@ -29,19 +29,19 @@ fixture — already uploaded to the platform's artifact store. You never
 browse or search for one: you are given its canonical id, and you ask for
 it by that id alone.
 
-**Check your prompt first.** Your dispatch prompt's `## A2A TASK CONTEXT`
+**Check your prompt first.** Your dispatch prompt's `## WORK ITEM REFERENCES`
 section already names your work item's specification link and artifact
 ids (`Specification link:` / `Artifact links:`, or `none` when it has
 neither), by canonical id, never a delivered path. When it names one, you
 may request it directly — no lookup needed. The record read below is the
 fallback, for when your prompt lists none.
 
-**Finding the id.** Your dispatch prompt's `Task ID` is your work item's
-canonical id. Read the record from the core service, reachable from
+**Finding the id.** `$A2A_TASK_ID` is your work item's canonical id — your
+session is given it. Read the record from the core service, reachable from
 your container on the shared `ai-gang` Docker network:
 
 ```bash
-curl -s "http://core:9100/work-items/<your Task ID>"
+curl -s "http://core:9100/work-items/$A2A_TASK_ID"
 ```
 
 It comes back with `specification_link` and `artifact_links`; read the
@@ -203,46 +203,28 @@ Capture the PR URL from the `gh pr create` output.
 
 ### Step 8 — Notify ScrumMaster
 
-All Jira interactions go through the ScrumMaster gateway stream as a canonical
-A2A submission — never a bare `{"type": ...}` payload. Your prompt's
-`## A2A TASK CONTEXT` section gives you the Task ID, Context ID, and Last
-Message ID to use — see `## Gateway Message Reference` below for the exact
-submission shape. To report the PR, set `"state"` to `"completed"` and attach
-the PR as an artifact:
+Everything you report to ScrumMaster goes through the commons' submission tool,
+`a2a-submit.js`, and the **a2a-submit** skill is where it is described: read it
+before your first submission and follow it. You author nothing and you type no
+identifier — you name an operation and give it its fields, and the tool does
+the rest.
+
+Report the finished work with the `completed` operation, naming the pull request
+you opened:
 
 ```bash
-cat > /tmp/msg.json << 'ENDJSON'
-{
-  "state": "completed",
-  "message": {
-    "kind": "message",
-    "messageId": "<new uuid>",
-    "taskId": "<Task ID from your prompt>",
-    "contextId": "<Context ID from your prompt>",
-    "role": "agent",
-    "referenceMessageId": "<the messageId you are replying to>",
-    "parts": [ { "kind": "text", "text": "Verified and opened PR, ready for review." } ]
-  },
-  "artifacts": [
-    {
-      "kind": "artifact",
-      "artifactId": "<new uuid>",
-      "taskId": "<Task ID from your prompt>",
-      "name": "pull-request",
-      "parts": [
-        { "kind": "file", "file": { "name": "pull-request", "mimeType": "text/uri-list", "uri": "<url from gh pr create>" } },
-        { "kind": "text", "text": "<summary of what changed>" }
-      ]
-    }
-  ]
-}
-ENDJSON
-node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME /tmp/msg.json
+a2a-submit.js completed \
+  --text "Verified and opened PR, ready for review." \
+  --pull-request "<url from gh pr create>" \
+  --pull-request-summary "<summary of what changed>"
 ```
 
 ScrumMaster posts the PR-opened comment. Opening a PR does not transition the
 ticket or reassign it — Jenkins does that once the pipeline passes. You are
 done.
+
+A non-zero exit means nothing was published: read what it says, fix the call,
+and run it again.
 
 ---
 
@@ -254,55 +236,36 @@ If you need human clarification to proceed, leave a marker at the exact point in
 // BLOCKED GANG-XX precise description of what you need
 ```
 
-Then publish to ScrumMaster with `"state"` set to `"input-required"` (missing
-information) or `"auth-required"` (missing credentials/authorization), and the
-precise question as the text Part:
+Then report it with the `input-required` operation (you need information) or
+`auth-required` (you are missing a credential or an authorization), with the
+precise question and the place you are blocked:
 
 ```bash
-cat > /tmp/msg.json << 'ENDJSON'
-{
-  "state": "input-required",
-  "message": {
-    "kind": "message",
-    "messageId": "<new uuid>",
-    "taskId": "<Task ID from your prompt>",
-    "contextId": "<Context ID from your prompt>",
-    "role": "agent",
-    "referenceMessageId": "<the messageId you are replying to>",
-    "parts": [
-      { "kind": "text", "text": "<precise description of what you need>" },
-      { "kind": "data", "data": { "reference": { "file": "<path>", "function": "<element or line context>" } } }
-    ]
-  }
-}
-ENDJSON
-node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME /tmp/msg.json
+a2a-submit.js input-required \
+  --text "<precise description of what you need>" \
+  --reference-file "<path>" \
+  --reference-function "<element or line context>"
 ```
 
 Do not block without a located, specific question. If you can make a reasonable decision, make it.
 
 ---
 
-## Gateway Message Reference
+## Reporting to ScrumMaster
 
-All Jira interactions go through the ScrumMaster gateway stream as a canonical
-A2A submission — never a bare `{"type": ...}` payload. Your prompt's
-`## A2A TASK CONTEXT` section gives you the Task ID, Context ID, and the Last
-Message ID (use it as `referenceMessageId` on your first reply; generate and
-remember a new `messageId` for every submission you send after that, and
-reference it next time). Publish with the gateway-publish helper:
+Every report goes through `a2a-submit.js`, the commons' submission tool, and
+the **a2a-submit** skill describes it: what each operation is for, and what it
+needs. `a2a-submit.js help` lists them, and `a2a-submit.js help <operation>`
+gives one of them in detail. The ones this role uses:
 
-```bash
-node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME /tmp/msg.json
-```
+| Operation | When to use |
+|------|-------------|
+| `completed`, naming the pull request | All verification passes and the PR is open — ready for DevOps review |
+| `comment` | Progress update, or a completion note when no PR is needed |
+| `input-required` / `auth-required` | You need human clarification, or an authorization you do not have |
 
-A non-zero exit means the operation was NOT durably accepted — check the
-printed error and retry.
+A non-zero exit means the report was NOT durably accepted — nothing was
+published, the reason is on stderr, and nothing downstream has seen your work
+until a call succeeds.
 
-| Operation (message `data` Part) | `state` | When to use |
-|------|------|-------------|
-| *(completed, PR artifact attached)* | `completed` | All verification passes and PR is open — ready for DevOps review |
-| `comment` | `working` | Progress update or completion note when no PR is needed |
-| *(no operation)* | `input-required` / `auth-required` | You need human clarification or missing authorization to proceed |
-
-See `## Step 8` and `## If You Are Blocked` above for full submission examples.
+See `## Step 8` and `## If You Are Blocked` above.
