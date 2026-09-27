@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup-cloudflare-tunnel.sh
 #
-# Sets up a Cloudflare Tunnel so Jira can reach ScrumMaster over HTTPS
-# without exposing port 9000 to the internet.
+# Sets up a Cloudflare Tunnel so Jira can reach the core service over HTTPS
+# without exposing port 9100 to the internet.
 #
 # What this script does:
 #   1. Installs cloudflared (if not already installed)

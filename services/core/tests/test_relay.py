@@ -1,4 +1,4 @@
-"""Mirrors services/core/test/relay.test.js."""
+"""Mirrors the Node reference implementation's relay.test.js (not carried into this repository)."""
 
 from __future__ import annotations
 

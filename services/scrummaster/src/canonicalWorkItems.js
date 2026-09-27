@@ -10,10 +10,10 @@
 //    second write mechanism, it targets a different stream.
 //
 // Reused, not duplicated: stream naming here matches
-// services/core/src/streamTopology.js's commandStreamName() exactly
+// services/core/workitems/stream_topology.py's commandStreamName() exactly
 // (documented in that module as the shared contract both sides must agree
 // on). Kept as a small local literal rather than a cross-service require in
-// this direction — see services/core/src/store.js's module comment for
+// this direction — see services/core/workitems/store.py's module comment for
 // why the coupling runs the OTHER way (core requires
 // ScrumMaster's pure validation/streams modules) and not this one: a
 // deployed ScrumMaster should not need core's source tree on
@@ -51,7 +51,7 @@ async function getWorkItem(id, { client = axios, full = false } = {}) {
 
 // Publish a command onto the internal API's Streams command
 // channel. `payload` is the same { command, actor, ... } shape
-// services/core/src/commandConsumer.js expects.
+// services/core/workitems/command_consumer.py expects.
 async function publishCommand(project, payload, { redisClient, dedupeKey } = {}) {
   const client = redisClient || redis.getClient();
   const envelope = buildEnvelope({
@@ -62,4 +62,4 @@ async function publishCommand(project, payload, { redisClient, dedupeKey } = {})
   return streams.publish(client, commandStreamName(project), envelope, { dedupeKey });
 }
 
-module.exports = { baseUrl, commandStreamName, getMode, getWorkItem, publishCommand };
+module.exports = { commandStreamName, getMode, getWorkItem, publishCommand };

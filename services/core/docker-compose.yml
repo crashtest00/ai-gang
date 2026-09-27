@@ -1,7 +1,8 @@
 # AI Gang Internal Work-Item Service — deployment stack, distinct from
 # docker-compose.test.yml's ephemeral pytest fixtures.
 #
-# Four services from one image (see Dockerfile):
+# Six services, five of them from one image (see Dockerfile); the sixth,
+# core-postgres, is stock postgres:16-alpine:
 #   - core-postgres — persistent datastore (named volume, not tmpfs)
 #   - migrate       — one-shot `manage.py migrate`; others wait on its
 #                     clean exit
@@ -161,6 +162,9 @@ networks:
     external: true
 
 volumes:
+  # Upgrading a checkout that has canonical state recorded under this
+  # service's pre-rename volume names needs a one-time manual copy first —
+  # see UPGRADE.md. A fresh install needs nothing extra.
   postgres-data:
   # Artifact files. The host path `docker volume inspect
   # core_artifact-data` reports is where a human edits a

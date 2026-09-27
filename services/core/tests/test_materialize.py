@@ -1,4 +1,4 @@
-"""Mirrors services/core/test/materialize.test.js."""
+"""Mirrors the Node reference implementation's materialize.test.js (not carried into this repository)."""
 
 from __future__ import annotations
 

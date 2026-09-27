@@ -10,6 +10,19 @@
 # would only let one test's files leak into another's, and a consumer
 # container would race the in-process one for the same stream. The real
 # mounts and the real service are docker-compose.yml's.
+#
+# `name:` is pinned rather than left to Compose's default (the basename of
+# this file's directory, "core" since the rename). The two containers below
+# are addressed by their fixed `container_name`s, not by a project-scoped
+# name, but Compose still needs a project identity to decide whether a
+# container already running belongs to it — and the shared, long-lived test
+# containers this file's `up --wait`/`down -v` commands operate on
+# (`services/scrummaster/README.md`, `scripts/check-test-redis.js`,
+# `services/scrummaster/test/checkTestRedis.test.js`) were created before the
+# rename, under project "work-item-service". Pinning `core` here would make
+# every `up`/`down` collide with those containers' fixed names under a
+# project label they don't carry, instead of recognizing and managing them.
+name: work-item-service
 services:
   workitem-test-postgres:
     image: postgres:16-alpine

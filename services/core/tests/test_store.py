@@ -1,7 +1,7 @@
 """
-Mirrors services/core/test/store.test.js (Node reference
-implementation) one-for-one: same scenarios, same assertions, ported onto
-workitems/store.py + pytest.
+Mirrors the Node reference implementation's store.test.js (not carried
+into this repository) one-for-one: same scenarios, same assertions,
+ported onto workitems/store.py + pytest.
 """
 
 from __future__ import annotations
