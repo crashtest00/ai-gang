@@ -448,7 +448,7 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
 ```
 1. ROLE
    "You are the {agent name}. Read your full agent definition before taking any action:
-   /agent-docs/{agent-definition-file}.md"
+   /agent-docs/agents/{agent-definition-file}.md"
 
 2. TICKET CONTEXT
    Ticket: {ticket_key} — {ticket_title}
@@ -498,7 +498,7 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    - All Jira interactions must go through the ScrumMaster gateway stream as
      a canonical A2A submission (see Redis Message Contract) — never a bare
      {"type": ...} payload
-   - Use: node /agent-docs/lib/gateway-publish.js $PROJECT_NAME <path-to-json-file>
+   - Use: node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME <path-to-json-file>
    - If you need clarification, publish a submission with "state" set to
      input-required (missing information) or auth-required (missing
      authorization) and the exact file/function reference in the message
@@ -529,7 +529,7 @@ failing fast if either is malformed (`src/registry.js`):
     {
       "id": "backend-agent",
       "displayName": "Backend Agent",
-      "definitionPath": "/agent-docs/backend-agent.md",
+      "definitionPath": "/agent-docs/agents/backend-agent.md",
       "routing": { "channelSuffix": "backend" },
       "agentCard": { "name": "Backend Agent", "description": "Implements APIs, business logic, and data persistence." }
     }

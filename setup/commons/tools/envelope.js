@@ -1,7 +1,7 @@
 'use strict';
 
-// Container-side copy of services/scrummaster/src/envelope.js. Kept in setup/lib
-// (mounted read-only into every project container at /agent-docs/lib) so
+// Container-side copy of services/scrummaster/src/envelope.js. Kept in setup/commons/tools
+// (mounted read-only into every project container at /agent-docs/commons/tools) so
 // subscriber.js and gateway-publish.js can require it without depending on
 // the scrummaster package. Schema must stay identical to the ScrumMaster
 // copy.

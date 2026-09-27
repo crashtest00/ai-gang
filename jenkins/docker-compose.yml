@@ -12,7 +12,7 @@ services:
       - ./jenkins.yaml:/var/jenkins_home/casc_configs/jenkins.yaml:ro
       # Same read-only mount every project container uses for its agent
       # tooling (projects/*/docker-compose.yml) — gives the Jenkinsfile's
-      # pipeline_retry step access to setup/lib/gateway-publish.js so it
+      # pipeline_retry step access to setup/commons/tools/gateway-publish.js so it
       # publishes onto the gateway Streams transport the same way agents do,
       # instead of a hand-rolled redis-cli call.
       - ../setup:/agent-docs:ro

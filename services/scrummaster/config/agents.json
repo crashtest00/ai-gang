@@ -3,7 +3,7 @@
     {
       "id": "refinement-agent",
       "displayName": "Refinement Agent",
-      "definitionPath": "/agent-docs/refinement-agent.md",
+      "definitionPath": "/agent-docs/agents/refinement-agent.md",
       "routing": { "channelSuffix": "refinement" },
       "agentCard": {
         "name": "Refinement Agent",
@@ -21,7 +21,7 @@
     {
       "id": "backend-agent",
       "displayName": "Backend Agent",
-      "definitionPath": "/agent-docs/backend-agent.md",
+      "definitionPath": "/agent-docs/agents/backend-agent.md",
       "routing": { "channelSuffix": "backend" },
       "agentCard": {
         "name": "Backend Agent",
@@ -39,7 +39,7 @@
     {
       "id": "frontend-agent",
       "displayName": "Frontend Agent",
-      "definitionPath": "/agent-docs/frontend-agent.md",
+      "definitionPath": "/agent-docs/agents/frontend-agent.md",
       "routing": { "channelSuffix": "frontend" },
       "agentCard": {
         "name": "Frontend Agent",
@@ -57,7 +57,7 @@
     {
       "id": "devops-agent",
       "displayName": "DevOps Agent",
-      "definitionPath": "/agent-docs/devops-agent.md",
+      "definitionPath": "/agent-docs/agents/devops-agent.md",
       "routing": { "channelSuffix": "devops" },
       "agentCard": {
         "name": "DevOps Agent",
@@ -75,7 +75,7 @@
     {
       "id": "desktop-agent",
       "displayName": "Desktop Agent",
-      "definitionPath": "/agent-docs/desktop-agent.md",
+      "definitionPath": "/agent-docs/agents/desktop-agent.md",
       "routing": { "channelSuffix": "desktop" },
       "agentCard": {
         "name": "Desktop Agent",

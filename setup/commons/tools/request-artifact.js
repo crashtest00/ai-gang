@@ -7,8 +7,8 @@
  * artifact by canonical id and blocks until it answers.
  *
  * Usage:
- *   node /agent-docs/lib/request-artifact.js <project-name> <artifact-id> <requested-path> [--task-id <id>] [--timeout-ms <ms>]
- *   node /agent-docs/lib/request-artifact.js <project-name> -   (read a JSON request from stdin:
+ *   node /agent-docs/commons/tools/request-artifact.js <project-name> <artifact-id> <requested-path> [--task-id <id>] [--timeout-ms <ms>]
+ *   node /agent-docs/commons/tools/request-artifact.js <project-name> -   (read a JSON request from stdin:
  *     { "artifactId": "...", "requestedPath": "...", "taskId": "..." (optional), "timeoutMs": 30000 (optional) })
  *
  * There is no listing, search or browse: this takes exactly one artifact id

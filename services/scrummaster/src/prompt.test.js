@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 
 const { buildTaskPrompt, buildUnblockPrompt, buildRetryPrompt } = require('./prompt');
 
-const AGENT = { displayName: 'Backend Agent', definitionPath: '/agent-docs/backend-agent.md' };
+const AGENT = { displayName: 'Backend Agent', definitionPath: '/agent-docs/agents/backend-agent.md' };
 const TASK = { id: 'task-1', contextId: 'ctx-1' };
 const MESSAGE = { messageId: 'msg-1' };
 

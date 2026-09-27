@@ -305,7 +305,7 @@ pipeline {
                     "$JIRA_URL/rest/api/3/issue/$ticket/comment" > /dev/null \
                   || echo "WARN: could not post failure comment to $ticket" >&2
                 echo "$(jq -nc --arg t "$ticket" --arg u "$BUILD_URL" --arg n "$BUILD_NUMBER" '{type:"pipeline_retry",ticket_key:$t,build_url:$u,build_number:$n}')" \
-                    | node /agent-docs/lib/gateway-publish.js "$PROJECT_NAME" - \
+                    | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
                   || echo "WARN: could not publish pipeline_retry for $ticket" >&2
               done
             '''

@@ -100,7 +100,7 @@ request its delivery into the project's repository through the librarian
 is already there once the subtask is dispatched:
 
 ```bash
-node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
 ```
 
 A failed delivery does not stop you from creating the subtask — the link
@@ -177,7 +177,7 @@ cat > /tmp/msg.json << 'ENDJSON'
   }
 }
 ENDJSON
-node /agent-docs/lib/gateway-publish.js $PROJECT_NAME /tmp/msg.json
+node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME /tmp/msg.json
 ```
 
 After all subtasks are created, send a final submission with `"state"` set to
@@ -199,5 +199,5 @@ cat > /tmp/msg.json << 'ENDJSON'
   }
 }
 ENDJSON
-node /agent-docs/lib/gateway-publish.js $PROJECT_NAME /tmp/msg.json
+node /agent-docs/commons/tools/gateway-publish.js $PROJECT_NAME /tmp/msg.json
 ```

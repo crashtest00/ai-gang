@@ -39,6 +39,13 @@
  * completes before being picked up (same behavior as the previous in-memory
  * queue, now backed by pending Streams entries instead of process memory).
  *
+ * Each dispatch runs from a per-dispatch snapshot of the mounted agent commons
+ * (see setup/dispatch-snapshot.js), and the whole dispatch context is in the
+ * session's environment rather than only in its prompt — seven variables:
+ * PROJECT_NAME, REDIS_HOST, A2A_TASK_ID, A2A_CONTEXT_ID, A2A_LAST_MESSAGE_ID,
+ * AIGANG_COMMONS_DIR and AIGANG_COMMONS_VERSION — with the snapshot's `tools/`
+ * first on PATH, so a tool is invoked by name.
+ *
  * A kind=TASK envelope's `payload` is a canonical A2A Message ({ kind:
  * "message", messageId, taskId, contextId, role, parts, ... }). This
  * subscriber only needs the
@@ -48,8 +55,9 @@
 
 const { createClient } = require('redis');
 const { execFile } = require('child_process');
-const { buildEnvelope, KIND } = require('./lib/envelope');
-const { ensureGroup, createConsumer, publish: streamsPublish } = require('./lib/streams');
+const { buildEnvelope, KIND } = require('./commons/tools/envelope');
+const { ensureGroup, createConsumer, publish: streamsPublish } = require('./commons/tools/streams');
+const { createSnapshot, installSkills, sessionEnv, removeSnapshot } = require('./dispatch-snapshot');
 
 const PROJECT_NAME = process.env.PROJECT_NAME;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
@@ -130,7 +138,25 @@ function runClaude(envelope) {
       return;
     }
 
+    // Snapshot the mounted commons for this dispatch before spawning the
+    // session, so a `git pull` on the host cannot change a tool or a skill
+    // under the running session, and stamp the session with the snapshot's
+    // content hash. See setup/dispatch-snapshot.js.
+    let snapshot;
+    try {
+      snapshot = createSnapshot();
+      installSkills(snapshot);
+    } catch (snapshotErr) {
+      if (snapshot) {
+        try { removeSnapshot(snapshot); } catch { /* best effort */ }
+      }
+      console.error(`[subscriber] Commons snapshot failed for ${envelope.taskId}: ${snapshotErr.message}`);
+      resolve({ success: false, reason: 'commons_snapshot_failed', diagnostic: snapshotErr.message });
+      return;
+    }
+
     console.log(`[subscriber] Starting Claude for ticket ${envelope.taskId}`);
+    console.log(`[subscriber] Commons snapshot ${snapshot.commonsDir} version ${snapshot.version} for ${envelope.taskId}`);
 
     // Pass the prompt via stdin to avoid shell escaping issues with complex prompts
     const child = execFile(
@@ -143,10 +169,26 @@ function runClaude(envelope) {
           REDIS_HOST,
           A2A_TASK_ID: envelope.taskId,
           A2A_CONTEXT_ID: envelope.contextId,
+          // The A2A message id of the dispatch message this session is
+          // replying to. A kind=TASK envelope's `payload` *is* the canonical
+          // A2A Message (see the header contract above), so the id is
+          // payload.messageId — not envelope.messageId, which is the
+          // transport id envelope.js mints for the stream entry.
+          A2A_LAST_MESSAGE_ID: envelope.payload?.messageId,
+          // PATH (snapshot tools first), AIGANG_COMMONS_DIR and
+          // AIGANG_COMMONS_VERSION. Spread last so its PATH wins.
+          ...sessionEnv(snapshot),
         },
         timeout: 30 * 60 * 1000, // 30 minute timeout per task
       },
       (err, _stdout, stderr) => {
+        // The session has ended: the snapshot and any per-session state a tool
+        // kept beside it go with it.
+        try {
+          removeSnapshot(snapshot);
+        } catch (cleanupErr) {
+          console.error(`[subscriber] Could not remove snapshot ${snapshot.dispatchDir}: ${cleanupErr.message}`);
+        }
         // Bounded, best-effort diagnostic — not a guarantee that no secret
         // ever appears in agent stderr output; this truncates but does not
         // scrub.

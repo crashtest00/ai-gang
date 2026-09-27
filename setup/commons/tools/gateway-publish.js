@@ -6,8 +6,8 @@
  * in agent prompts with a supported Streams gateway command/helper.
  *
  * Usage:
- *   node /agent-docs/lib/gateway-publish.js <project-name> <path-to-json-file>
- *   node /agent-docs/lib/gateway-publish.js <project-name> -   (read JSON from stdin)
+ *   node /agent-docs/commons/tools/gateway-publish.js <project-name> <path-to-json-file>
+ *   node /agent-docs/commons/tools/gateway-publish.js <project-name> -   (read JSON from stdin)
  *
  * Wraps the agent's raw payload in the versioned envelope and durably XADDs
  * it to aigang:gateway:{project}. Exits non-zero (and prints to stderr) on

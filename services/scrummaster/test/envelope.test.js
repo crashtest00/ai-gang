@@ -9,7 +9,7 @@ const {
   SCHEMA_VERSION: CONTAINER_SIDE_SCHEMA_VERSION,
   validateEnvelope: containerValidateEnvelope,
   fromStreamFields: containerFromStreamFields,
-} = require('../../../setup/lib/envelope');
+} = require('../../../setup/commons/tools/envelope');
 
 test('buildEnvelope produces a schema-valid envelope with defaults', () => {
   const envelope = buildEnvelope({ kind: KIND.JIRA_OPERATION, project: 'hello-world', payload: { type: 'comment' } });
@@ -55,15 +55,15 @@ test('fromStreamFields returns null instead of throwing on garbage', () => {
   assert.equal(fromStreamFields({}), null);
 });
 
-// V4 audit Pass 2 rows 34 and 36 — setup/lib/envelope.js's own header says
+// V4 audit Pass 2 rows 34 and 36 — setup/commons/tools/envelope.js's own header says
 // "Schema must stay identical to the ScrumMaster copy". This proves the two
 // KIND objects are identical, and that the V4 librarian pair validates as a
 // genuine kind here too (VALID_KINDS membership, not just presence).
-test('KIND is identical to setup/lib/envelope.js\'s container-side copy', () => {
+test('KIND is identical to setup/commons/tools/envelope.js\'s container-side copy', () => {
   assert.deepStrictEqual(KIND, CONTAINER_SIDE_KIND);
 });
 
-test('ARTIFACT_DELIVERY_REQUEST/_RESPONSE match setup/lib/envelope.js\'s container-side copy byte-for-byte', () => {
+test('ARTIFACT_DELIVERY_REQUEST/_RESPONSE match setup/commons/tools/envelope.js\'s container-side copy byte-for-byte', () => {
   assert.equal(KIND.ARTIFACT_DELIVERY_REQUEST, 'artifact_delivery_request');
   assert.equal(KIND.ARTIFACT_DELIVERY_RESPONSE, 'artifact_delivery_response');
   assert.equal(KIND.ARTIFACT_DELIVERY_REQUEST, CONTAINER_SIDE_KIND.ARTIFACT_DELIVERY_REQUEST);
@@ -72,11 +72,11 @@ test('ARTIFACT_DELIVERY_REQUEST/_RESPONSE match setup/lib/envelope.js\'s contain
   assert.doesNotThrow(() => buildEnvelope({ kind: KIND.ARTIFACT_DELIVERY_RESPONSE, project: 'p', payload: {} }));
 });
 
-// V4 audit Pass 3 row 41 — setup/lib/envelope.js:6 claims the whole schema
+// V4 audit Pass 3 row 41 — setup/commons/tools/envelope.js:6 claims the whole schema
 // is identical to this copy, but until now only KIND was pinned.
 // SCHEMA_VERSION and the accept/reject behavior of validateEnvelope and
 // fromStreamFields were unpinned and could silently drift.
-test('SCHEMA_VERSION is identical to setup/lib/envelope.js\'s container-side copy', () => {
+test('SCHEMA_VERSION is identical to setup/commons/tools/envelope.js\'s container-side copy', () => {
   assert.equal(SCHEMA_VERSION, CONTAINER_SIDE_SCHEMA_VERSION);
 });
 

@@ -364,16 +364,16 @@ Mount only the definitions each container needs in `docker-compose.yml`:
 frontend:
   volumes:
     - ./frontend:/workspace
-    - ../../setup/frontend-agent.md:/agent-docs/frontend-agent.md:ro
-    - ../../setup/refinement-agent.md:/agent-docs/refinement-agent.md:ro
+    - ../../setup/agents/frontend-agent.md:/agent-docs/agents/frontend-agent.md:ro
+    - ../../setup/agents/refinement-agent.md:/agent-docs/agents/refinement-agent.md:ro
     - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
 
 backend:
   volumes:
     - ./backend:/workspace
-    - ../../setup/backend-agent.md:/agent-docs/backend-agent.md:ro
-    - ../../setup/refinement-agent.md:/agent-docs/refinement-agent.md:ro
-    - ../../setup/devops-agent.md:/agent-docs/devops-agent.md:ro
+    - ../../setup/agents/backend-agent.md:/agent-docs/agents/backend-agent.md:ro
+    - ../../setup/agents/refinement-agent.md:/agent-docs/agents/refinement-agent.md:ro
+    - ../../setup/agents/devops-agent.md:/agent-docs/agents/devops-agent.md:ro
     - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
 ```
 

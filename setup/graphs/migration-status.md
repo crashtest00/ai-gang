@@ -132,7 +132,7 @@ These generalize beyond a single phase:
 | Branch-point class | Applies wherever | Status |
 | --- | --- | --- |
 | Base-image family (Alpine/BusyBox vs. Debian/Ubuntu user-management syntax) | Any Dockerfile customization step (currently Phase 3.2; also relevant to any future Docker Templates/ addition) | converted: `base-image-family` |
-| Git branch-tracking / stale-ref state | Any step that assumes a local checkout's tracking ref still matches the remote default branch (Phase 0's platform-repo clone, Phase 3.0/3.1's new project repo, and the Frontend/Backend Agent's own `git checkout main && git pull` step per `setup/frontend-agent.md:49`/`setup/backend-agent.md:49`) | converted: `branch-tracking-stale-ref` (`setup/graphs/branch-tracking-stale-ref.graph.yaml`) — the graph exists and is walkable; it is not yet wired into every one of those call sites as a mandatory pre-step, which would be a separate follow-on change to those scripts/docs, not a graph-schema change |
+| Git branch-tracking / stale-ref state | Any step that assumes a local checkout's tracking ref still matches the remote default branch (Phase 0's platform-repo clone, Phase 3.0/3.1's new project repo, and the Frontend/Backend Agent's own `git checkout main && git pull` step per `setup/agents/frontend-agent.md:49`/`setup/agents/backend-agent.md:49`) | converted: `branch-tracking-stale-ref` (`setup/graphs/branch-tracking-stale-ref.graph.yaml`) — the graph exists and is walkable; it is not yet wired into every one of those call sites as a mandatory pre-step, which would be a separate follow-on change to those scripts/docs, not a graph-schema change |
 
 ## Not yet converted, and why
 

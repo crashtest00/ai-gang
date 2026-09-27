@@ -56,7 +56,7 @@ Human opens PR from beta → prod (requires 1 approving review)
 | **Backend Agent**    | Implements API/service subtasks in the backend container                        |
 | **DevOps Agent**     | Jenkins setup and maintenance; not on the automated path                        |
 
-Agent definitions live in `~/ai-gang/setup/` and are mounted read-only into every container at `/agent-docs`. Updating an agent definition is a `git pull` — running containers see the change immediately.
+Agent definitions live in `~/ai-gang/setup/agents/` and are mounted read-only into every container at `/agent-docs`. Updating an agent definition is a `git pull` — running containers see the change immediately.
 
 ---
 

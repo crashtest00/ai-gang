@@ -14,14 +14,14 @@
  * arrives. request-artifact.js is run as a real child process talking to
  * real Redis throughout; no internal function is called in its place.
  *
- * Run through setup/lib/test.sh (needs the `redis` package resolvable —
+ * Run through setup/commons/tools/test.sh (needs the `redis` package resolvable —
  * the project containers get it from a global npm install per
  * Docker Templates/Dockerfile-node.template; locally, install it the same
  * way and point NODE_PATH at it):
  *   sudo npm install -g redis
- *   setup/lib/test.sh
+ *   setup/commons/tools/test.sh
  *
- * setup/lib/test.sh, not a bare `node --test` invocation, because these
+ * setup/commons/tools/test.sh, not a bare `node --test` invocation, because these
  * tests share the real test Redis (REDIS_TEST_URL above) with
  * services/core's own suite and write to the real
  * aigang:librarian:requests/:responses stream names a live librarian

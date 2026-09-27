@@ -58,7 +58,7 @@ it, not you — so treat the artifact as unavailable and report BLOCKED
 rather than looking the record up another way.
 
 ```bash
-node /agent-docs/lib/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
 ```
 
 This blocks until the librarian answers — normally under a second, bounded

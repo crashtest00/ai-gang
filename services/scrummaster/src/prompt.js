@@ -168,7 +168,7 @@ function buildRetryPrompt(issue, agent, evidence, task, message) {
 //
 // Agents submit the *payload* shown below — gateway-publish.js wraps it in
 // the transport envelope (schemaVersion/messageId/kind/taskId/contextId; see
-// setup/lib/gateway-publish.js) —
+// setup/commons/tools/gateway-publish.js) —
 // so the agent only ever needs to think in A2A terms, never Streams terms.
 function buildA2AInstructions(issue, task, message) {
   const lines = [];
@@ -218,7 +218,7 @@ function buildA2AInstructions(issue, task, message) {
   lines.push(`  cat > /tmp/msg.json << 'ENDJSON'`);
   lines.push(`  { ...submission... }`);
   lines.push(`  ENDJSON`);
-  lines.push(`  node /agent-docs/lib/gateway-publish.js ${issue.projectName} /tmp/msg.json`);
+  lines.push(`  node /agent-docs/commons/tools/gateway-publish.js ${issue.projectName} /tmp/msg.json`);
   lines.push(`  The project name is: ${issue.projectName} — use this exact string, do not substitute anything else`);
   lines.push(`  A non-zero exit means the operation was NOT durably accepted — check the printed error and retry`);
   lines.push('- Supported operations, set inside the message\'s "data" part (all also accept an optional "reference": {"file": "...", "function": "..."}):');

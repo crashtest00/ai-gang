@@ -23,7 +23,7 @@ const KIND = Object.freeze({
   // (librarian/README.md, workitems/envelope.py's Kind class). Not a task:
   // TASK_KINDS below deliberately does not include either, so neither
   // requires taskId/contextId. Added here (V4 audit Pass 2 row 34) to
-  // match setup/lib/envelope.js, the container-side copy of this file,
+  // match setup/commons/tools/envelope.js, the container-side copy of this file,
   // which already carries them (PR #21) — this module consumes neither
   // kind; they exist here only so the two copies' schemas stay identical,
   // per this file's own contract with that copy.

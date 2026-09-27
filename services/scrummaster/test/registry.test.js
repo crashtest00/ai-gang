@@ -13,7 +13,7 @@ test('parseCatalog accepts a well-formed catalog', () => {
       {
         id: 'backend-agent',
         displayName: 'Backend Agent',
-        definitionPath: '/agent-docs/backend-agent.md',
+        definitionPath: '/agent-docs/agents/backend-agent.md',
         routing: { channelSuffix: 'backend' },
         agentCard: { name: 'Backend Agent', description: 'Implements APIs.' },
       },
