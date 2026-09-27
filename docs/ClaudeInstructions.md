@@ -98,7 +98,7 @@ what the container builds the agent's own instructions from.
 | --- | --- | --- |
 | 1 | `scripts/startup/create-network.sh` | Create the ai-gang Docker network if it does not already exist |
 | 2 | `scripts/startup/start-redis.sh` | Start Redis |
-| 3 | `scripts/startup/start-work-item-service.sh` | Build and start the work-item service and apply its database migrations |
+| 3 | `scripts/startup/start-core.sh` | Build and start the core service and apply its database migrations |
 | 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
 | 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
 | 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
@@ -725,10 +725,10 @@ nothing is dispatched before that.
 
 ### Validation legs
 
-**Work-item service leg** — the write was recorded and published:
+**Core service leg** — the write was recorded and published:
 
 ```bash
-docker logs workitem-relay --tail 50     # the outbox row was published
+docker logs core-relay --tail 50     # the outbox row was published
 docker exec ai-gang-redis redis-cli XLEN aigang:workitems:<project>:events
 ```
 
@@ -753,11 +753,11 @@ consumed:
 
 ```bash
 docker exec ai-gang-redis redis-cli XINFO GROUPS aigang:workitems:<project>
-docker logs workitem-consumers --tail 50
+docker logs core-consumers --tail 50
 ```
 
-A `workitemservice` group has to be listed, and the log has to name the
-project. The work-item service reads
+A `core` group has to be listed, and the log has to name the project.
+The core service reads
 `services/scrummaster/config/projects.json` once at startup, exactly as
 ScrumMaster does, and creates each listed project's consumer groups then.
 If the group is missing, that service is older than the project's
@@ -766,7 +766,7 @@ the stream, nothing reads them, no subtask is ever created and no agent
 runs — with no error in any log. Make it re-read:
 
 ```bash
-cd ~/ai-gang/services/work-item-service && docker compose restart api consumers
+cd ~/ai-gang/services/core && docker compose restart api consumers
 ```
 
 **Project container leg** — the agent ran:

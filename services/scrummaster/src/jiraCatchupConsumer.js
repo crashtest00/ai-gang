@@ -1,7 +1,7 @@
 'use strict';
 
 // The downstream half of the connect-Jira
-// catch-up push. services/work-item-service/workitems/catchup.py selects local work
+// catch-up push. services/core/workitems/catchup.py selects local work
 // items still missing an external_key and emits one
 // work_item.jira_catchup_requested event per item via the normal outbox/
 // relay mechanism; catchup.py's

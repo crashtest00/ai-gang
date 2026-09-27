@@ -4,7 +4,7 @@
 #
 # Two files are produced:
 #
-#   services/work-item-service/.env — generated in full, every run. Its
+#   services/core/.env — generated in full, every run. Its
 #     PostgreSQL, Redis and Django settings all come from the platform
 #     .env or from scripts/startup/env-contract.sh's defaults. Docker
 #     Compose reads this same file twice: as the services' env_file, and
@@ -42,7 +42,7 @@ STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$STARTUP_DIR/lib.sh"
 
-WIS_DIR="$AIGANG_ROOT/services/work-item-service"
+WIS_DIR="$AIGANG_ROOT/services/core"
 SM_DIR="$AIGANG_ROOT/services/scrummaster"
 
 # Every JIRA_*_FIELD_ID workitems/jira_interpret.py and
@@ -86,8 +86,8 @@ set_env_var() {
   fi
 }
 
-# --- work-item service ------------------------------------------------
-[[ -d "$WIS_DIR" ]] || die "work-item service directory missing at $WIS_DIR"
+# --- core service -----------------------------------------------------
+[[ -d "$WIS_DIR" ]] || die "core service directory missing at $WIS_DIR"
 
 WIS_ENV="$WIS_DIR/.env"
 WIS_TMP="$(mktemp)"

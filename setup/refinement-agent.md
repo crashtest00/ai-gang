@@ -74,7 +74,7 @@ prompt's `## A2A TASK CONTEXT` already names it (`Specification link:` /
 itself is reachable by the same `Task ID`:
 
 ```bash
-curl -s "http://work-item-service:9100/work-items/<Task ID>?full=true"
+curl -s "http://core:9100/work-items/<Task ID>?full=true"
 ```
 
 Its `specification_link` and `artifact_links` are the story's own; you

@@ -34,7 +34,7 @@ const PLATFORM_ENV = [
 
 function makeRoot({ platformEnv = PLATFORM_ENV, scrummasterEnv = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-derive-env-'));
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
   fs.writeFileSync(path.join(root, '.env'), platformEnv);
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
@@ -69,13 +69,13 @@ test("the work-item service's environment file carries its database, Redis and D
   const result = run(root);
   assert.equal(result.status, 0, result.stderr);
 
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGPASSWORD, 'a-test-only-pg-password');
   assert.equal(derived.DJANGO_SECRET_KEY, 'a-test-only-django-key');
   // Not set in the platform .env, so these come from the contract's defaults.
   assert.equal(derived.PGUSER, 'workitem');
   assert.equal(derived.PGDATABASE, 'workitem');
-  assert.equal(derived.PGHOST, 'workitem-postgres');
+  assert.equal(derived.PGHOST, 'core-postgres');
   assert.equal(derived.PGPORT, '5432');
   assert.equal(derived.REDIS_HOST, 'ai-gang-redis');
   assert.equal(derived.PORT, '9100');
@@ -84,7 +84,7 @@ test("the work-item service's environment file carries its database, Redis and D
 test('an operator override in the platform .env wins over the contract default', () => {
   const root = makeRoot({ platformEnv: PLATFORM_ENV + 'PGUSER=chosen-role\nPGDATABASE=chosen-db\n' });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGUSER, 'chosen-role');
   assert.equal(derived.PGDATABASE, 'chosen-db');
 });
@@ -109,7 +109,7 @@ test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item s
     platformEnv: PLATFORM_ENV + 'JIRA_BEHAVIOR_FIELD_ID=customfield_10050\nJIRA_TARGET_PROJECT_FIELD_ID=customfield_10060\n',
   });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.JIRA_BEHAVIOR_FIELD_ID, 'customfield_10050');
   assert.equal(derived.JIRA_TARGET_PROJECT_FIELD_ID, 'customfield_10060');
   // Not set in the platform .env — a local-mode-only deployment must see
@@ -124,7 +124,7 @@ test('every JIRA_*_FIELD_ID the work-item service reads is wired through when th
   const extra = ALL_JIRA_FIELD_ID_VARS.map((name, i) => `${name}=customfield_${10000 + i}`).join('\n') + '\n';
   const root = makeRoot({ platformEnv: PLATFORM_ENV + extra });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   ALL_JIRA_FIELD_ID_VARS.forEach((name, i) => {
     assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the work-item service .env`);
   });
@@ -168,12 +168,12 @@ test('running twice leaves exactly the same files, with no duplicated assignment
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   const first = {
-    wis: fs.readFileSync(path.join(root, 'services', 'work-item-service', '.env'), 'utf8'),
+    wis: fs.readFileSync(path.join(root, 'services', 'core', '.env'), 'utf8'),
     sm: fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8'),
   };
   assert.equal(run(root).status, 0);
   const second = {
-    wis: fs.readFileSync(path.join(root, 'services', 'work-item-service', '.env'), 'utf8'),
+    wis: fs.readFileSync(path.join(root, 'services', 'core', '.env'), 'utf8'),
     sm: fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8'),
   };
   assert.equal(second.wis, first.wis);
@@ -186,7 +186,7 @@ test('both derived files are written owner-readable only', () => {
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   for (const file of [
-    path.join(root, 'services', 'work-item-service', '.env'),
+    path.join(root, 'services', 'core', '.env'),
     path.join(root, 'services', 'scrummaster', '.env'),
   ]) {
     assert.equal(fs.statSync(file).mode & 0o077, 0, `${file} must not be group- or world-readable`);
@@ -205,6 +205,6 @@ test('no secret reaches the step output', () => {
 test('a quoted value in the platform .env is unquoted the way Compose unquotes it', () => {
   const root = makeRoot({ platformEnv: PLATFORM_ENV.replace('PGPASSWORD=a-test-only-pg-password', 'PGPASSWORD="a quoted password"') });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGPASSWORD, 'a quoted password');
 });

@@ -9,7 +9,7 @@
 AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with Jira and GitHub on your behalf.
 
 Three shared services run alongside the project containers, and platform
-startup brings up all three: **Redis** (message broker), the **work-item
+startup brings up all three: **Redis** (message broker), the **core
 service** (the datastore and the Django admin panel you write stories in,
 at `http://127.0.0.1:9100/django-admin/`), and **ScrumMaster** (work
 router). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes

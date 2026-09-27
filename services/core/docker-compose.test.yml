@@ -1,0 +1,45 @@
+# Ephemeral pytest fixtures: Postgres and Redis only.
+#
+# No artifact volume and no projects mount here, deliberately, and no
+# `librarian` service either. The suite runs on the host, not in a
+# container: the artifact-ingress tests point ARTIFACT_ROOT
+# (core/settings.py) at pytest's own per-test tmp_path, the
+# librarian tests do the same with PROJECTS_ROOT, and the librarian's
+# subscriber runs in the test process (tests/librarian_support.py starts
+# the same consumer `manage.py run_librarian` starts). A shared volume
+# would only let one test's files leak into another's, and a consumer
+# container would race the in-process one for the same stream. The real
+# mounts and the real service are docker-compose.yml's.
+services:
+  workitem-test-postgres:
+    image: postgres:16-alpine
+    container_name: workitem-test-postgres-django
+    environment:
+      - POSTGRES_USER=workitem
+      - POSTGRES_PASSWORD=workitem
+      - POSTGRES_DB=workitem
+    ports:
+      - "15432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    # Without this, `docker compose up --wait` returns as soon as the
+    # container is running, which on a cold start is well before Postgres
+    # accepts connections — every test then errors on a refused connection.
+    # With it, --wait means what it says.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workitem -d workitem"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+  workitem-test-redis:
+    image: redis:7-alpine
+    container_name: workitem-test-redis-django
+    ports:
+      - "16399:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

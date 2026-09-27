@@ -4,9 +4,9 @@
 // A work item's transition into a dispatch-eligible state MUST trigger
 // agent dispatch via the SAME mechanism regardless of which mode or
 // ingress produced that transition — a Jira-originated event validated by
-// work-item-service, a Django Admin Panel write (local mode), or any
+// core, a Django Admin Panel write (local mode), or any
 // future ingress. This is that single mechanism: one durable Streams
-// consumer on work-item-service's outbound canonical-event stream
+// consumer on core's outbound canonical-event stream
 // (aigang:workitems:{project}:events — the same stream
 // jiraCatchupConsumer.js already consumes, for a different purpose; this
 // is a second, independent consumer group, Streams' normal fan-out).
@@ -64,7 +64,7 @@ async function stopDispatchConsumers() {
   await Promise.all(consumers.splice(0).map(c => c.stop()));
 }
 
-// Map a canonical work item (work-item-service's full-record HTTP shape,
+// Map a canonical work item (core's full-record HTTP shape,
 // serializers.serialize_work_item_full) into the same "issue"-shaped
 // object jira.getIssue() returns, so the existing dispatchTask/
 // buildTaskPrompt/buildUnblockPrompt/buildRetryPrompt pipeline needs no
@@ -315,7 +315,7 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
 }
 
 // The outbound event stream is a fan-out: every event type
-// work-item-service emits arrives here, not just the ones this consumer
+// core emits arrives here, not just the ones this consumer
 // acts on, so a non-matching event type is expected and silently ignored.
 async function handleWorkItemEventEnvelope(envelope, projectName) {
   const payload = envelope.payload || {};
@@ -343,7 +343,7 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
   if (eventType === 'work_item.jira_release_event') {
     // The same event type now also carries a local-mode-originated
     // candidate-cut/abandon/done, keyed by
-    // `workItemId`/`project` instead of `jiraIssueKey` (work-item-service's
+    // `workItemId`/`project` instead of `jiraIssueKey` (core's
     // store.py `_publish_release_event`, no jiraIssueKey in the payload).
     // handlers.js branches on which one is present; this routing is
     // otherwise unchanged from Jira mode.
@@ -360,7 +360,7 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
   }
 
   // work_item.jira_event_received, work_item.assigned, work_item.comment_added,
-  // etc. — recorded by work-item-service already; nothing for this
+  // etc. — recorded by core already; nothing for this
   // consumer to do.
 }
 

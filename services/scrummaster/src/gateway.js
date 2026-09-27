@@ -866,7 +866,7 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
 // creates it and immediately transitions it to 'ready'). This is
 // deliberate, not a shortcut: every
 // dispatch-eligible transition must go through the same
-// work-item-service-event -> dispatchConsumer.js path regardless of
+// core-event -> dispatchConsumer.js path regardless of
 // ingress, so this function must NOT call dispatchTask directly for a
 // local-mode subtask — dispatchConsumer.js's existing consumer on
 // work_item.status_changed picks up the 'ready' transition and dispatches

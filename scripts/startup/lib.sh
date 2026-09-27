@@ -24,10 +24,10 @@ AIGANG_STATE_DIR="${AIGANG_STATE_DIR:-$AIGANG_ROOT/.ai-gang}"
 AIGANG_STATUS_FILE="$AIGANG_STATE_DIR/status.json"
 AIGANG_IDENTITY_FILE="$AIGANG_STATE_DIR/config-identity.json"
 
-# The one address an operator opens. The work-item service's `api` service
-# publishes 127.0.0.1:9100 (services/work-item-service/docker-compose.yml)
+# The one address an operator opens. The core service's `api` service
+# publishes 127.0.0.1:9100 (services/core/docker-compose.yml)
 # and Django's admin site is mounted at /django-admin/
-# (services/work-item-service/workitemservice/urls.py). status.sh holds
+# (services/core/core/urls.py). status.sh holds
 # the value, since it is what writes it into the status record.
 AIGANG_ADMIN_URL="$("$STARTUP_DIR/status.sh" admin-url)"
 
@@ -206,24 +206,24 @@ compose_in() {
   ( cd "$AIGANG_ROOT/$dir" && docker compose "$@" )
 }
 
-# The Django API of the work-item service, answering its own health
+# The Django API of the core service, answering its own health
 # endpoint from inside its container. Both the step that restarts it and
 # the step that confirms health ask the same question the same way.
 workitem_api_healthy() {
-  docker exec work-item-service curl -fsS http://localhost:9100/health
+  docker exec core-api curl -fsS http://localhost:9100/health
 }
 
-# One project's command channel in the work-item service: the stream its
+# One project's command channel in the core service: the stream its
 # commands are written to, and the consumer group its consumers read them
-# through (services/work-item-service/workitems/stream_topology.py —
+# through (services/core/workitems/stream_topology.py —
 # command_stream_name and COMMAND_GROUP).
-WORKITEM_COMMAND_GROUP="workitemservice"
+WORKITEM_COMMAND_GROUP="core"
 
 workitem_command_stream() {
   printf 'aigang:workitems:%s' "$1"
 }
 
-# True when the work-item service is actually consuming a project's
+# True when the core service is actually consuming a project's
 # commands. Its consumers process creates that project's consumer group
 # as it starts (workitems/streams.py, XGROUP CREATE with MKSTREAM), so
 # the group's presence is the one observable fact that says the project

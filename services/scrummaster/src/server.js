@@ -5,7 +5,7 @@ const redis = require('./redis');
 const registry = require('./registry');
 const streams = require('./streams');
 
-// Django/work-item-service is AI
+// Django/core is AI
 // Gang's sole external-facing surface (as of 2026-09-09). ScrumMaster no longer accepts any
 // inbound webhook and exposes no externally reachable route — this HTTP
 // server exists only for /health, reachable on the Docker network (see

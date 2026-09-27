@@ -222,7 +222,7 @@ function getEffectiveAgents(projectName) {
 const GATEWAY_GROUP = 'scrummaster';
 // This service's own consumer group on the internal work-item service's
 // outbound event stream (any interested subscriber creates its own group —
-// see services/work-item-service/workitems/stream_topology.py's module comment).
+// see services/core/workitems/stream_topology.py's module comment).
 const JIRA_CATCHUP_GROUP = 'jira-catchup';
 // ScrumMaster's dispatch-trigger consumer
 // group on that SAME outbound event stream. A second, independent
@@ -249,7 +249,7 @@ function gatewayStreamName(projectName) {
 }
 
 // Internal work-item service -> ScrumMaster (outbound events): matches
-// services/work-item-service/workitems/stream_topology.py's event_stream_name()
+// services/core/workitems/stream_topology.py's event_stream_name()
 // exactly — the shared naming contract both sides agree on (same reasoning
 // as commandStreamName in canonicalWorkItems.js).
 function workItemEventStreamName(projectName) {

@@ -32,7 +32,7 @@ function _refLabel(ref) {
   return typeof ref === 'string' ? ref : ref.workItemId;
 }
 
-// Fired once ScrumMaster (Jira mode) or work-item-service (local mode, via
+// Fired once ScrumMaster (Jira mode) or core (local mode, via
 // its own Django-side check) has confirmed beta's queue is clean for a new
 // release. Jenkins pins the candidate SHA, cuts `release/<sha>`, opens the
 // `release/<sha> → prod` PR, and stands up the preview container.

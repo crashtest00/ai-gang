@@ -13,7 +13,7 @@
 #   - ScrumMaster creates each configured project's streams and consumer
 #     groups from that file at startup;
 #
-#   - the work-item service does the same from the same file — its
+#   - the core service does the same from the same file — its
 #     consumers process creates each project's command and webhook
 #     consumer groups as it starts, and its API process caches the
 #     project list the first time it is asked for it, which step 3's own
@@ -59,16 +59,16 @@ done
 log "reloading ScrumMaster's project registry so it consumes '$PROJECT_NAME'"
 compose_in services/scrummaster restart scrummaster || die "could not restart ScrumMaster"
 
-log "reloading the work-item service's project registry so it consumes '$PROJECT_NAME'"
-compose_in services/work-item-service restart api consumers \
-  || die "could not restart the work-item service's API and consumers"
+log "reloading the core service's project registry so it consumes '$PROJECT_NAME'"
+compose_in services/core restart api consumers \
+  || die "could not restart the core service's API and consumers"
 
 wait_until 45 workitem_api_healthy \
-  || { status service work-item-service unhealthy; die "the work-item service did not answer /health again after its project registry was reloaded"; }
+  || { status service core-api unhealthy; die "the core service did not answer /health again after its project registry was reloaded"; }
 
 wait_until 30 workitem_commands_consumed "$PROJECT_NAME" \
-  || die "the work-item service is not consuming '$PROJECT_NAME' after the reload — no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME")"
+  || die "the core service is not consuming '$PROJECT_NAME' after the reload — no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME")"
 
-log "the work-item service is consuming commands for '$PROJECT_NAME'"
+log "the core service is consuming commands for '$PROJECT_NAME'"
 
 end_step start-project

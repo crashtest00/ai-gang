@@ -35,10 +35,10 @@ services:
       - REDIS_HOST=ai-gang-redis
       # Local-mode release-candidate/production-promote writeback target.
       # Container DNS name on the shared ai-gang network
-      # (services/work-item-service/docker-compose.yml's `api` service), not
+      # (services/core/docker-compose.yml's `api` service), not
       # a configurable host — same convention as REDIS_HOST above, not
       # JIRA_URL/BETA_VM_HOST below.
-      - WORKITEM_SERVICE_URL=http://work-item-service:9100
+      - WORKITEM_SERVICE_URL=http://core:9100
       # Deploy credentials added once deployment targets are decided
     deploy:
       resources:

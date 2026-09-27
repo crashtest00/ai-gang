@@ -72,9 +72,9 @@ async function main() {
     `\nSeveral of this package's test files talk to a real Redis, and nothing is listening on ` +
     `${unreachable.join(', ')}.\n\n` +
     `Start the one the tests expect, from the repository root:\n\n` +
-    `  docker compose -f services/work-item-service/docker-compose.test.yml up --wait\n\n` +
+    `  docker compose -f services/core/docker-compose.test.yml up --wait\n\n` +
     `and stop it again when you are done:\n\n` +
-    `  docker compose -f services/work-item-service/docker-compose.test.yml down -v\n\n` +
+    `  docker compose -f services/core/docker-compose.test.yml down -v\n\n` +
     `To run a test file that needs no Redis without this check, add --ignore-scripts.\n`
   );
   process.exit(1);

@@ -276,7 +276,7 @@ function runnableCheckout() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-agent-run-'));
   fs.symlinkSync(path.join(REPO_ROOT, 'scripts'), path.join(root, 'scripts'));
   fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
   fs.copyFileSync(SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));

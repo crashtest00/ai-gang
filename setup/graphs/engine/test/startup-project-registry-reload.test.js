@@ -55,11 +55,11 @@ function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds =
   const stub = path.join(bin, 'docker');
   const groupsReply = groupsReplyPauseSeconds > 0
     ? [
-        '        printf "name\\nworkitemservice\\n"',
+        '        printf "name\\ncore\\n"',
         `        sleep ${groupsReplyPauseSeconds}`,
         '        printf "consumers\\n1\\npending\\n0\\n"',
       ].join('\n')
-    : '        printf "name\\nworkitemservice\\nconsumers\\n1\\npending\\n0\\n"';
+    : '        printf "name\\ncore\\nconsumers\\n1\\npending\\n0\\n"';
   fs.writeFileSync(stub, [
     '#!/usr/bin/env bash',
     'printf "%s|%s\\n" "${PWD#$AIGANG_TEST_ROOT/}" "$*" >> "$AIGANG_TEST_ARGV"',
@@ -99,7 +99,7 @@ function makeRoot() {
   fs.mkdirSync(path.join(root, 'projects', PROJECT), { recursive: true });
   fs.writeFileSync(path.join(root, 'projects', PROJECT, 'Dockerfile'), 'FROM node:22-alpine\n');
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   // The validator the steps read their decisions back through lives in
   // the real checkout, so it is linked rather than copied.
   fs.mkdirSync(path.join(root, 'setup', 'graphs', 'engine', 'lib'), { recursive: true });
@@ -179,7 +179,7 @@ test('the step that starts the project reloads the work-item service too, and wa
     restarts.map((c) => `${c.cwd}: ${c.command}`),
     [
       'services/scrummaster: compose restart scrummaster',
-      'services/work-item-service: compose restart api consumers',
+      'services/core: compose restart api consumers',
     ],
     'the project registry has to be reloaded in both services that read it'
   );
@@ -231,7 +231,7 @@ test('health confirms the work-item service is serving the configured project', 
     'the health check must ask about the configured project, not only about the containers'
   );
   const doc = record(env);
-  assert.equal(doc.services['workitem-consumers'], 'healthy');
+  assert.equal(doc.services['core-consumers'], 'healthy');
   assert.equal(doc.state, 'complete');
 });
 
@@ -251,7 +251,7 @@ test('the health check still recognizes the group once found, even while more of
   const result = runStep('confirm-health.sh', env);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const doc = record(env);
-  assert.equal(doc.services['workitem-consumers'], 'healthy');
+  assert.equal(doc.services['core-consumers'], 'healthy');
   assert.equal(doc.state, 'complete');
 });
 
@@ -264,13 +264,13 @@ test('health fails, naming the project, when the consumers are not serving it', 
 
   const result = runStep('confirm-health.sh', env);
   assert.notEqual(result.status, 0, 'a project nothing is consuming is not a healthy platform');
-  assert.match(result.stderr, /workitem-consumers: NOT healthy/);
+  assert.match(result.stderr, /core-consumers: NOT healthy/);
   assert.ok(result.stderr.includes(PROJECT), 'the diagnostic must name the project');
   assert.ok(result.stderr.includes(COMMAND_STREAM), `the diagnostic must name ${COMMAND_STREAM}`);
 
   const doc = record(env);
   assert.equal(doc.state, 'failed');
-  assert.equal(doc.services['workitem-consumers'], 'unhealthy');
+  assert.equal(doc.services['core-consumers'], 'unhealthy');
   assert.equal(doc.services.redis, 'healthy');
   assert.equal(doc.adminUrl, null, 'a failed health check must not publish an address to open');
   assert.ok(doc.error.includes(PROJECT));

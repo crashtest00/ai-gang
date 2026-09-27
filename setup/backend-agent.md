@@ -37,11 +37,11 @@ may request it directly — no lookup needed. The record read below is the
 fallback, for when your prompt lists none.
 
 **Finding the id.** Your dispatch prompt's `Task ID` is your work item's
-canonical id. Read the record from the work-item service, reachable from
+canonical id. Read the record from the core service, reachable from
 your container on the shared `ai-gang` Docker network:
 
 ```bash
-curl -s "http://work-item-service:9100/work-items/<your Task ID>"
+curl -s "http://core:9100/work-items/<your Task ID>"
 ```
 
 It comes back with `specification_link` and `artifact_links`; read the

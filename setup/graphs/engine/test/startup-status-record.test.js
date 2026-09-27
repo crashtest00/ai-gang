@@ -47,7 +47,7 @@ test('the step list is the ordered initialization sequence, numbered from one', 
     [
       'create-network',
       'start-redis',
-      'start-work-item-service',
+      'start-core',
       'create-admin',
       'start-scrummaster',
       'initialize-project',
@@ -239,7 +239,7 @@ test('a step that failed and is re-run clears the failure, so the record blames 
   assert.equal(doc.steps.find((s) => s.id === 'start-redis').state, 'in-progress');
 
   status(dir, 'step-done', 'start-redis');
-  status(dir, 'step-start', 'start-work-item-service');
+  status(dir, 'step-start', 'start-core');
   status(dir, 'fail', 'the work-item service did not answer /health');
   doc = record(dir);
   assert.equal(doc.error, 'the work-item service did not answer /health');

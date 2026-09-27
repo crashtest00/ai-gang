@@ -93,8 +93,8 @@ test('both documents give the Django admin address the status record actually wr
 
 test('the admin address matches where the service is actually published and mounted', () => {
   const adminUrl = run('status.sh', 'admin-url').trim();
-  const compose = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'docker-compose.yml'));
-  const urls = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitemservice', 'urls.py'));
+  const compose = read(path.join(REPO_ROOT, 'services', 'core', 'docker-compose.yml'));
+  const urls = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'urls.py'));
   assert.match(compose, /"127\.0\.0\.1:9100:9100"/);
   assert.match(urls, /path\('django-admin\/', admin\.site\.urls\)/);
   assert.equal(adminUrl, 'http://127.0.0.1:9100/django-admin/');
@@ -190,7 +190,7 @@ test("the UserGuide's example configuration is one the validator accepts", () =>
 test('the services the documents say startup brings up are the ones it checks', () => {
   // confirm-health.sh is the definition of "AI Gang is up".
   const health = read(path.join(STARTUP_DIR, 'confirm-health.sh'));
-  for (const service of ['redis', 'work-item-service', 'scrummaster']) {
+  for (const service of ['redis', 'core-api', 'scrummaster']) {
     assert.ok(health.includes(`check ${service} `), `confirm-health.sh does not check ${service}`);
   }
   assert.match(health, /check "\$PROJECT_NAME" project_ok/);
@@ -198,7 +198,7 @@ test('the services the documents say startup brings up are the ones it checks', 
   // Markdown wraps, so the guide is compared with its line breaks
   // flattened rather than as written.
   const guide = read(USER_GUIDE).replace(/\s+/g, ' ');
-  assert.ok(guide.includes('work-item service'));
+  assert.ok(guide.includes('core service'));
   assert.ok(guide.includes('ScrumMaster'));
   assert.ok(guide.includes('Redis'));
   // Jenkins is not part of this flow and must not be claimed as part of it.
@@ -233,14 +233,14 @@ test('the end-to-end leg uses the work-item type and status the service actually
   assert.ok(leg.includes('`refinement-agent`'));
   assert.ok(leg.includes('`story`'));
   // store.py requires story detail before a story may leave 'proposed'.
-  const store = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'store.py'));
+  const store = read(path.join(REPO_ROOT, 'services', 'core', 'workitems', 'store.py'));
   assert.match(store, /if item\.type == 'story' and validity\['baseline'\] != 'proposed'/);
   assert.match(leg.replace(/\s+/g, ' '), /story fields .{0,40}(before|and moving)/i,
     'the leg should say the story fields have to be saved before the status moves');
 
   // The admin's story-detail inline is hidden on the add form, which is
   // why the sequence takes three saves rather than one.
-  const admin = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'admin.py'));
+  const admin = read(path.join(REPO_ROOT, 'services', 'core', 'workitems', 'admin.py'));
   assert.match(admin, /def get_inlines\(self, request, obj\)/);
   assert.match(admin, /WorkItemStoryDetailInline/);
   assert.match(leg.replace(/\s+/g, ' '), /three saves/);
@@ -256,8 +256,8 @@ test('the end-to-end leg uses the work-item type and status the service actually
 // ---- the work-item service's own environment example ----
 
 test('every variable the .env.example declares is one settings.py reads, or a documented Jira custom-field id read directly via os.environ', () => {
-  const example = read(path.join(REPO_ROOT, 'services', 'work-item-service', '.env.example'));
-  const settings = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitemservice', 'settings.py'));
+  const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
+  const settings = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'settings.py'));
   // The Jira custom-field ids (JIRA_*_FIELD_ID) are the one documented
   // exception to "settings.py reads it": jira_interpret.py and
   // webhook_consumer.py read them directly via os.environ, never through
@@ -267,8 +267,8 @@ test('every variable the .env.example declares is one settings.py reads, or a do
   // var declared in .env.example still has to name a real reader, not
   // merely live somewhere under workitems/.
   const jiraReaders = [
-    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'jira_interpret.py'),
-    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'webhook_consumer.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_interpret.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'webhook_consumer.py'),
   ].map(read);
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
@@ -276,13 +276,13 @@ test('every variable the .env.example declares is one settings.py reads, or a do
     const readsIt = settings.includes(`'${name}'`) || jiraReaders.some((source) => source.includes(`'${name}'`));
     assert.ok(
       readsIt,
-      `${name} is in services/work-item-service/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py reads it`
+      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py reads it`
     );
   }
 });
 
 test('the variables derive-env.sh actually writes are all declared in the .env.example', () => {
-  const example = read(path.join(REPO_ROOT, 'services', 'work-item-service', '.env.example'));
+  const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
   const derive = read(path.join(STARTUP_DIR, 'derive-env.sh'));
   const written = [...derive.matchAll(/echo "([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]);
   assert.ok(written.length > 0);

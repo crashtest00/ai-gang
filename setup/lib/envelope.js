@@ -10,7 +10,7 @@
 // request-artifact.js (V4 agent-facing artifact access), also carry over
 // to services/scrummaster/src/envelope.js's KIND (V4 audit Pass 2 row 34)
 // so that parity holds for this pair too. They mirror
-// services/work-item-service/workitems/envelope.py's Kind.ARTIFACT_DELIVERY_REQUEST /
+// services/core/workitems/envelope.py's Kind.ARTIFACT_DELIVERY_REQUEST /
 // Kind.ARTIFACT_DELIVERY_RESPONSE byte-for-byte (same strings), which
 // already validates a librarian delivery envelope exactly as it validates
 // a work-item command (that module's own docstring). ScrumMaster consumes

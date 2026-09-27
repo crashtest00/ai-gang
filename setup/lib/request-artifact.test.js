@@ -2,9 +2,9 @@
 
 /**
  * Tests for request-artifact.js against the real test Redis
- * (services/work-item-service/docker-compose.test.yml,
+ * (services/core/docker-compose.test.yml,
  * redis://localhost:16399 — start with `docker compose -f
- * docker-compose.test.yml up -d --wait` from services/work-item-service/
+ * docker-compose.test.yml up -d --wait` from services/core/
  * if it is not already up; never `down` it, per this track's build brief).
  *
  * The librarian itself is Python and out of this track's scope
@@ -23,7 +23,7 @@
  *
  * setup/lib/test.sh, not a bare `node --test` invocation, because these
  * tests share the real test Redis (REDIS_TEST_URL above) with
- * services/work-item-service's own suite and write to the real
+ * services/core's own suite and write to the real
  * aigang:librarian:requests/:responses stream names a live librarian
  * consumer also reads (V4 audit Pass 2 row 35) — the script holds the
  * same /tmp/v4-wis-suite.lock that suite's run_tests.sh does, so the two
