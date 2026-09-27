@@ -39,8 +39,11 @@
  * completes before being picked up (same behavior as the previous in-memory
  * queue, now backed by pending Streams entries instead of process memory).
  *
- * Each dispatch runs from a per-dispatch snapshot of the mounted agent commons
- * (see setup/dispatch-snapshot.js), and the whole dispatch context is in the
+ * Each dispatch runs from a per-dispatch snapshot of everything an agent reads
+ * during its session — the commons, the per-role definitions and the two role
+ * handbooks (see setup/dispatch-snapshot.js) — with every mount path the
+ * session is given for one of them rewritten onto that snapshot, so no file an
+ * agent reads can change under it. The whole dispatch context is in the
  * session's environment rather than only in its prompt — seven variables:
  * PROJECT_NAME, REDIS_HOST, A2A_TASK_ID, A2A_CONTEXT_ID, A2A_LAST_MESSAGE_ID,
  * AIGANG_COMMONS_DIR and AIGANG_COMMONS_VERSION — with the snapshot's `tools/`
@@ -57,7 +60,14 @@ const { createClient } = require('redis');
 const { execFile } = require('child_process');
 const { buildEnvelope, KIND } = require('./commons/tools/envelope');
 const { ensureGroup, createConsumer, publish: streamsPublish } = require('./commons/tools/streams');
-const { createSnapshot, installSkills, sessionEnv, removeSnapshot, pruneSnapshotRoot } = require('./dispatch-snapshot');
+const {
+  createSnapshot,
+  installSkills,
+  sessionEnv,
+  rewriteAgentPaths,
+  removeSnapshot,
+  pruneSnapshotRoot,
+} = require('./dispatch-snapshot');
 
 const PROJECT_NAME = process.env.PROJECT_NAME;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
@@ -138,10 +148,10 @@ function runClaude(envelope) {
       return;
     }
 
-    // Snapshot the mounted commons for this dispatch before spawning the
-    // session, so a `git pull` on the host cannot change a tool or a skill
-    // under the running session, and stamp the session with the snapshot's
-    // content hash. See setup/dispatch-snapshot.js.
+    // Snapshot the mount for this dispatch before spawning the session, so a
+    // `git pull` on the host cannot change a tool, a skill, a role definition
+    // or a handbook under the running session, and stamp the session with the
+    // snapshot's content hash. See setup/dispatch-snapshot.js.
     let snapshot;
     try {
       snapshot = createSnapshot();
@@ -155,8 +165,22 @@ function runClaude(envelope) {
       return;
     }
 
+    // ScrumMaster's prompt opens with the role definition's path, a fixed
+    // `/agent-docs/agents/<role>.md` from its own config, and the definition it
+    // points at names its handbook the same way. Both are snapshotted, so both
+    // paths are rewritten onto this dispatch's snapshot — the definition and
+    // the handbook inside `createSnapshot`, the prompt here — and the session
+    // is given no path into the live mount for either (Agent Commons REQ-02,
+    // Amendment 1).
+    const sessionPrompt = rewriteAgentPaths(prompt, snapshot);
+
     console.log(`[subscriber] Starting Claude for ticket ${envelope.taskId}`);
     console.log(`[subscriber] Commons snapshot ${snapshot.commonsDir} version ${snapshot.version} for ${envelope.taskId}`);
+    console.log(
+      `[subscriber] Snapshot ${snapshot.dispatchDir} carries ${snapshot.entries.join(', ')}; `
+      + `mount paths rewritten in the prompt: ${sessionPrompt === prompt ? 'none' : 'yes'}, `
+      + `in ${snapshot.rewritten.length} snapshotted document(s)${snapshot.rewritten.length ? ` (${snapshot.rewritten.join(', ')})` : ''}`
+    );
 
     // Pass the prompt via stdin to avoid shell escaping issues with complex prompts
     const child = execFile(
@@ -205,7 +229,7 @@ function runClaude(envelope) {
     );
 
     // Write the prompt to Claude's stdin, then close stdin to signal end of input
-    child.stdin.write(prompt);
+    child.stdin.write(sessionPrompt);
     child.stdin.end();
   });
 }

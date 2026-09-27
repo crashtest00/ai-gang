@@ -625,13 +625,20 @@ test('help for one operation lists only that operation', async () => {
 test('the per-dispatch snapshot marks the constructor executable, and it runs by bare name from PATH', async () => {
   const { createSnapshot, removeSnapshot } = require('../../dispatch-snapshot');
 
-  // A stand-in for the mounted /agent-docs/commons, holding the real tools.
-  const source = fs.mkdtempSync(path.join(root, 'commons-source-'));
-  fs.cpSync(__dirname, path.join(source, 'tools'), {
+  // A stand-in for the mounted /agent-docs, holding the real tools. Every entry
+  // the snapshot carries has to be there, definitions and handbooks included:
+  // a dispatch that cannot carry one fails rather than leaving it on the mount
+  // (Agent Commons REQ-02, Amendment 1).
+  const source = fs.mkdtempSync(path.join(root, 'agent-docs-source-'));
+  fs.cpSync(__dirname, path.join(source, 'commons', 'tools'), {
     recursive: true,
     filter: src => !src.endsWith('.test.js'),
   });
-  fs.mkdirSync(path.join(source, 'skills'));
+  fs.mkdirSync(path.join(source, 'commons', 'skills'));
+  fs.mkdirSync(path.join(source, 'agents'));
+  fs.writeFileSync(path.join(source, 'agents', 'devops-agent.md'), '# DevOps Agent\n');
+  fs.writeFileSync(path.join(source, 'DEVOPS_HANDBOOK_v1.md'), '# DevOps handbook\n');
+  fs.writeFileSync(path.join(source, 'DESKTOP_HANDBOOK_v1.md'), '# Desktop handbook\n');
 
   const snapshot = createSnapshot({ source, root: fs.mkdtempSync(path.join(root, 'snapshot-root-')) });
   try {
