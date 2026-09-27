@@ -239,72 +239,54 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
 fi
 
 # Register the Jira webhook if not already present.
-# Uses the legacy /rest/webhooks/1.0/webhook endpoint (works with basic auth).
-# The WEBHOOK_SECRET is embedded as a URL query param — the only way to pass it
-# via this API — and ScrumMaster validates it from req.query.secret.
-ensure_webhook() {
-  echo "Checking Jira webhook..."
-
-  # Auto-generate WEBHOOK_SECRET in services/scrummaster/.env if missing
-  local secret
-  secret=$(grep -E '^WEBHOOK_SECRET=.+' "$SM_ENV" | cut -d= -f2 || true)
-  if [[ -z "$secret" ]]; then
-    secret=$(openssl rand -hex 32)
-    if grep -q '^WEBHOOK_SECRET=' "$SM_ENV"; then
-      sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$secret|" "$SM_ENV"
-    else
-      echo "WEBHOOK_SECRET=$secret" >> "$SM_ENV"
-    fi
-    echo "  Generated WEBHOOK_SECRET and saved to services/scrummaster/.env"
-  fi
-
-  local webhook_url="${HQ_URL}/webhook/jira?secret=${secret}"
-
-  # Check if a webhook for this URL already exists
-  local existing
-  existing=$(curl -s -u "$AUTH" -H "Accept: application/json" \
-    "$JIRA_URL/rest/webhooks/1.0/webhook" \
-    | jq -r --arg url "$webhook_url" '.[] | select(.url == $url) | .self' 2>/dev/null || true)
-
-  if [[ -n "$existing" ]]; then
-    echo "  Webhook already registered — skipping."
-    return
-  fi
-
-  # Register the webhook
-  local result
-  result=$(curl -s -u "$AUTH" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json" \
-    -X POST "$JIRA_URL/rest/webhooks/1.0/webhook" \
-    -d "$(jq -n \
-      --arg url "$webhook_url" \
-      '{
-        name: "AI Gang",
-        url: $url,
-        events: ["jira:issue_created", "jira:issue_updated"],
-        filters: {},
-        excludeBody: false
-      }')")
-
-  if echo "$result" | jq -e '.self' > /dev/null 2>&1; then
-    echo "  Webhook registered: $webhook_url"
-  else
-    local reason
-    reason=$(echo "$result" | jq -r '.messages[0].arguments[0] // .errorMessages[0] // "unknown error"')
-    echo "  Warning: webhook auto-registration failed ($reason)."
-    echo "  Register manually in Jira Settings → System → Webhooks:"
-    echo "    URL:    $webhook_url"
-    echo "    Events: jira:issue_created, jira:issue_updated"
-    echo "  Note: Jira Cloud requires HTTPS. Point a domain at this server and set HQ_URL accordingly."
-  fi
-}
-
+#
+# BUGFIXES.md BF-02: this used to be ensure_webhook(), a bash function that
+# built a Jira REST URL, POSTed to it with curl, and parsed the JSON
+# response — a shell script speaking the Jira REST API, which BF-02 holds
+# is itself the defect (point 1: "repointing its two wrong strings would
+# leave that defect standing"). Registration now happens inside the core
+# service's own Python Jira integration, beside workitems/jira_interpret.py
+# (whose docstring already claims Jira protocol handling "lives entirely
+# here ... never in ScrumMaster or any other Streams client") — the
+# workitems.management.commands.ensure_jira_webhook management command.
+#
+# This script's remaining role here is exactly point 5's provisioning
+# exception: gather the platform .env's JIRA_URL/JIRA_EMAIL/JIRA_TOKEN (and
+# HQ_URL) and hand them to the service for the life of one call, never
+# constructing the Jira URL or parsing Jira's response itself. Values go in
+# via an env-file `docker exec --env-file` reads, not the command line —
+# an argument sits in the host process table for as long as the call
+# lasts; a file scripts/startup/create-admin.sh already uses this same
+# pattern for AIGANG_ADMIN_* — so a credential is never readable there.
+# WEBHOOK_SECRET is deliberately NOT gathered or passed here: it is the
+# core service's own credential (workitems/views.py already authenticates
+# incoming webhooks against it), read from that service's own environment,
+# not handed over by this script.
 if [[ "$CONNECT_JIRA" == "true" ]]; then
   API="$JIRA_URL/rest/api/3"
   AUTH="$JIRA_EMAIL:$JIRA_TOKEN"
 
-  ensure_webhook
+  echo "Checking Jira webhook..."
+  webhook_env_file="$(mktemp)"
+  trap 'rm -f "$webhook_env_file"' EXIT
+  chmod 600 "$webhook_env_file"
+  {
+    printf 'JIRA_URL=%s\n' "$JIRA_URL"
+    printf 'JIRA_EMAIL=%s\n' "$JIRA_EMAIL"
+    printf 'JIRA_TOKEN=%s\n' "$JIRA_TOKEN"
+    printf 'HQ_URL=%s\n' "$HQ_URL"
+  } > "$webhook_env_file"
+
+  if ! docker exec --env-file "$webhook_env_file" core-api python manage.py ensure_jira_webhook; then
+    echo "  Warning: webhook registration did not complete — see the command's own output above."
+    echo "  Register manually in Jira Settings → System → Webhooks:"
+    echo "    URL:    ${HQ_URL}/webhooks/jira?secret=<services/core/.env's WEBHOOK_SECRET>"
+    echo "    Events: jira:issue_created, jira:issue_updated"
+    echo "  Note: Jira Cloud requires HTTPS. Point a domain at this server and set HQ_URL accordingly."
+  fi
+
+  rm -f "$webhook_env_file"
+  trap - EXIT
   echo ""
 fi
 
