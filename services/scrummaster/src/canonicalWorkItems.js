@@ -62,4 +62,4 @@ async function publishCommand(project, payload, { redisClient, dedupeKey } = {})
   return streams.publish(client, commandStreamName(project), envelope, { dedupeKey });
 }
 
-module.exports = { baseUrl, commandStreamName, getMode, getWorkItem, publishCommand };
+module.exports = { commandStreamName, getMode, getWorkItem, publishCommand };
