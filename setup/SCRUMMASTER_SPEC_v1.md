@@ -295,7 +295,7 @@ Reference: src/auth.py → doAuth()
 Ticket: GANG-42
 ```
 
-ScrumMaster enforces this format. If an agent submits a comment that does not include a reference field, ScrumMaster logs a warning and posts the comment with the reference field omitted rather than dropping the message.
+ScrumMaster enforces this format. The reference field is optional: no submission path can be rejected or flagged for leaving it out. When it is absent, ScrumMaster posts the comment with the `Reference:` line omitted, logging only `Posted comment on {ticket}` — no warning is logged.
 
 ---
 
@@ -456,35 +456,60 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    Ticket: {ticket_key} — {ticket_title}
    Parent ticket: {parent_key}  (if subtask)
 
-   ### Behavior
-   {behavior field}
+   Task dispatch only:
+     ### Behavior
+     {behavior field}
 
-   ### Acceptance Criteria
-   {acceptance_criteria field}
+     ### Acceptance Criteria
+     {acceptance_criteria field}
 
-   ### Constraints
-   {constraints field}
+     ### Constraints
+     {constraints field}
 
-   ### Edge Cases
-   {edge_cases field}
+     ### Edge Cases
+     {edge_cases field}
 
-   ### Out of Scope
-   {out_of_scope field}
+     ### Out of Scope
+     {out_of_scope field}
 
-   (Story schema fields only — present for Refinement Agent prompts.
-    Dev agent prompts use the subtask description written by the Refinement Agent.)
+     (Story schema fields only — present for Refinement Agent prompts.
+      Dev agent prompts use the subtask description written by the Refinement Agent.)
 
-3. COMMENT THREAD (if present)
-   The following clarifications have been provided:
+   Unblock flow only:
+     Description:
+     {subtask description, or "(no description provided)"}
+
+   Retry flow adds neither block: TICKET CONTEXT is just the ticket/parent lines.
+
+3. COMMENT THREAD and RESUME POINT — order depends on flow; task dispatch
+   renders neither RESUME POINT nor a distinct COMMENT THREAD ordering issue
+   (it has no RESUME POINT at all):
+
+   Unblock flow: COMMENT THREAD (if present), then RESUME POINT.
+   Retry flow: RESUME POINT, then COMMENT THREAD (if present).
+
+   COMMENT THREAD (if present)
+   The following clarifications have been provided (most recent last):
    [{timestamp}] {author}: {body}
 
-4. RESUME POINT (unblock flow only)
-   File: {file path}
-   Line: {line number}
-   Your note: {blocked marker text}
-   Continue from this point using the clarification provided above.
+   RESUME POINT (unblock and retry flows; task dispatch has none)
+   Unblock:
+     You previously stopped work on this ticket and left a BLOCKED marker.
+     File: {file path}
+     Line: {line number}
+     Your note: {blocked marker text}
+     Continue from this point using the clarification provided above.
+   Retry, pipeline failure:
+     The project pipeline failed on your pull request for this ticket.
+     Build log: {build_url}
+     Build number: {build_number}
+     Diagnose the failure, fix it, and push the fix to the same branch/PR.
+   Retry, human rework:
+     A human reviewer requested rework after reviewing this ticket on beta.
+     Read the comment thread below for the specific rework requested, address
+     it, and push the fix to the same branch/PR.
 
-5. ALLOWED AGENTS (only when the dispatch supplies an allowed-agent set,
+4. ALLOWED AGENTS (only when the dispatch supplies an allowed-agent set,
    which task dispatches do and continuations and retries do not)
    - {agent id}: {agent card description}   (one line per permitted agent)
 
@@ -492,7 +517,7 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    to what the project enables — not an instruction about messaging. The
    Refinement Agent names one of these ids as the agent a subtask is for.
 
-6. WORK ITEM REFERENCES
+5. WORK ITEM REFERENCES
    Jira issue key: {issue.key}
    Specification link: {artifact id} ({requirement id})   — or "none"
    Artifact links: {artifact id}, {artifact id}           — or "none"
