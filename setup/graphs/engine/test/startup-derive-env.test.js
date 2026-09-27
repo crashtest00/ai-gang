@@ -130,6 +130,18 @@ test('every JIRA_*_FIELD_ID the work-item service reads is wired through when th
   });
 });
 
+test('WEBHOOK_SECRET set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
+  const withSecret = makeRoot({ platformEnv: PLATFORM_ENV + 'WEBHOOK_SECRET=a-test-only-webhook-secret\n' });
+  assert.equal(run(withSecret).status, 0);
+  const derivedWithSecret = parseEnvFile(path.join(withSecret, 'services', 'core', '.env'));
+  assert.equal(derivedWithSecret.WEBHOOK_SECRET, 'a-test-only-webhook-secret');
+
+  const withoutSecret = makeRoot();
+  assert.equal(run(withoutSecret).status, 0);
+  const derivedWithoutSecret = parseEnvFile(path.join(withoutSecret, 'services', 'core', '.env'));
+  assert.equal('WEBHOOK_SECRET' in derivedWithoutSecret, false, 'WEBHOOK_SECRET should not appear when unset in the platform .env');
+});
+
 test("ScrumMaster's environment file gets AI_GANG_HOME set to the checkout's own path", () => {
   const root = makeRoot();
   assert.equal(run(root).status, 0);

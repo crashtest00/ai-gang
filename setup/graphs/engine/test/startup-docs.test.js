@@ -255,28 +255,29 @@ test('the end-to-end leg uses the work-item type and status the service actually
 
 // ---- the work-item service's own environment example ----
 
-test('every variable the .env.example declares is one settings.py reads, or a documented Jira custom-field id read directly via os.environ', () => {
+test('every variable the .env.example declares is one settings.py reads, or a documented os.environ reader names directly', () => {
   const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
   const settings = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'settings.py'));
-  // The Jira custom-field ids (JIRA_*_FIELD_ID) are the one documented
-  // exception to "settings.py reads it": jira_interpret.py and
-  // webhook_consumer.py read them directly via os.environ, never through
-  // settings.py (see .env.example's own header and
+  // The Jira custom-field ids (JIRA_*_FIELD_ID) and WEBHOOK_SECRET are the
+  // documented exceptions to "settings.py reads it": jira_interpret.py,
+  // webhook_consumer.py and views.py read them directly via os.environ,
+  // never through settings.py (see .env.example's own header and
   // scripts/startup/derive-env.sh's comment on the same variables). An
   // explicit list of reader files, not a wildcard over the package, so a
   // var declared in .env.example still has to name a real reader, not
   // merely live somewhere under workitems/.
-  const jiraReaders = [
+  const directReaders = [
     path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_interpret.py'),
     path.join(REPO_ROOT, 'services', 'core', 'workitems', 'webhook_consumer.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'views.py'),
   ].map(read);
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
   for (const name of new Set(declared)) {
-    const readsIt = settings.includes(`'${name}'`) || jiraReaders.some((source) => source.includes(`'${name}'`));
+    const readsIt = settings.includes(`'${name}'`) || directReaders.some((source) => source.includes(`'${name}'`));
     assert.ok(
       readsIt,
-      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py reads it`
+      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py/views.py reads it`
     );
   }
 });

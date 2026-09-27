@@ -14,11 +14,13 @@
 #     It also carries every configured JIRA_*_FIELD_ID (workitems/
 #     jira_interpret.py and workitems/webhook_consumer.py both read these
 #     via os.environ — Story schema fields, the five-field Release schema
-#     BUGFIXES.md BF-01 added, and the Agent/Blocked fields). These are
-#     genuinely optional — a local-mode-only deployment never sets them —
-#     so each is copied from the platform .env only when set there; an
-#     unset one is left out of the generated file entirely rather than
-#     written empty, same as an unset one is absent from .env itself.
+#     BUGFIXES.md BF-01 added, and the Agent/Blocked fields) and
+#     WEBHOOK_SECRET (workitems/views.py's jira_webhook view, also read via
+#     os.environ). These are genuinely optional — a local-mode-only
+#     deployment never sets them — so each is copied from the platform
+#     .env only when set there; an unset one is left out of the generated
+#     file entirely rather than written empty, same as an unset one is
+#     absent from .env itself.
 #
 #   services/scrummaster/.env — updated in place, never rewritten, since
 #     scripts/create-jira-fields.sh and scripts/init-project.sh both write
@@ -103,6 +105,9 @@ WIS_TMP="$(mktemp)"
   echo "REDIS_HOST=ai-gang-redis"
   echo "REDIS_PORT=6379"
   echo "PORT=9100"
+  if webhook_secret="$(env_file_get "$AIGANG_ENV_FILE" WEBHOOK_SECRET)" && [[ -n "$webhook_secret" ]]; then
+    printf '%s=%s\n' WEBHOOK_SECRET "$webhook_secret"
+  fi
   for jira_var in "${JIRA_FIELD_ID_VARS[@]}"; do
     if jira_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_var")" && [[ -n "$jira_value" ]]; then
       printf '%s=%s\n' "$jira_var" "$jira_value"
