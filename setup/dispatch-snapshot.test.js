@@ -19,7 +19,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { createSnapshot, installSkills, sessionEnv, removeSnapshot } = require('./dispatch-snapshot');
+const { createSnapshot, installSkills, sessionEnv, removeSnapshot, pruneSnapshotRoot } = require('./dispatch-snapshot');
 
 // A stand-in for the mounted /agent-docs/commons: a tools/ directory with one
 // shebang tool and one plain module it requires, and a skills/ directory with
@@ -117,6 +117,25 @@ test('the version covers file paths, not only contents', () => {
   const second = createSnapshot({ source: b, root: makeRoot() });
 
   assert.notStrictEqual(first.version, second.version);
+});
+
+test('an empty directory and an absent one stamp differently', () => {
+  // installSkills' own existsSync branch behaves differently for the two, so a
+  // stamp that could not tell them apart would call two sessions that ran
+  // differently the same commons.
+  const withEmpty = makeCommons();
+  fs.rmSync(path.join(withEmpty, 'skills/a2a-submit'), { recursive: true });
+  const without = makeCommons();
+  fs.rmSync(path.join(without, 'skills'), { recursive: true });
+
+  const empty = createSnapshot({ source: withEmpty, root: makeRoot() });
+  const absent = createSnapshot({ source: without, root: makeRoot() });
+
+  assert.deepStrictEqual(fs.readdirSync(path.join(empty.commonsDir, 'skills')), [],
+    'the first snapshot has an empty skills directory');
+  assert.ok(!fs.existsSync(path.join(absent.commonsDir, 'skills')),
+    'the second has none at all');
+  assert.notStrictEqual(empty.version, absent.version);
 });
 
 test('the version ignores file modes, so a source tree without executable bits still stamps the same', () => {
@@ -239,4 +258,100 @@ test('removing the snapshot removes the snapshot and the state beside it', () =>
   assert.ok(!fs.existsSync(snapshot.stateDir));
   // The mounted commons it was copied from is untouched.
   assert.ok(fs.existsSync(path.join(source, 'tools/gateway-publish.js')));
+});
+
+// ---------------------------------------------------------------------------
+// Row 27 — neither cleanup path leaks a copy of the commons
+// ---------------------------------------------------------------------------
+
+test('a failed copy leaves no dispatch directory behind', () => {
+  // mkdtemp mints the directory before cpSync runs, and subscriber.js's guarded
+  // removeSnapshot cannot reach it: createSnapshot never returned a snapshot to
+  // pass. Three attempts per task at MAX_ATTEMPTS used to mean three full
+  // copies, or three empty shells, left in the container's temporary directory.
+  const root = makeRoot();
+  assert.throws(() => createSnapshot({ source: path.join(root, 'no-such-commons'), root }), /ENOENT/);
+  assert.deepStrictEqual(fs.readdirSync(root), [], 'nothing was left in the snapshot root');
+});
+
+// ---------------------------------------------------------------------------
+// Row 33 — why the commons must hold no symlink
+// ---------------------------------------------------------------------------
+
+test('a symlink in the commons survives the copy as a symlink into the mount, and the version does not cover it', () => {
+  // `dereference: true` does not reach an entry under the tree: at Node 22 the
+  // link is copied as a link, its target rewritten to an absolute path back
+  // into the source. So a symlinked tool in the snapshot still resolves through
+  // the live /agent-docs mount — the one thing the snapshot exists to stop —
+  // and listFiles' `entry.isFile()`, false for a link, keeps it out of the
+  // stamp. This test is what a Node upgrade that changes either behaviour
+  // trips, so the comment on COMMONS_SOURCE stays true.
+  const source = makeCommons({ 'tools/target.js': "'use strict';\nmodule.exports = 1;\n" });
+  fs.symlinkSync('target.js', path.join(source, 'tools', 'linked.js'));
+
+  const snapshot = createSnapshot({ source, root: makeRoot() });
+  const copied = path.join(snapshot.toolsDir, 'linked.js');
+
+  assert.ok(fs.lstatSync(copied).isSymbolicLink(), 'the copy is still a symlink, not a regular file');
+  assert.strictEqual(fs.readlinkSync(copied), path.join(source, 'tools', 'target.js'),
+    'and it points back into the source tree, which in the container is the live mount');
+
+  // Changing what the link resolves to changes nothing about the stamp.
+  const before = snapshot.version;
+  fs.writeFileSync(path.join(source, 'tools', 'target.js'), "'use strict';\nmodule.exports = 2;\n");
+  const after = createSnapshot({ source, root: makeRoot() });
+  assert.notStrictEqual(after.version, before,
+    'the target is itself a regular file in the commons, so its own content is stamped');
+  assert.strictEqual(fs.readFileSync(copied, 'utf8'), "'use strict';\nmodule.exports = 2;\n",
+    'while the already-taken snapshot now reads the changed file through the link');
+});
+
+test('a dangling symlink is invisible to the stamp rather than an error', () => {
+  const source = makeCommons();
+  fs.symlinkSync(path.join(source, 'tools', 'gone.js'), path.join(source, 'tools', 'dangling.js'));
+  const withLink = createSnapshot({ source, root: makeRoot() });
+
+  fs.rmSync(path.join(source, 'tools', 'dangling.js'));
+  const without = createSnapshot({ source, root: makeRoot() });
+
+  assert.strictEqual(withLink.version, without.version,
+    'the stamp cannot tell a commons with a dangling link from one without it');
+  assert.ok(!withLink.executables.includes('tools/dangling.js'));
+});
+
+test('pruneSnapshotRoot removes the dispatch directories an earlier process left and reports them', () => {
+  const source = makeCommons();
+  const root = makeRoot();
+  const first = createSnapshot({ source, root });
+  const second = createSnapshot({ source, root });
+  fs.writeFileSync(path.join(second.stateDir, 'a2a-chain.json'), '{"HW-1":"m-1"}');
+  // Something in the root that is not a dispatch directory is not ours to
+  // delete.
+  fs.writeFileSync(path.join(root, 'unrelated.txt'), 'x');
+
+  const removed = pruneSnapshotRoot(root);
+
+  assert.deepStrictEqual(removed, [path.basename(first.dispatchDir), path.basename(second.dispatchDir)].sort());
+  assert.ok(!fs.existsSync(first.dispatchDir));
+  assert.ok(!fs.existsSync(second.dispatchDir));
+  assert.deepStrictEqual(fs.readdirSync(root), ['unrelated.txt']);
+  // The mounted commons it copied from is untouched.
+  assert.ok(fs.existsSync(path.join(source, 'tools/gateway-publish.js')));
+});
+
+test('pruneSnapshotRoot on a root that does not exist yet is a no-op, not an error', () => {
+  const removed = pruneSnapshotRoot(path.join(makeRoot(), 'not-created-yet'));
+  assert.deepStrictEqual(removed, []);
+});
+
+test('the subscriber sweeps the snapshot root once, before its first consumer starts', () => {
+  // The sweep is only safe there: dispatches are serial, so from the first
+  // consumer on a directory in the root may be the running session's.
+  const subscriber = fs.readFileSync(path.join(__dirname, 'subscriber.js'), 'utf8');
+  assert.match(subscriber, /pruneSnapshotRoot \} = require\('\.\/dispatch-snapshot'\)/);
+  const call = subscriber.indexOf('pruneSnapshotRoot()');
+  const firstConsumer = subscriber.indexOf('await consumer.start()');
+  assert.notStrictEqual(call, -1, 'the subscriber must call it');
+  assert.ok(call < firstConsumer, 'and call it before the first consumer starts');
+  assert.strictEqual(subscriber.split('pruneSnapshotRoot()').length - 1, 1, 'exactly once');
 });

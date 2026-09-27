@@ -80,26 +80,28 @@ Its `specification_link` and `artifact_links` are the story's own; you
 never invent one or take one from ticket prose. For every subtask you
 create:
 
-- **`specificationLink`** — every subtask gets the story's own artifact
-  id. Its `requirementId` is the story's requirement id, unless the
-  story's own description explicitly splits its work across requirements,
-  in which case use the requirement id that authorizes that subtask's
-  work.
-- **`artifactLinks`** — assign each of the story's artifact links to
-  whichever subtask (or subtasks) actually needs it for its work. An
-  artifact link that no subtask needs is simply not assigned to any.
+- **`--specification-artifact`** — every subtask gets the story's own
+  artifact id. Its companion `--specification-requirement` is the story's
+  requirement id, unless the story's own description explicitly splits its
+  work across requirements, in which case use the requirement id that
+  authorizes that subtask's work. Give both or neither.
+- **`--artifact-link`** — assign each of the story's artifact links to
+  whichever subtask (or subtasks) actually needs it for its work, repeating
+  the flag once per id. An artifact link that no subtask needs is simply not
+  assigned to any.
 
 Never write an artifact id or a requirement id into a subtask's
-`description` — the subtask's own record carries them, and the
+`--description` — the subtask's own record carries them, and the
 description must stand on its own without them.
 
 **Requesting delivery.** For every artifact link you assign to a subtask,
 request its delivery into the project's repository through the librarian
 *before* you submit that subtask's request, so the file
-is already there once the subtask is dispatched:
+is already there once the subtask is dispatched. The helper is first on your
+`PATH`, so invoke it by that bare name — no `node`, no directory, no path:
 
 ```bash
-node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
 ```
 
 A failed delivery does not stop you from creating the subtask — the link
@@ -139,20 +141,17 @@ above:
   invented. It becomes the subtask's recorded owner.
 - The **summary** starts with that agent's role followed by a colon, as in
   `Backend: <concise description>`.
-- **`specificationLink`** (optional) — the story's own artifact id, and the
+- **`--specification-artifact`** and **`--specification-requirement`**
+  (optional, and given together) — the story's own artifact id, and the
   requirement id that authorizes this subtask.
-- **`artifactLinks`** (optional) — the canonical ids of the artifacts this
-  subtask needs. Leave them out when it needs none of the story's artifacts.
+- **`--artifact-link`** (optional, repeatable) — the canonical id of an
+  artifact this subtask needs, one per flag. Leave them out when it needs none
+  of the story's artifacts.
 
 Run `a2a-submit.js help create-subtask` for the arguments themselves.
 
-A request that names no agent is not created as sent. ScrumMaster recovers the
-id from the summary's role prefix only when that prefix names exactly one agent
-this project has other than you; otherwise it creates nothing, comments on the
-parent ticket naming what was missing, and leaves the parent Blocked for a
-human to look at. Name the agent every time rather than relying on that
-recovery. A malformed `specificationLink` or `artifactLinks` is refused the
-same way — nothing is created, and the comment names the field.
+A malformed specification or artifact reference is refused before anything is
+created, and the message names the flag.
 
 A non-zero exit means nothing was published: read what it says, fix the call,
 and run it again.

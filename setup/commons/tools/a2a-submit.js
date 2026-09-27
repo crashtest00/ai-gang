@@ -35,6 +35,27 @@ const { validateGatewayPayload, GatewayValidationError } = require('./a2a-valida
 
 const TOOL = 'a2a-submit.js';
 
+// Redis is reached over the container network, and an unreachable one used to
+// retry for ever: one ECONNREFUSED per attempt on stderr and no exit, bounded
+// only by the subscriber's 30-minute session kill (V5.0 audit row 9). Three
+// connection attempts, each itself bounded, then the strategy returns an Error
+// — which makes `connect()` reject, so this tool exits non-zero with the reason
+// on stderr within seconds. gateway-publish.js, the raw entry point, carries
+// the same two options for the same reason; Jenkins runs that one.
+const CONNECT_TIMEOUT_MS = 5000;
+const CONNECT_ATTEMPTS = 3;
+
+function boundedSocket(redisUrl) {
+  return {
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    reconnectStrategy: retries => (
+      retries + 1 >= CONNECT_ATTEMPTS
+        ? new Error(`${redisUrl} is unreachable — gave up after ${CONNECT_ATTEMPTS} connection attempts`)
+        : Math.min(200 * 2 ** retries, 1000)
+    ),
+  };
+}
+
 // Flags shared by more than one operation, declared once so the same argument
 // means the same thing everywhere it appears.
 const TEXT = { text: { type: 'string' } };
@@ -42,6 +63,19 @@ const REFERENCE = {
   'reference-file': { type: 'string' },
   'reference-function': { type: 'string' },
 };
+
+// `--reference-function` is the context *inside* the file `--reference-file`
+// names, so on its own it reaches nothing: `withReference` below drops it, and
+// the agent is never told. Refused instead, the same way the other two
+// paired-flag cases are (`create-subtask`'s two specification flags,
+// `completed`'s two pull-request flags) — SKILL.md already says "only with
+// --reference-file" and nothing enforced it (V5.0 audit row 49). Shared by the
+// four operations that take a reference at all.
+function checkReferencePair(args, problems) {
+  if (args['reference-function'] !== undefined && args['reference-file'] === undefined) {
+    problems.push('--reference-function names the context inside the file --reference-file names, which was not given');
+  }
+}
 
 /**
  * The argument surface. One entry per operation an agent can submit, holding
@@ -59,6 +93,7 @@ const OPERATIONS = {
     state: 'working',
     flags: { ...TEXT, ...REFERENCE },
     required: ['text'],
+    check: checkReferencePair,
     data: args => withReference({ operation: 'comment' }, args),
   },
 
@@ -67,6 +102,7 @@ const OPERATIONS = {
     state: 'working',
     flags: { ...TEXT, ...REFERENCE },
     required: ['text'],
+    check: checkReferencePair,
     // Deliberately no `operation`: this is the gateway's plain-progress path.
     data: args => withReference({}, args),
   },
@@ -76,6 +112,7 @@ const OPERATIONS = {
     state: 'input-required',
     flags: { ...TEXT, ...REFERENCE },
     required: ['text'],
+    check: checkReferencePair,
     data: args => withReference({}, args),
   },
 
@@ -84,6 +121,7 @@ const OPERATIONS = {
     state: 'auth-required',
     flags: { ...TEXT, ...REFERENCE },
     required: ['text'],
+    check: checkReferencePair,
     data: args => withReference({}, args),
   },
 
@@ -297,6 +335,15 @@ function readChain(file) {
 // Written only after the message is durably on the stream, and written whole:
 // a half-written chain would send every later submission of this task to a
 // referenceMessageId the server never accepted.
+//
+// Read-modify-write with an atomic rename but no lock, and deliberately so
+// (V5.0 audit row 47). Two invocations racing here could lose the earlier
+// entry, but nothing can put them in that position: the state directory is per
+// dispatch, one dispatch works one task, and dispatches are serial (the
+// subscriber's own runSerially queue). The worst a same-task race could do
+// anyway is chain two submissions to one predecessor, and taskStore accepts
+// that — they are siblings, not a rejection. A lock here would buy nothing and
+// add a failure mode of its own.
 function recordChain(file, taskId, messageId) {
   const chain = readChain(file);
   chain[taskId] = messageId;
@@ -417,23 +464,29 @@ async function main() {
   });
 
   const redisUrl = `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
-  const client = createClient({ url: redisUrl });
+  const client = createClient({ url: redisUrl, socket: boundedSocket(redisUrl) });
   client.on('error', err => console.error(`[${TOOL}] Redis error:`, err.message));
 
   try {
     await client.connect();
     const entryId = await client.xAdd(stream, '*', toStreamFields(envelope));
     // Only now is this message the one the next submission replies to. A
-    // failure here has not lost the submission, so it must not read as one —
-    // but the next submission of this task would chain to a superseded id, so
-    // it is reported rather than swallowed.
+    // failure here has not lost the submission, and the exit status must say
+    // so: this tool's own contract, in its usage text and in the a2a-submit
+    // skill, is that a non-zero exit means nothing was published and the call
+    // should be made again — and a re-run of `create-subtask` materialises a
+    // second subtask, because handleCreateSubtask's idempotency key is the
+    // envelope id, fresh on the re-run (V5.0 audit row 35). So this exits 0
+    // and warns on stderr instead. What it costs is a flattened chain: the
+    // next submission of this task chains to a superseded id, which taskStore
+    // accepts — two messages off one accepted predecessor are siblings, not a
+    // rejection.
     try {
       recordChain(chainFile(context.commonsDir), context.taskId, payload.message.messageId);
     } catch (chainErr) {
       console.error(
         `[${TOOL}] Published, but could not record the chain for task ${context.taskId}: ${chainErr.message}`
       );
-      process.exitCode = 1;
     }
     console.log(
       `Accepted: ${first} on task ${context.taskId} — ${stream} entry ${entryId} ` +

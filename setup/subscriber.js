@@ -57,7 +57,7 @@ const { createClient } = require('redis');
 const { execFile } = require('child_process');
 const { buildEnvelope, KIND } = require('./commons/tools/envelope');
 const { ensureGroup, createConsumer, publish: streamsPublish } = require('./commons/tools/streams');
-const { createSnapshot, installSkills, sessionEnv, removeSnapshot } = require('./dispatch-snapshot');
+const { createSnapshot, installSkills, sessionEnv, removeSnapshot, pruneSnapshotRoot } = require('./dispatch-snapshot');
 
 const PROJECT_NAME = process.env.PROJECT_NAME;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
@@ -246,6 +246,20 @@ async function main() {
   client.on('error', err => console.error('[subscriber] Redis error:', err));
   await client.connect();
   console.log(`[subscriber] Connected to ${REDIS_URL} for project ${PROJECT_NAME}`);
+
+  // Anything left in the snapshot root belongs to a process that no longer
+  // exists: a subscriber that was killed rather than shut down never reaches
+  // removeSnapshot, and pm2 restarts it. Swept once, here, before the first
+  // consumer starts — dispatches are serial, so from the next line on a
+  // directory in there may be the running session's (see pruneSnapshotRoot).
+  try {
+    const pruned = pruneSnapshotRoot();
+    if (pruned.length) {
+      console.log(`[subscriber] Removed ${pruned.length} commons snapshot(s) left behind by an earlier process`);
+    }
+  } catch (pruneErr) {
+    console.error(`[subscriber] Could not sweep the snapshot root: ${pruneErr.message}`);
+  }
 
   const handler = makeTaskHandler(client);
   const consumerName = process.env.HOSTNAME || `${PROJECT_NAME}-container`;

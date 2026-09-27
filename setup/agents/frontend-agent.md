@@ -54,10 +54,11 @@ artifact the ticket depends on as unavailable and report BLOCKED. Only
 request an `artifact_id` you found in that record — never guess or invent
 one, and never parse the ticket text for one.
 
-**Asking for it:**
+**Asking for it.** The helper is first on your `PATH`, so invoke it by that
+bare name — no `node`, no directory, no path:
 
 ```bash
-node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
 ```
 
 This publishes the request and blocks until the librarian answers —
@@ -69,7 +70,7 @@ prints, the path the file now occupies, relative to `/workspace`, and
 exits 0:
 
 ```bash
-FILE_PATH=$(node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME 3f9c2eab-1a2b-4c3d-9e8f-0a1b2c3d4e5f designs/mockup.png)
+FILE_PATH=$(request-artifact.js $PROJECT_NAME 3f9c2eab-1a2b-4c3d-9e8f-0a1b2c3d4e5f designs/mockup.png)
 ```
 
 **What the answer means.** The printed path is where the file actually is —

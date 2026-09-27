@@ -26,9 +26,14 @@
  * behaviour against real Redis is covered by
  * setup/commons/tools/a2a-validate.test.js.
  *
+ * The `timeout` step that bounds the whole handler (V5.0 audit row 9) is
+ * asserted the same way the `script` block's half is — against the template's
+ * own text, plus a brace match proving the `sh` block and the marker check are
+ * both inside it. Only a Jenkins instance can prove the step actually fires.
+ *
  * What remains unproved without a Jenkins instance: that Jenkins' own
- * `fileExists`/`readFile`/`currentBuild.result` steps behave as written, and
- * that a build ends UNSTABLE rather than green or red.
+ * `fileExists`/`readFile`/`currentBuild.result`/`timeout` steps behave as
+ * written, and that a build ends UNSTABLE rather than green or red.
  */
 
 const { test, after } = require('node:test');
@@ -57,6 +62,21 @@ function postFailureShellScript() {
 // Everything the template says about the marker, and what the script block
 // does with it.
 const POST_BLOCK = TEMPLATE.slice(TEMPLATE.indexOf('post {'));
+
+// The body of the `{ ... }` block opened at or after `from`, by brace match.
+// Groovy has to balance its braces to parse at all, and the brace-bearing
+// string literals inside this handler (`jq` filters, the shell's `|| { ...; }`)
+// each balance too, so a plain count is enough to say what a step encloses.
+function blockBodyAt(text, from) {
+  const open = text.indexOf('{', from);
+  assert.notEqual(open, -1, 'the step must open a block');
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}' && --depth === 0) return text.slice(open + 1, i);
+  }
+  throw new Error('unbalanced braces in the post block');
+}
 
 // The same block with its comment lines dropped, so an assertion about what the
 // handler *does* is not answered by a comment saying it does not.
@@ -169,6 +189,42 @@ test('REQ-03: the failure handler marks the build UNSTABLE when, and only when, 
     POST_BLOCK.indexOf("currentBuild.result = 'UNSTABLE'") > POST_BLOCK.indexOf('if (fileExists(env.RETRY_FAILURE_MARKER))'),
     'UNSTABLE is inside the marker-exists branch'
   );
+});
+
+test('row 9: the failure handler runs under a timeout step, so an unreachable Redis cannot hang the build for ever', () => {
+  // Redis unreachable used to mean gateway-publish.js retried for ever inside
+  // this `sh`, with no bound anywhere: not on the step, not in `options`, and
+  // `disableConcurrentBuilds()` then queues every later dev build behind it.
+  assert.doesNotMatch(TEMPLATE.slice(TEMPLATE.indexOf('options {'), TEMPLATE.indexOf('environment {')), /timeout\(/,
+    'the pipeline options set no global timeout, so the handler needs its own');
+
+  const at = POST_BLOCK_CODE.search(/timeout\(time: \d+, unit: '(SECONDS|MINUTES|HOURS)'\)/);
+  assert.notEqual(at, -1, "the failure handler must be wrapped in a Jenkins `timeout` step");
+
+  const bounded = blockBodyAt(POST_BLOCK_CODE, at);
+  assert.match(bounded, /withEnv\(\[/, 'the timeout encloses the withEnv block, not just part of it');
+  assert.ok(bounded.includes("sh '''"), 'the per-ticket shell loop runs inside the timeout');
+  assert.ok(bounded.includes('fileExists(env.RETRY_FAILURE_MARKER)'),
+    'the marker check runs inside the timeout too');
+  assert.ok(bounded.includes("currentBuild.result = 'UNSTABLE'"),
+    'so does the UNSTABLE result it sets');
+
+  // Minutes, not hours: the point is that a queued dev build waits minutes at
+  // worst. The publish tool itself gives up in seconds (its own
+  // reconnectStrategy), so this only ever catches something else hanging.
+  const [, value, unit] = POST_BLOCK_CODE.match(/timeout\(time: (\d+), unit: '(SECONDS|MINUTES|HOURS)'\)/);
+  assert.equal(unit, 'MINUTES');
+  assert.ok(Number(value) <= 15, `the handler's bound must stay small, got ${value} ${unit}`);
+});
+
+test('row 9: both commons publish entry points bound their own Redis connection', () => {
+  for (const tool of ['gateway-publish.js', 'a2a-submit.js']) {
+    const source = fs.readFileSync(path.join(TOOLS_DIR, tool), 'utf8');
+    assert.match(source, /connectTimeout/, `${tool} must bound the TCP connect`);
+    assert.match(source, /reconnectStrategy/, `${tool} must bound the retry loop`);
+    assert.match(source, /socket: boundedSocket\(redisUrl\)/,
+      `${tool} must pass those options to createClient, not merely define them`);
+  }
 });
 
 test('REQ-03: the failure handler never aborts — no error() and no exit in the per-ticket loop', () => {

@@ -54,11 +54,14 @@ curl -s "http://core:9100/work-items/$A2A_TASK_ID"
 
 Its `specification_link`/`artifact_links` name the ids to request. A 404
 means your dispatch did not carry the canonical id — the platform supplies
-it, not you — so treat the artifact as unavailable and report BLOCKED
-rather than looking the record up another way.
+it, not you — so treat the artifact as unavailable, leave a BLOCKED marker
+and stop, rather than looking the record up another way.
+
+The helper is first on your `PATH`, so invoke it by that bare name — no
+`node`, no directory, no path:
 
 ```bash
-node /agent-docs/commons/tools/request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
+request-artifact.js $PROJECT_NAME <artifact-id> <requested-path>
 ```
 
 This blocks until the librarian answers — normally under a second, bounded
@@ -74,8 +77,8 @@ On failure the command exits non-zero and names the reason on stderr:
 `path_outside_repository` (retry with a plain path under `/workspace`),
 `unknown_destination_repo` (the project's working tree is not where the
 librarian expects it — a platform configuration problem, not yours to fix;
-report BLOCKED), or `copy_failed` (worth one retry). A timeout prints its
-own message.
+leave a BLOCKED marker and stop), or `copy_failed` (worth one retry). A
+timeout prints its own message.
 
 ## How to Look Things Up
 

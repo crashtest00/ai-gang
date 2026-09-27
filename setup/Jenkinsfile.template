@@ -306,31 +306,43 @@ pipeline {
           // marker and marks the build UNSTABLE -- error() is deliberately not
           // used anywhere in here, because aborting would swallow the retry
           // signal for every ticket after the failing one.
-          withEnv([
-            "FAILED_TICKETS=${tickets.join(' ')}",
-            "FAILURE_TEXT=${what}",
-            "RETRY_FAILURE_MARKER=.pipeline-retry-failures"
-          ]) {
-            sh '''
-              rm -f "$RETRY_FAILURE_MARKER"
-              for ticket in $FAILED_TICKETS; do
-                COMMENT_TEXT=$(printf '%s\\n\\nBuild log: %s\\n\\nPlease review and fix.' "$FAILURE_TEXT" "$BUILD_URL")
-                curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d "$(jq -n --arg text "$COMMENT_TEXT" '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')" \
-                    "$JIRA_URL/rest/api/3/issue/$ticket/comment" > /dev/null \
-                  || echo "WARN: could not post failure comment to $ticket" >&2
-                echo "$(jq -nc --arg t "$ticket" --arg u "$BUILD_URL" --arg n "$BUILD_NUMBER" '{type:"pipeline_retry",ticket_key:$t,build_url:$u,build_number:$n}')" \
-                    | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
-                  || { echo "WARN: could not publish pipeline_retry for $ticket" >&2; echo "$ticket" >> "$RETRY_FAILURE_MARKER"; }
-              done
-            '''
-            if (fileExists(env.RETRY_FAILURE_MARKER)) {
-              def unpublished = readFile(env.RETRY_FAILURE_MARKER).split('\n').findAll { it }
-              echo "pipeline_retry could not be published for: ${unpublished.join(', ')} -- " +
-                   "the publish tool's own error is in this step's output above. " +
-                   "Every other ticket's retry signal was published."
-              currentBuild.result = 'UNSTABLE'
+          // The whole handler is bounded. gateway-publish.js gives up on an
+          // unreachable Redis in seconds of its own accord, but nothing else in
+          // here does: a hung `curl` to Jira, or a Redis host that blackholes
+          // instead of refusing, would leave this step running for the build's
+          // life -- and `disableConcurrentBuilds()` above then queues every
+          // later dev build behind it. `options` sets no global timeout, so
+          // this step is the only bound (V5.0 audit row 9). If it fires, the
+          // handler is cut short and the build stays FAILURE, which is what it
+          // already was on entry -- nothing that has published so far is
+          // undone.
+          timeout(time: 5, unit: 'MINUTES') {
+            withEnv([
+              "FAILED_TICKETS=${tickets.join(' ')}",
+              "FAILURE_TEXT=${what}",
+              "RETRY_FAILURE_MARKER=.pipeline-retry-failures"
+            ]) {
+              sh '''
+                rm -f "$RETRY_FAILURE_MARKER"
+                for ticket in $FAILED_TICKETS; do
+                  COMMENT_TEXT=$(printf '%s\\n\\nBuild log: %s\\n\\nPlease review and fix.' "$FAILURE_TEXT" "$BUILD_URL")
+                  curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
+                      -H 'Content-Type: application/json' \
+                      -d "$(jq -n --arg text "$COMMENT_TEXT" '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')" \
+                      "$JIRA_URL/rest/api/3/issue/$ticket/comment" > /dev/null \
+                    || echo "WARN: could not post failure comment to $ticket" >&2
+                  echo "$(jq -nc --arg t "$ticket" --arg u "$BUILD_URL" --arg n "$BUILD_NUMBER" '{type:"pipeline_retry",ticket_key:$t,build_url:$u,build_number:$n}')" \
+                      | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
+                    || { echo "WARN: could not publish pipeline_retry for $ticket" >&2; echo "$ticket" >> "$RETRY_FAILURE_MARKER"; }
+                done
+              '''
+              if (fileExists(env.RETRY_FAILURE_MARKER)) {
+                def unpublished = readFile(env.RETRY_FAILURE_MARKER).split('\n').findAll { it }
+                echo "pipeline_retry could not be published for: ${unpublished.join(', ')} -- " +
+                     "the publish tool's own error is in this step's output above. " +
+                     "Every other ticket's retry signal was published."
+                currentBuild.result = 'UNSTABLE'
+              }
             }
           }
         }

@@ -40,6 +40,18 @@ const path = require('path');
 // The mounted commons every project container sees (docker-compose mounts
 // `setup/` at `/agent-docs` read-only). When an environment arrives that the
 // host cannot mount, this is the one value that changes.
+//
+// It must stay a plain tree of regular files and directories: it holds no
+// symlink today, and a symlink here would quietly defeat the snapshot (V5.0
+// audit row 33). `cpSync`'s `dereference: true` below does not reach an entry
+// *under* the tree — at Node 22 a symlink is copied as a symlink either way,
+// with its target rewritten to an absolute path back into the source — so a
+// symlinked tool in the snapshot still resolves through `/agent-docs`, which is
+// exactly the live mount a `git pull` changes under the running session. It is
+// also invisible to `listFiles` below, whose `entry.isFile()` is false for a
+// link, so the version stamp does not cover it and a dangling one is silently
+// absent rather than an error. `dereference: true` stays because it is what
+// makes a symlinked *source root* work; it is not a defence against this.
 const COMMONS_SOURCE = '/agent-docs/commons';
 
 // Outside the project's working tree by construction.
@@ -64,15 +76,42 @@ function listFiles(dir, prefix = '') {
   return out.sort();
 }
 
-// SHA-256 over the snapshot's contents: for each file, in sorted relative-path
-// order, the path and the SHA-256 of its bytes. Content-derived, so it needs no
-// maintenance and cannot drift, and equal for two sessions that ran the same
-// commons — which is what a session record has to be able to say. File modes
-// are deliberately outside the hash: `markExecutables` below sets them from the
-// content itself, so they add nothing and a source tree that lost its
-// executable bits still hashes to the same value.
+// Every directory under `dir`, in the same form and order as listFiles. Kept
+// separate so listFiles stays "the files", which is what markExecutables and
+// the hash's content loop both want.
+function listDirectories(dir, prefix = '') {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    out.push(rel, ...listDirectories(path.join(dir, entry.name), rel));
+  }
+  return out.sort();
+}
+
+// SHA-256 over the snapshot's contents: every directory name, then for each
+// file, in sorted relative-path order, the path and the SHA-256 of its bytes.
+// Content-derived, so it needs no maintenance and cannot drift, and equal for
+// two sessions that ran the same commons — which is what a session record has
+// to be able to say. File modes are deliberately outside the hash:
+// `markExecutables` below sets them from the content itself, so they add
+// nothing and a source tree that lost its executable bits still hashes to the
+// same value.
+//
+// The directory names are in it because a directory can be observable while
+// holding no file: an empty `skills/` and an absent `skills/` take different
+// branches in `installSkills` (its `existsSync`), so a stamp that could not
+// tell them apart would describe two sessions that ran differently as having
+// run the same commons (V5.0 audit row 32). The two section labels keep a
+// directory's name from ever colliding with a file's.
 function hashSnapshot(dir) {
   const digest = crypto.createHash('sha256');
+  digest.update('directories\n', 'utf8');
+  for (const rel of listDirectories(dir)) {
+    digest.update(rel, 'utf8');
+    digest.update('\n');
+  }
+  digest.update('files\n', 'utf8');
   for (const rel of listFiles(dir)) {
     digest.update(rel, 'utf8');
     digest.update('\0');
@@ -114,19 +153,30 @@ function markExecutables(dir) {
 function createSnapshot({ source = COMMONS_SOURCE, root = SNAPSHOT_ROOT } = {}) {
   fs.mkdirSync(root, { recursive: true });
   const dispatchDir = fs.mkdtempSync(path.join(root, 'dispatch-'));
-  const commonsDir = path.join(dispatchDir, 'commons');
-  const stateDir = path.join(dispatchDir, 'state');
-  fs.cpSync(source, commonsDir, { recursive: true, dereference: true });
-  fs.mkdirSync(stateDir, { recursive: true });
-  const executables = markExecutables(commonsDir);
-  return {
-    dispatchDir,
-    commonsDir,
-    toolsDir: path.join(commonsDir, 'tools'),
-    stateDir,
-    executables,
-    version: hashSnapshot(commonsDir),
-  };
+  // `mkdtemp` has already minted the directory, so everything after it runs
+  // under this guard: a copy that throws — an absent mount, ENOSPC, a dangling
+  // symlink — used to leave the whole directory behind, once per attempt and so
+  // three times per task at the subscriber's MAX_ATTEMPTS. subscriber.js's own
+  // guarded `removeSnapshot` cannot reach it, because there is no snapshot to
+  // pass it: this call never returned (V5.0 audit row 27).
+  try {
+    const commonsDir = path.join(dispatchDir, 'commons');
+    const stateDir = path.join(dispatchDir, 'state');
+    fs.cpSync(source, commonsDir, { recursive: true, dereference: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    const executables = markExecutables(commonsDir);
+    return {
+      dispatchDir,
+      commonsDir,
+      toolsDir: path.join(commonsDir, 'tools'),
+      stateDir,
+      executables,
+      version: hashSnapshot(commonsDir),
+    };
+  } catch (err) {
+    fs.rmSync(dispatchDir, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /**
@@ -163,4 +213,33 @@ function removeSnapshot(snapshot) {
   fs.rmSync(snapshot.dispatchDir, { recursive: true, force: true });
 }
 
-module.exports = { createSnapshot, installSkills, sessionEnv, removeSnapshot };
+/**
+ * Remove every dispatch directory sitting in `<root>`, and report their names.
+ *
+ * A subscriber that is killed rather than shut down never reaches
+ * `removeSnapshot`, and pm2 restarts it — so its snapshot, a full copy of the
+ * commons, would sit in the container's temporary directory for the container's
+ * life, one per kill (V5.0 audit row 27). This is called once by the subscriber
+ * before its first consumer starts, and only there: dispatches are serial and
+ * this process is the only writer of `<root>`, so at that moment nothing in it
+ * can belong to a live session. Calling it later would delete the snapshot of
+ * the session that is running.
+ */
+function pruneSnapshotRoot(root = SNAPSHOT_ROOT) {
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const removed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('dispatch-')) continue;
+    fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed.sort();
+}
+
+module.exports = { createSnapshot, installSkills, sessionEnv, removeSnapshot, pruneSnapshotRoot };

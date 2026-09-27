@@ -41,6 +41,28 @@ const { createClient } = require('redis');
 const { buildEnvelope, KIND, toStreamFields } = require('./envelope');
 const { validateGatewayPayload, GatewayValidationError } = require('./a2a-validate');
 
+// An unreachable Redis used to retry for ever here, and this is the entry point
+// Jenkins calls: the `sh` step in setup/Jenkinsfile.template's failure handler
+// had no bound of its own, so the build hung indefinitely and
+// disableConcurrentBuilds() queued every later dev build behind it (V5.0 audit
+// row 9). Three connection attempts, each itself bounded, then the strategy
+// returns an Error — which makes `connect()` reject, so this tool exits
+// non-zero with the reason on stderr within seconds. a2a-submit.js, the
+// constructor entry point, carries the same two options for the same reason.
+const CONNECT_TIMEOUT_MS = 5000;
+const CONNECT_ATTEMPTS = 3;
+
+function boundedSocket(redisUrl) {
+  return {
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    reconnectStrategy: retries => (
+      retries + 1 >= CONNECT_ATTEMPTS
+        ? new Error(`${redisUrl} is unreachable — gave up after ${CONNECT_ATTEMPTS} connection attempts`)
+        : Math.min(200 * 2 ** retries, 1000)
+    ),
+  };
+}
+
 async function main() {
   const [, , projectArg, pathArg] = process.argv;
 
@@ -83,7 +105,7 @@ async function main() {
   });
 
   const redisUrl = `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
-  const client = createClient({ url: redisUrl });
+  const client = createClient({ url: redisUrl, socket: boundedSocket(redisUrl) });
   client.on('error', err => console.error('[gateway-publish] Redis error:', err.message));
 
   try {

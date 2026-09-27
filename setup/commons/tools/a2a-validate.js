@@ -28,8 +28,15 @@
  * can read them (setup/SCRUMMASTER_SPEC_v1.md's operations table,
  * setup/agents/refinement-agent.md); the handler's defaulting and its
  * derive-from-the-summary recovery stay in place as the platform's backstop
- * for producers that do not use this tool. Nothing else here refuses input
- * the gateway accepts.
+ * for producers that do not use this tool.
+ *
+ * Two further rules refuse here what the gateway refuses *after* the durable
+ * write, which is the silent server-side refusal REQ-01 exists to close (V5.0
+ * audit row 37): a submission's `role` must be `agent`, not merely one of A2A's
+ * two roles, and a `data.operation` must be one the gateway routes. In both
+ * cases the server drops the message with a `console.warn` no producer reads,
+ * having already written it to the stream. Nothing else here refuses input the
+ * gateway acts on.
  */
 
 const schema = require('./a2a-schema');
@@ -107,6 +114,12 @@ function checkSubtaskReferences(data, errors, path) {
   }
 }
 
+// The operations `gateway.js`'s `handleA2ASubmission` switch routes. Anything
+// else falls to its `default`, which calls reportUnsupportedOperation — after
+// the entry is already durably on the stream. `undefined` is the plain-progress
+// path and is not in this list because absence is not a value.
+const ROUTED_OPERATIONS = ['comment', 'reassign', 'create_subtask'];
+
 // REQ-02 — the fields the corresponding gateway handler requires for the
 // requested operation, on top of the message shape REQ-01 checks.
 function checkOperationFields(payload, errors) {
@@ -116,6 +129,13 @@ function checkOperationFields(payload, errors) {
   if (data) checkReference(data.reference, errors, `${path}.reference`);
 
   const operation = data ? data.operation : undefined;
+
+  if (operation !== undefined && !ROUTED_OPERATIONS.includes(operation)) {
+    errors.push(
+      `${path}.operation must be one of ${ROUTED_OPERATIONS.join('/')}, or absent for a plain progress note` +
+      ` — the gateway refuses any other operation after the submission is already durably written`
+    );
+  }
 
   if (operation === 'create_subtask') {
     if (!isNonEmptyString(data.summary)) errors.push(`${path}.summary must be a non-empty string for the "create_subtask" operation`);
@@ -155,6 +175,14 @@ function checkA2ASubmission(payload, errors) {
   } catch (err) {
     errors.push(err.message);
   }
+  // Stricter than `schema.MESSAGE_ROLES`, which allows both A2A roles because
+  // the schema describes messages in both directions. A submission is an agent
+  // reporting on its own task: `handleA2ASubmission` drops any other role with a
+  // `console.warn`, after the durable write, so `role: 'client'` is accepted
+  // here today and silently does nothing.
+  if (isPlainObject(payload.message) && payload.message.role !== 'agent') {
+    errors.push('message.role must be "agent" — a submission is an agent reporting on its own task, and the gateway drops any other role after the submission is already durably written');
+  }
   for (const [i, artifact] of (payload.artifacts || []).entries()) {
     try {
       schema.validateArtifact(artifact, `artifacts[${i}]`);
@@ -176,6 +204,19 @@ function checkA2ASubmission(payload, errors) {
 // problem. Extending the tool to a further action is an entry here and nothing
 // else. The last entry has no `matches`: it is the fall-through, the same way
 // `handleA2ASubmission` is the server's.
+//
+// "An entry here and nothing else" is true of the *validation*, with two
+// footnotes about the rest of the tool (V5.0 audit row 48):
+//
+//  1. The transport envelope's `taskId` comes from `gateway-publish.js`'s own
+//     fallback chain (`payload.message?.taskId || payload.ticket_key || ...`),
+//     so a further action that carries its own id field needs that chain
+//     extended too, or its entries reach the stream with a null taskId.
+//  2. Both entry points hard-code `kind: KIND.JIRA_OPERATION`
+//     (`a2a-submit.js`, `gateway-publish.js`), which makes
+//     dispatchGatewayOperation's `KIND.TASK_STATUS` branch unreachable from
+//     either of them — a future `task_status` producer needs a `kind` argument,
+//     not just an entry below.
 const DEFINITIONS = [
   {
     // `gateway.js` -> handleMaterializeDecomposition -> dependencies.js

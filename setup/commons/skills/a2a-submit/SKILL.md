@@ -47,6 +47,10 @@ remember or copy between submissions.
 `completed`, `failed`, `canceled` and `rejected` end the task. The rest leave
 it open; `input-required` and `auth-required` leave it waiting on a human.
 
+On `reassign` and `create-subtask`, `--text` is recorded on the task rather than
+posted as a comment on the work item — so say anything the work item's readers
+need in a separate `comment`.
+
 ## Pointing at a file
 
 Four operations take a file reference: `comment`, `progress` (a plain progress
@@ -92,6 +96,12 @@ Report a pull request on the `completed` submission that finishes the task:
 the pull request is not the summary of your completion. Opening a pull request
 neither transitions the work item nor reassigns it — the pipeline does that
 once it passes.
+
+With `--pull-request`, the comment posted on the work item is the pull request's
+summary — `--pull-request-summary` when you give one, and `--text` when you do
+not. `--text` is recorded on the task either way, so when you give both, put
+what a reviewer needs in `--pull-request-summary`: nothing else of `--text`
+reaches the work item.
 
 ## The arguments themselves
 

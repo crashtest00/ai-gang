@@ -458,6 +458,20 @@ for (const testCase of ARGUMENT_REJECTIONS) {
   });
 }
 
+test('row 49: --reference-function with no --reference-file is refused on every operation that takes a reference', async () => {
+  // `withReference` drops a function with no file, so the value reached nothing
+  // and the agent was never told — while the tool's other two paired-flag cases
+  // were both enforced. These four are every operation that takes a reference.
+  for (const operation of ['comment', 'progress', 'input-required', 'auth-required']) {
+    const dispatch = newDispatch();
+    const result = await submit(dispatch, [operation, '--text', 'a note', '--reference-function', 'up']);
+    assert.notEqual(result.code, 0, `"${operation}" accepted --reference-function with no --reference-file`);
+    assert.match(result.stderr, /--reference-function names the context inside the file --reference-file names, which was not given/,
+      `"${operation}" must name the missing flag`);
+    assert.equal(await client.xLen(STREAM), 0, `"${operation}" wrote to the stream`);
+  }
+});
+
 test('REQ-03: a session with no dispatch context is refused, naming the variables', async () => {
   const dispatch = newDispatch();
   const result = await submit(dispatch, ['comment', '--text', 'hello'], {
@@ -493,12 +507,77 @@ test('REQ-01: a constructor that drops the role is stopped by the validator, not
   assert.equal(await client.xLen(STREAM), 0);
 });
 
+test('row 37: a constructor that submits as the client role is stopped by the validator, not published', async () => {
+  // The validator is stricter than the schema here on purpose: both A2A roles
+  // are well-formed messages, but only `agent` is a submission, and the gateway
+  // drops the other one after the durable write.
+  const dispatch = faultyDispatch("    role: 'agent',\n", "    role: 'client',\n");
+  const result = await submit(dispatch, ['comment', '--text', 'hello']);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /message\.role must be "agent"/);
+  assert.equal(await client.xLen(STREAM), 0);
+});
+
 test('REQ-01: a constructor that leaves a Part unwrapped is stopped by the validator, not published', async () => {
   const dispatch = faultyDispatch('    parts,\n', '    parts: parts[0],\n');
   const result = await submit(dispatch, ['comment', '--text', 'hello']);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /message\.parts must be a non-empty array of Parts/);
   assert.equal(await client.xLen(STREAM), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Rows 9 and 35 — what the exit status means after the connection is opened
+// ---------------------------------------------------------------------------
+
+test('row 9: an unreachable Redis exits non-zero within seconds instead of retrying for ever', async () => {
+  // Port 1 is privileged and nothing listens on it: the connection is refused
+  // immediately and every retry is refused the same way, which is the shape
+  // that used to loop until the subscriber's 30-minute session kill.
+  const dispatch = newDispatch();
+  const started = Date.now();
+  const result = await submit(dispatch, ['comment', '--text', 'nobody is listening'], {
+    env: { REDIS_HOST: '127.0.0.1', REDIS_PORT: '1' },
+  });
+  const elapsed = Date.now() - started;
+
+  assert.notEqual(result.code, 0, 'nothing was published, so the exit status must say so');
+  assert.match(result.stderr, /Failed to durably enqueue the "comment" submission/);
+  assert.match(result.stderr, /redis:\/\/127\.0\.0\.1:1 is unreachable/,
+    'the reason names the unreachable server, on stderr');
+  assert.match(result.stderr, /gave up after 3 connection attempts/);
+  assert.ok(elapsed < 30000, `the tool must give up in seconds, not hang: took ${elapsed} ms`);
+  assert.equal(await client.xLen(STREAM), 0);
+});
+
+test('row 35: a chain record that fails after a successful publish warns but still exits 0', async () => {
+  const dispatch = newDispatch();
+  // The chain file's own path, occupied by a non-empty directory: readChain
+  // falls back to {}, the temporary file is written, and the atomic rename onto
+  // a directory fails — the one recordChain failure that happens *after* the
+  // XADD, which is the case the exit code used to misreport.
+  const chainFile = path.join(dispatch.stateDir, 'a2a-chain.json');
+  fs.mkdirSync(chainFile);
+  fs.writeFileSync(path.join(chainFile, 'occupied'), 'x');
+
+  const result = await submit(dispatch, ['create-subtask',
+    '--summary', 'Frontend Agent: wire the form',
+    '--description', 'Bind the new endpoint to the signup form.',
+    '--agent', 'frontend-agent']);
+
+  // The tool's own contract — its usage text and the a2a-submit skill — is that
+  // a non-zero exit means nothing was published and the call should be made
+  // again. A re-run of create-subtask materialises a second subtask, since
+  // handleCreateSubtask's idempotency key is the envelope id.
+  assert.equal(result.code, 0,
+    `the submission was published, so the exit status must not say otherwise: ${result.stderr}`);
+  assert.match(result.stdout, /^Accepted: create-subtask on task HW-1 /m,
+    'the accepted line is still printed');
+  assert.match(result.stderr, /Published, but could not record the chain for task HW-1/,
+    'the flattened chain is still reported, on stderr');
+  const published = await entries();
+  assert.equal(published.length, 1,
+    'exactly one entry, and nothing telling the agent to create a second subtask');
 });
 
 // ---------------------------------------------------------------------------

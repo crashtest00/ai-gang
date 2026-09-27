@@ -55,7 +55,9 @@ after(async () => {
 });
 
 // Run the raw entry point on `payload`, either from a file or on stdin.
-function publish(payload, { onStdin = false } = {}) {
+// `redisHost`/`redisPort` default to the shared test Redis; one case points them
+// at a closed port instead.
+function publish(payload, { onStdin = false, redisHost = 'localhost', redisPort = '16399' } = {}) {
   const json = JSON.stringify(payload);
   const args = [TOOL, PROJECT, onStdin ? '-' : path.join(workDir, `payload-${process.hrtime.bigint()}.json`)];
   if (!onStdin) fs.writeFileSync(args[2], json);
@@ -64,7 +66,7 @@ function publish(payload, { onStdin = false } = {}) {
     const child = execFile(
       process.execPath,
       args,
-      { env: { ...process.env, REDIS_HOST: 'localhost', REDIS_PORT: '16399' } },
+      { env: { ...process.env, REDIS_HOST: redisHost, REDIS_PORT: redisPort } },
       (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })
     );
     if (onStdin) {
@@ -192,6 +194,14 @@ const SHAPE_FAULTS = [
     expect: /message\.role must be one of client\/agent/,
   },
   {
+    // Row 37: `schema.MESSAGE_ROLES` allows both A2A roles, so this used to
+    // publish — and `handleA2ASubmission` then dropped it with a console.warn,
+    // after the durable write, which no producer reads.
+    id: 'the client role, which the gateway drops after the durable write (row 37)',
+    apply: p => { p.message.role = 'client'; },
+    expect: /message\.role must be "agent"/,
+  },
+  {
     id: 'an invalid state',
     apply: p => { p.state = 'in-progress'; },
     expect: /state must be one of submitted\/working/,
@@ -315,6 +325,18 @@ const FIELD_CASES = [
     expect: /artifacts\[0\] is named "pull-request" and must carry a file Part whose file\.uri is a non-empty string/,
   },
   {
+    // Row 37: any unrecognised operation used to publish, and `gateway.js`'s
+    // switch then fell to reportUnsupportedOperation — after the entry was
+    // already on the stream.
+    id: 'an operation the gateway does not route (row 37)',
+    payload: () => {
+      const payload = OPERATIONS.comment();
+      payload.message.parts[1].data.operation = 'set_blocked';
+      return payload;
+    },
+    expect: /data\.operation must be one of comment\/reassign\/create_subtask, or absent for a plain progress note/,
+  },
+  {
     id: 'a reference with no file',
     payload: () => {
       const payload = OPERATIONS.comment();
@@ -430,4 +452,28 @@ test('REQ-07: one checker, two entry points — both require the same validator 
   const executables = files.filter(f => fs.readFileSync(path.join(__dirname, f), 'utf8').startsWith('#!'));
   assert.deepEqual(executables.sort(), ['a2a-submit.js', 'gateway-publish.js', 'request-artifact.js'],
     'no third gateway entry point exists');
+});
+
+// ---------------------------------------------------------------------------
+// Row 9 — an unreachable Redis is bounded, not retried for ever
+// ---------------------------------------------------------------------------
+
+test('row 9: an unreachable Redis exits non-zero within seconds instead of retrying for ever', async () => {
+  // Port 1 is privileged and nothing listens on it, so the connection is
+  // refused immediately and every retry is refused the same way — which is
+  // exactly the shape that used to loop without end. Jenkins calls this entry
+  // point inside a `post { failure { ... } }` shell loop, so an unbounded wait
+  // here hangs the build (setup/Jenkinsfile.template's own `timeout` step is
+  // the second half of the fix, asserted in jenkins/test/).
+  const started = Date.now();
+  const result = await publish(OPERATIONS.comment(), { redisHost: '127.0.0.1', redisPort: '1' });
+  const elapsed = Date.now() - started;
+
+  assert.notEqual(result.code, 0, 'nothing was published, so the exit status must say so');
+  assert.match(result.stderr, /Failed to durably enqueue/);
+  assert.match(result.stderr, /redis:\/\/127\.0\.0\.1:1 is unreachable/,
+    'the reason names the unreachable server, on stderr');
+  assert.match(result.stderr, /gave up after 3 connection attempts/);
+  assert.ok(elapsed < 30000, `the tool must give up in seconds, not hang: took ${elapsed} ms`);
+  assert.equal(await client.xLen(STREAM), 0);
 });
