@@ -250,7 +250,7 @@ credentials-file: ${CREDS_FILE}
 
 ingress:
   - hostname: "${HQ_SUBDOMAIN}"
-    service: http://localhost:9000
+    service: http://localhost:9100
 ${JENKINS_INGRESS}${PREVIEW_INGRESS}${BETA_INGRESS}  - service: http_status:404
 CONFIG
 echo "  Done."
