@@ -1,5 +1,6 @@
 """
-Mirrors services/core/test/commandConsumer.test.js. Uses a real Redis
+Mirrors the Node reference implementation's commandConsumer.test.js (not
+carried into this repository). Uses a real Redis
 Streams consumer group (workitems.streams.Consumer, running on a
 background thread against the real test Redis container) and a real
 Postgres-backed store — no mocks for the pieces that matter, same as the

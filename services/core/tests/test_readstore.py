@@ -1,4 +1,4 @@
-"""Mirrors services/core/test/readStore.test.js."""
+"""Mirrors the Node reference implementation's readStore.test.js (not carried into this repository)."""
 
 from __future__ import annotations
 

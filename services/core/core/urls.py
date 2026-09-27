@@ -13,8 +13,9 @@ Deliberate routing choice, called out in the final report: the Node
 service's own write API already used the path prefix `/admin/...`
 before Django's own admin site (which conventionally also wants `/admin/`)
 entered the picture. Rather than change the existing HTTP contract's paths
-(which services/core/test/httpApi.test.js and this port's own
-tests/test_views_http_api.py assert against verbatim), django.contrib.admin
+(which this port's own tests/test_views_http_api.py assert against
+verbatim, ported one-for-one from the Node reference implementation's own
+httpApi.test.js — not carried into this repository), django.contrib.admin
 is mounted at /django-admin/ instead — the one URL-space decision this
 port made differently from where django-admin's tutorials conventionally
 put it, and the reason is preserving an existing contract, not avoiding

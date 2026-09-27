@@ -1,4 +1,4 @@
-"""Mirrors services/core/test/webhookConsumer.test.js."""
+"""Mirrors the Node reference implementation's webhookConsumer.test.js (not carried into this repository)."""
 
 from __future__ import annotations
 

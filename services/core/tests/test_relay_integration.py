@@ -1,7 +1,8 @@
 """
-Verified for real rather than simulated in-process — mirrors
-services/core/test/relay.integration.test.js exactly, at the same
-rigor: kill the outbox relay process mid-run after several datastore
+Verified for real rather than simulated in-process — mirrors the Node
+reference implementation's relay.integration.test.js (not carried into
+this repository) exactly, at the same rigor: kill the outbox relay
+process mid-run after several datastore
 writes have committed. On restart, every committed write's event must be
 eventually published exactly once — none missing, none duplicated as a
 distinct logical event.

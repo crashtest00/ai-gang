@@ -1,5 +1,6 @@
 """
-Mirrors services/core/test/httpApi.test.js. Uses Django's test Client
+Mirrors the Node reference implementation's httpApi.test.js (not carried
+into this repository). Uses Django's test Client
 — an in-process request through the real URL routing / view / store /
 readstore stack and the real test Postgres database (no mocks), the
 Django-idiomatic equivalent of the Node test's `fetch()` against a live
