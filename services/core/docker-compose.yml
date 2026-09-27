@@ -161,6 +161,9 @@ networks:
     external: true
 
 volumes:
+  # Upgrading a checkout that has canonical state recorded under this
+  # service's pre-rename volume names needs a one-time manual copy first —
+  # see UPGRADE.md. A fresh install needs nothing extra.
   postgres-data:
   # Artifact files. The host path `docker volume inspect
   # core_artifact-data` reports is where a human edits a

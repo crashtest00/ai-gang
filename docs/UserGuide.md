@@ -214,6 +214,17 @@ Adding a second repository to a project you already have is a different
 thing, and is the "Adding a repo to an existing project" path in
 `ClaudeInstructions.md`.
 
+### Upgrading
+
+Pulling a later version and running `docker compose up --exit-code-from
+ai-gang` again is usually all an upgrade takes. One past change is the
+exception, carrying a one-time manual step: if your checkout has canonical
+state (work items, artifacts, deliveries) recorded from before the
+internal core service's own directory and containers were renamed, read
+[services/core/UPGRADE.md](../services/core/UPGRADE.md) before you pull —
+skipping it does not fail loudly, it silently starts you over with an
+empty installation. A fresh install has nothing to do here.
+
 ---
 
 ## Creating a New Project
