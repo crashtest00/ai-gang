@@ -313,7 +313,7 @@ docker ps  # verify it's running
 
 ```bash
 docker compose exec dev claude --version
-docker compose exec dev ls /agent-docs  # should show agent definition files
+docker compose exec dev ls /agent-docs  # should show agents/, commons/ and the platform files (subscriber.js, SCRUMMASTER_SPEC_v1.md, ...)
 ```
 
 ### Step 4: Start the Redis subscriber
@@ -369,24 +369,21 @@ ScrumMaster routes `frontend-agent` tasks to `agent:myapp-frontend` and `backend
 
 ### Agent definition mounts
 
-Mount only the definitions each container needs in `docker-compose.yml`:
+Each container mounts the whole `setup/` directory read-only, the same way `init-project.sh` generates it for a single-repo project — not a per-file selection of just the definitions the role needs. `subscriber.js` requires `./commons/tools/envelope`, `./dispatch-snapshot` and the rest of the commons at startup, so a container mounting only its own role's `.md` files and `subscriber.js` cannot start the subscriber at all:
 
 ```yaml
 frontend:
   volumes:
     - ./frontend:/workspace
-    - ../../setup/agents/frontend-agent.md:/agent-docs/agents/frontend-agent.md:ro
-    - ../../setup/agents/refinement-agent.md:/agent-docs/agents/refinement-agent.md:ro
-    - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
+    - ../../setup:/agent-docs:ro
 
 backend:
   volumes:
     - ./backend:/workspace
-    - ../../setup/agents/backend-agent.md:/agent-docs/agents/backend-agent.md:ro
-    - ../../setup/agents/refinement-agent.md:/agent-docs/agents/refinement-agent.md:ro
-    - ../../setup/agents/devops-agent.md:/agent-docs/agents/devops-agent.md:ro
-    - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
+    - ../../setup:/agent-docs:ro
 ```
+
+Routing to the right repo is ScrumMaster's job (`AGENT_CHANNEL_SUFFIX`, above), not a matter of which definitions are visible inside a container — every container sees every definition.
 
 ### Integration testing
 

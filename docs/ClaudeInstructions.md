@@ -570,7 +570,7 @@ docker ps  # verify running
 - `AGENT_CHANNEL_SUFFIX=<role>` — e.g. `backend`, `frontend`, `mobile`, `api`
 - `GH_TOKEN` — fine-grained PAT scoped to this repo only, needing Contents/Pull requests/Metadata read-write plus **Administration: Read and write** (the last one is only needed at Phase 3.1's branch-protection step, above — a token missing it still works for everything else)
 
-For multi-repo projects, each container also needs its own agent definition mounts in `docker-compose.yml` (mount only the definitions relevant to this repo's role).
+For multi-repo projects, each container also needs the `../../setup:/agent-docs:ro` mount in `docker-compose.yml` — the same whole-directory mount every container gets, not a per-file selection: `subscriber.js` requires the rest of the commons at startup, so a container mounting only the definitions relevant to its own role cannot start the subscriber at all. Routing to the right repo is ScrumMaster's job (`AGENT_CHANNEL_SUFFIX`, above), not a matter of which definitions are mounted.
 
 ### 3.3 Project Map (CLAUDE.md)
 
@@ -828,7 +828,7 @@ cd ~/ai-gang/projects/<name> && docker compose restart
 
 ### Updating agent definitions
 
-Agent definitions in `~/ai-gang/setup/` are mounted as live volumes into all running containers. A `git pull` on `~/ai-gang` is sufficient — no container restart required.
+Agent definitions in `~/ai-gang/setup/agents/` are mounted as live volumes into all running containers. A `git pull` on `~/ai-gang` is sufficient — no container restart required.
 
 ```bash
 cd ~/ai-gang && git pull
