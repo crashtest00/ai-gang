@@ -34,9 +34,13 @@
 //
 // On failure of either build, Jenkins posts attributable evidence to the
 // affected ticket(s) and publishes a `pipeline_retry` message to ScrumMaster
-// over the same durable gateway Streams transport agents use, via
-// the same gateway-publish.js helper agent prompts call (Streams-based
-// delivery only -- no PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It never
+// over the same durable gateway Streams transport agents use, through the raw
+// file/stdin entry point of the commons publish tool -- the entry point for a
+// producer that already holds a message, which is Jenkins' case; an agent names
+// an operation and its fields to a2a-submit.js instead. The tool validates the
+// payload before it writes, so a malformed pipeline_retry fails this step
+// rather than being dropped server-side (Streams-based delivery only -- no
+// PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It never
 // names an agent; ScrumMaster looks up the ticket's recorded owner.
 //
 // Release preview and production promotion are NOT handled here -- they're
@@ -295,8 +299,20 @@ pipeline {
           // message never names an agent -- ScrumMaster is the only
           // thing allowed to decide who that is. A failed comment must not
           // swallow the retry signal, so each step is best-effort.
-          withEnv(["FAILED_TICKETS=${tickets.join(' ')}", "FAILURE_TEXT=${what}"]) {
+          // RETRY_FAILURE_MARKER is how a construction failure inside the shell
+          // loop reaches the build's status: the loop cannot set a Groovy build
+          // result itself, and must not abort on one ticket's failure, so it
+          // records the ticket and carries on. The script block below reads the
+          // marker and marks the build UNSTABLE -- error() is deliberately not
+          // used anywhere in here, because aborting would swallow the retry
+          // signal for every ticket after the failing one.
+          withEnv([
+            "FAILED_TICKETS=${tickets.join(' ')}",
+            "FAILURE_TEXT=${what}",
+            "RETRY_FAILURE_MARKER=.pipeline-retry-failures"
+          ]) {
             sh '''
+              rm -f "$RETRY_FAILURE_MARKER"
               for ticket in $FAILED_TICKETS; do
                 COMMENT_TEXT=$(printf '%s\\n\\nBuild log: %s\\n\\nPlease review and fix.' "$FAILURE_TEXT" "$BUILD_URL")
                 curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
@@ -306,9 +322,16 @@ pipeline {
                   || echo "WARN: could not post failure comment to $ticket" >&2
                 echo "$(jq -nc --arg t "$ticket" --arg u "$BUILD_URL" --arg n "$BUILD_NUMBER" '{type:"pipeline_retry",ticket_key:$t,build_url:$u,build_number:$n}')" \
                     | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
-                  || echo "WARN: could not publish pipeline_retry for $ticket" >&2
+                  || { echo "WARN: could not publish pipeline_retry for $ticket" >&2; echo "$ticket" >> "$RETRY_FAILURE_MARKER"; }
               done
             '''
+            if (fileExists(env.RETRY_FAILURE_MARKER)) {
+              def unpublished = readFile(env.RETRY_FAILURE_MARKER).split('\n').findAll { it }
+              echo "pipeline_retry could not be published for: ${unpublished.join(', ')} -- " +
+                   "the publish tool's own error is in this step's output above. " +
+                   "Every other ticket's retry signal was published."
+              currentBuild.result = 'UNSTABLE'
+            }
           }
         }
       }

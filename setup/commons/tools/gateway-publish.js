@@ -9,10 +9,21 @@
  *   node /agent-docs/commons/tools/gateway-publish.js <project-name> <path-to-json-file>
  *   node /agent-docs/commons/tools/gateway-publish.js <project-name> -   (read JSON from stdin)
  *
- * Wraps the agent's raw payload in the versioned envelope and durably XADDs
+ * This is the raw entry point: it takes a message the producer already holds,
+ * which is Jenkins' case (setup/Jenkinsfile.template's pipeline-failure
+ * handler). An agent names an operation and its fields instead, through
+ * a2a-submit.js, and authors no message.
+ *
+ * Wraps the raw payload in the versioned envelope and durably XADDs
  * it to aigang:gateway:{project}. Exits non-zero (and prints to stderr) on
- * any failure — the agent should treat a non-zero exit as "the gateway
+ * any failure — the caller should treat a non-zero exit as "the gateway
  * operation was NOT durably accepted" and retry.
+ *
+ * a2a-validate.js runs on the payload before the connection is opened, so a
+ * message the gateway would refuse only after it was durably written is
+ * refused here instead, naming the failing field(s) on stderr in the same call
+ * the producer made (V5.0 Deterministic Gateway Message Tooling REQ-01,
+ * REQ-02, REQ-03).
  *
  * The normal V1 payload shape is the canonical A2A submission documented in
  * SCRUMMASTER_SPEC_v1.md:
@@ -28,6 +39,7 @@
 const fs = require('fs');
 const { createClient } = require('redis');
 const { buildEnvelope, KIND, toStreamFields } = require('./envelope');
+const { validateGatewayPayload, GatewayValidationError } = require('./a2a-validate');
 
 async function main() {
   const [, , projectArg, pathArg] = process.argv;
@@ -46,6 +58,16 @@ async function main() {
     payload = JSON.parse(raw);
   } catch (err) {
     console.error('Invalid JSON payload:', err.message);
+    process.exit(1);
+  }
+
+  // Before the envelope, before the connection, before any XADD.
+  try {
+    validateGatewayPayload(payload);
+  } catch (err) {
+    if (!(err instanceof GatewayValidationError)) throw err;
+    console.error(`[gateway-publish] Refused: this ${err.kind} payload is not valid, so nothing was published:`);
+    for (const problem of err.errors) console.error(`  - ${problem}`);
     process.exit(1);
   }
 

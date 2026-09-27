@@ -221,7 +221,7 @@ function buildA2AInstructions(issue, task, message) {
   lines.push(`  node /agent-docs/commons/tools/gateway-publish.js ${issue.projectName} /tmp/msg.json`);
   lines.push(`  The project name is: ${issue.projectName} — use this exact string, do not substitute anything else`);
   lines.push(`  A non-zero exit means the operation was NOT durably accepted — check the printed error and retry`);
-  lines.push('- Supported operations, set inside the message\'s "data" part (all also accept an optional "reference": {"file": "...", "function": "..."}):');
+  lines.push('- Supported operations, set inside the message\'s "data" part. An optional "reference": {"file": "...", "function": "..."} is read on the three that consume it — a "comment" operation, a plain progress note with no "operation", and the input-required/auth-required states:');
   lines.push('  | operation        | state                        | when to use |');
   lines.push('  |------------------|------------------------------|-------------|');
   lines.push('  | comment          | working                      | progress update, no PR yet |');

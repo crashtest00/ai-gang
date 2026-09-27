@@ -413,7 +413,9 @@ what to do:
 | `failed` / `canceled` / `rejected` | — | Set Blocked field + comment identifying the terminal failure |
 
 An optional `data.reference: { "file": "...", "function": "..." }` sibling
-field is supported on any operation.
+field is read on the three submissions that consume it: a `comment` operation,
+a plain progress note that sets no `data.operation`, and the `input-required` /
+`auth-required` states.
 
 A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
 ScrumMaster first tries to recover the id from the summary's own
