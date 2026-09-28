@@ -656,7 +656,6 @@ JIRA_OUT_OF_SCOPE_FIELD_ID       # customfield_XXXXX
 
 REDIS_HOST           # Redis container hostname on Docker network
 REDIS_PORT           # Default 6379
-WEBHOOK_SECRET        # Shared secret for validating inbound Jira webhooks
 AGENTS_CATALOG_PATH   # Path to agents.json (canonical agent catalog)
 PROJECTS_CONFIG_PATH  # Path to projects.json (per-project allowed-agent set)
 PROJECTS_BASE_PATH    # Path to ~/ai-gang/projects/ for BLOCKED marker search
