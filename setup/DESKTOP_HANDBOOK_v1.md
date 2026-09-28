@@ -1,7 +1,7 @@
 # Desktop App Handbook (v1)
 
 This handbook is the source of truth for Electron and Tauri projects in AI Gang.
-It supplements `DEVOPS_HANDBOOK_v1.md`; the Jira/Jenkins release workflow remains
+It supplements `/agent-docs/DEVOPS_HANDBOOK_v1.md`; the Jira/Jenkins release workflow remains
 authoritative for release state and promotion.
 
 ## Build strategy

@@ -15,6 +15,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const { buildTaskPrompt, buildUnblockPrompt, buildRetryPrompt } = require('./prompt');
 
 const AGENT = { displayName: 'Backend Agent', definitionPath: '/agent-docs/agents/backend-agent.md' };
@@ -182,4 +185,41 @@ test('a dispatch with no allowed-agent set renders no allowed-agent list', () =>
 
   assert.doesNotMatch(prompt, /## ALLOWED AGENTS/);
   assert.match(prompt, /## WORK ITEM REFERENCES/);
+});
+
+// ---------------------------------------------------------------------------
+// The COMMENT THREAD lead-in, against the specification that shows it
+// ---------------------------------------------------------------------------
+
+// setup/SCRUMMASTER_SPEC_v1.md §3 showed one lead-in for all three flows while
+// buildTaskPrompt rendered a different one, so the specification described a
+// string no dispatch produced (V5.0 audit row 92). Driven off the rendered
+// prompts and the specification file itself, so neither can drift from the
+// other without failing here.
+const SPEC = fs.readFileSync(
+  path.join(__dirname, '..', '..', '..', 'setup', 'SCRUMMASTER_SPEC_v1.md'), 'utf8');
+
+const LEAD_INS = {
+  buildTaskPrompt: 'The following clarifications have been provided:',
+  buildUnblockPrompt: 'The following clarifications have been provided (most recent last):',
+  buildRetryPrompt: 'The following clarifications have been provided (most recent last):',
+};
+
+test('each flow renders the COMMENT THREAD lead-in the specification shows for it', () => {
+  const issue = baseIssue({ comments: [{ timestamp: '2026-09-27T10:00:00Z', author: 'PM', body: 'use the new endpoint' }] });
+  const prompts = everyBuilder(issue);
+
+  for (const [name, leadIn] of Object.entries(LEAD_INS)) {
+    assert.ok(prompts[name].includes(`## COMMENT THREAD\n${leadIn}\n`),
+      `${name} must render exactly the lead-in the specification shows for its flow`);
+    assert.ok(SPEC.includes(leadIn),
+      `setup/SCRUMMASTER_SPEC_v1.md must show ${name}'s lead-in verbatim`);
+  }
+});
+
+test('the specification shows both lead-ins and no third one', () => {
+  // Non-vacuous in the direction that actually drifted: a lead-in shown in the
+  // specification that no builder renders fails here too.
+  const shown = SPEC.match(/The following clarifications have been provided[^\n]*/g) || [];
+  assert.deepStrictEqual([...new Set(shown)].sort(), [...new Set(Object.values(LEAD_INS))].sort());
 });

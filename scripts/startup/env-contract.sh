@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# The platform `.env` contract: which variables platform startup reads,
-# which of them it refuses to start without, and what the rest default to.
+# The platform `.env` contract: which variables platform startup requires or
+# defaults — which of them it refuses to start without, and what the rest
+# default to.
 #
-# This is the single list. scripts/startup/validate-env.sh enforces it,
-# scripts/startup/derive-env.sh builds each service's own environment file
-# from it, and the test suite checks .env.template against it, so a
-# variable cannot be added in one place and forgotten in the others.
+# This is the single list of those. scripts/startup/validate-env.sh enforces
+# it, scripts/startup/derive-env.sh builds each service's own environment file
+# from it, and the test suite checks .env.template against it, so a required
+# or defaulted variable cannot be added in one place and forgotten in the
+# others.
+#
+# Not every variable startup reads is here, and the ones that are not need no
+# entry. A variable startup copies through when the operator set it and omits
+# when they did not is neither required nor defaulted, so there is nothing for
+# validate-env.sh to refuse and no default for derive-env.sh to substitute.
+# Those are defined at the place that copies them — WEBHOOK_SECRET and the
+# JIRA_*_FIELD_ID set, in scripts/startup/derive-env.sh (JIRA_FIELD_ID_VARS and
+# the two env_file_get blocks that write services/core/.env) — and documented,
+# blank, in .env.template beside them.
 #
 # Output, one variable per line:
 #   REQUIRED <NAME>

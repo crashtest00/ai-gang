@@ -101,7 +101,7 @@ Use the index below to go directly to the relevant section. Read only what you n
 | Promoting beta to production | `## Production Promotion` |
 | Rolling back a bad deployment | `## Rollback Procedures` |
 | Diagnosing a broken pipeline | `## Troubleshooting` |
-| Building or diagnosing a desktop app | `DESKTOP_HANDBOOK_v1.md` |
+| Building or diagnosing a desktop app | `/agent-docs/DESKTOP_HANDBOOK_v1.md` |
 
 For desktop failures, identify the affected matrix leg rather than treating a
 partial build as success. Common cases include an OS-specific native dependency,

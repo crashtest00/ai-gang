@@ -488,8 +488,12 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    Unblock flow: COMMENT THREAD (if present), then RESUME POINT.
    Retry flow: RESUME POINT, then COMMENT THREAD (if present).
 
-   COMMENT THREAD (if present)
-   The following clarifications have been provided (most recent last):
+   COMMENT THREAD (if present) — the lead-in line differs by flow:
+     Task dispatch:
+       The following clarifications have been provided:
+     Unblock and retry flows:
+       The following clarifications have been provided (most recent last):
+   Then, in every flow, one line per comment:
    [{timestamp}] {author}: {body}
 
    RESUME POINT (unblock and retry flows; task dispatch has none)

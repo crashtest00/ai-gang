@@ -395,6 +395,64 @@ test('REQ-05: a reference on an operation that does not consume it is not refuse
   assert.equal(await client.xLen(STREAM), 1);
 });
 
+// Row 84: the per-operation *field* checks were not behind
+// `gatewayReadsOperation` although the allow-list beside them was, so a
+// terminal or interrupted submission carrying `operation: create_subtask` or
+// `reassign` was refused for fields no branch that handles it ever reads. One
+// case per state class `handleA2ASubmission` branches into, each carrying a
+// bare operation and none of its fields.
+const UNREAD_OPERATION_STATES = [
+  { id: 'a completed submission (handleCompleted)', state: 'completed', operation: 'create_subtask' },
+  { id: 'a failed submission (handleTerminalFailure)', state: 'failed', operation: 'create_subtask' },
+  { id: 'a canceled submission (handleTerminalFailure)', state: 'canceled', operation: 'reassign' },
+  { id: 'an input-required submission (handleInterrupted)', state: 'input-required', operation: 'create_subtask' },
+  { id: 'an auth-required submission (handleInterrupted)', state: 'auth-required', operation: 'reassign' },
+];
+
+for (const c of UNREAD_OPERATION_STATES) {
+  test(`row 84: ${c.id} carrying a bare "${c.operation}" operation still publishes — that branch reads none of its fields`, async () => {
+    const payload = {
+      state: c.state,
+      message: message([
+        { kind: 'text', text: 'nothing routed here' },
+        { kind: 'data', data: { operation: c.operation } },
+      ]),
+    };
+    const result = await publish(payload);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await client.xLen(STREAM), 1);
+  });
+}
+
+test('row 84: the same fields are still required on a working submission, where gateway.js does route the operation', async () => {
+  // The state class the guard must not weaken: `working` reaches the
+  // `switch (operation)` branch, so handleCreateSubtask and handleReassign do
+  // read these fields and REQ-02 still refuses a submission without them.
+  const subtask = await publish({
+    state: 'working',
+    message: message([
+      { kind: 'text', text: 'splitting this out' },
+      { kind: 'data', data: { operation: 'create_subtask' } },
+    ]),
+  });
+  assert.notEqual(subtask.code, 0);
+  assert.match(subtask.stderr, /data\.summary must be a non-empty string for the "create_subtask" operation/);
+  assert.match(subtask.stderr, /data\.description must be a non-empty string for the "create_subtask" operation/);
+  assert.match(subtask.stderr, /data\.agentFieldValue must be a non-empty string for the "create_subtask" operation/);
+  assert.equal(await client.xLen(STREAM), 0, 'nothing may reach the stream');
+
+  const reassign = await publish({
+    state: 'working',
+    message: message([
+      { kind: 'text', text: 'handing over' },
+      { kind: 'data', data: { operation: 'reassign' } },
+    ]),
+  });
+  assert.notEqual(reassign.code, 0);
+  assert.match(reassign.stderr, /data\.agentFieldValue must be a non-empty string for the "reassign" operation/);
+  assert.equal(await client.xLen(STREAM), 0, 'nothing may reach the stream');
+});
+
 test('F-2: a terminal submission carrying an unrouted operation still publishes — handleA2ASubmission never reads operation there', async () => {
   // `set_blocked` is exactly what the row-37 case above refuses on a
   // `working` submission, because gateway.js's non-terminal, non-interrupted

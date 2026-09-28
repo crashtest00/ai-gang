@@ -608,12 +608,22 @@ test('the real setup/ tree snapshots exactly the four entries, and the state der
     ['DESKTOP_HANDBOOK_v1.md', 'DEVOPS_HANDBOOK_v1.md', 'agents', 'commons', 'state']);
   assert.deepStrictEqual(fs.readdirSync(path.join(snapshot.dispatchDir, 'agents')).sort(),
     ['backend-agent.md', 'devops-agent.md', 'frontend-agent.md', 'refinement-agent.md']);
-  // What stays on the mount is still only on the mount.
-  for (const rel of ['SCRUMMASTER_SPEC_v1.md', 'JIRA_SPEC_v1.md', 'JenkinsConfig.md',
-    'Jenkinsfile.template', 'graphs', 'subscriber.js', 'dispatch-snapshot.js']) {
+  // What stays on the mount is still only on the mount. This list plus the
+  // four snapshotted entries is every top-level entry of `setup/`, so a new one
+  // has to be classified rather than land unnoticed on either side (V5.0 audit
+  // row 89).
+  const keptOnTheMount = ['SCRUMMASTER_SPEC_v1.md', 'JIRA_SPEC_v1.md', 'JenkinsConfig.md',
+    'Jenkinsfile.template', 'graphs', 'subscriber.js', 'dispatch-snapshot.js',
+    'dispatch-snapshot.test.js'];
+  for (const rel of keptOnTheMount) {
     assert.ok(fs.existsSync(path.join(__dirname, rel)), `${rel} is on the mount`);
     assert.ok(!fs.existsSync(path.join(snapshot.dispatchDir, rel)), `${rel} is not snapshotted`);
   }
+  assert.deepStrictEqual(
+    fs.readdirSync(__dirname).sort(),
+    [...keptOnTheMount, ...snapshot.entries].sort(),
+    'setup/ has an entry that is neither snapshotted nor enumerated as kept on the mount'
+  );
 
   // a2a-submit.js derives its per-session state directory from
   // AIGANG_COMMONS_DIR's parent, and the definitions and handbooks sitting in
@@ -645,7 +655,59 @@ test('no snapshotted markdown in the real setup/ tree still names a snapshotted 
 
   assert.deepStrictEqual(offenders, []);
   // And the rewrite really did something, so this is not vacuous.
-  assert.deepStrictEqual(snapshot.rewritten, ['agents/devops-agent.md']);
+  assert.deepStrictEqual(snapshot.rewritten,
+    ['DESKTOP_HANDBOOK_v1.md', 'DEVOPS_HANDBOOK_v1.md', 'agents/devops-agent.md']);
+});
+
+// Every `*_HANDBOOK_v1.md` mention in a snapshotted markdown file, as the
+// whole path-shaped token it sits in. A mention the rewrite carried is
+// absolute — `<dispatchDir>/DEVOPS_HANDBOOK_v1.md` — so anything that does not
+// start with `/` is a bare filename, which is the case the prefix test above
+// structurally cannot see: it searches for `/agent-docs/<entry>`, and a bare
+// name carries no prefix to find (V5.0 audit row 83).
+function bareHandbookMentions(dispatchDir) {
+  const bare = [];
+  const walk = (dir, prefix = '') => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (rel === 'state') continue;
+      if (entry.isDirectory()) walk(path.join(dir, entry.name), rel);
+      else if (entry.isFile() && rel.endsWith('.md')) {
+        const body = fs.readFileSync(path.join(dir, entry.name), 'utf8');
+        for (const token of body.match(/[A-Za-z0-9._/-]*_HANDBOOK_v1\.md/g) || []) {
+          if (!token.startsWith('/')) bare.push(`${rel}: ${token}`);
+        }
+      }
+    }
+  };
+  walk(dispatchDir);
+  return bare.sort();
+}
+
+test('no snapshotted markdown names a snapshotted handbook by bare filename', () => {
+  // The handbooks sit at the dispatch directory's root while a definition
+  // naming one sits in `agents/`, so a bare name resolves from neither. Only an
+  // absolute `/agent-docs/...` path is a path the rewrite can carry into the
+  // snapshot, and the prefix test above cannot catch a bare one.
+  const snapshot = createSnapshot({ source: __dirname, root: makeRoot() });
+  assert.deepStrictEqual(bareHandbookMentions(snapshot.dispatchDir), []);
+});
+
+test('a bare handbook mention added to a snapshotted document is caught', () => {
+  // Not vacuous: the same check over a mount carrying exactly the mistake row
+  // 83 found — a definition and a handbook each naming the other handbook by
+  // bare filename — names both files.
+  const source = makeMount();
+  fs.writeFileSync(path.join(source, 'agents/devops-agent.md'),
+    'See `DESKTOP_HANDBOOK_v1.md` for desktop builds.\n');
+  fs.writeFileSync(path.join(source, 'DESKTOP_HANDBOOK_v1.md'),
+    '# Desktop handbook\n\nIt supplements `DEVOPS_HANDBOOK_v1.md`.\n');
+  const snapshot = createSnapshot({ source, root: makeRoot() });
+
+  assert.deepStrictEqual(bareHandbookMentions(snapshot.dispatchDir), [
+    'DESKTOP_HANDBOOK_v1.md: DEVOPS_HANDBOOK_v1.md',
+    'agents/devops-agent.md: DESKTOP_HANDBOOK_v1.md',
+  ]);
 });
 
 test('the only snapshotted non-markdown files naming a mount path are three comments', () => {

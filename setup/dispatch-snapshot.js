@@ -23,7 +23,9 @@
  * were exactly the hazard the snapshot exists to remove (V5.0 audit row 26,
  * Amendment 1). What stays on the mount is what no agent reads as an
  * instruction: the two specifications, `JenkinsConfig.md`, the Jenkinsfile
- * template, `graphs/`, and `subscriber.js` itself.
+ * template, `graphs/`, `subscriber.js` itself, and this module and its own
+ * test — which together account for all twelve of `setup/`'s top-level
+ * entries (V5.0 audit row 89).
  *
  * Layout of one dispatch, rooted at a directory this module mints:
  *

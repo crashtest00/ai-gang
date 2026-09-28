@@ -149,16 +149,28 @@ function checkOperationFields(payload, errors) {
     );
   }
 
-  if (operation === 'create_subtask') {
-    if (!isNonEmptyString(data.summary)) errors.push(`${path}.summary must be a non-empty string for the "create_subtask" operation`);
-    // Stricter than the handler, by approved decision — see the header.
-    if (!isNonEmptyString(data.description)) errors.push(`${path}.description must be a non-empty string for the "create_subtask" operation`);
-    if (!isNonEmptyString(data.agentFieldValue)) errors.push(`${path}.agentFieldValue must be a non-empty string for the "create_subtask" operation`);
-    checkSubtaskReferences(data, errors, path);
-  }
+  // Behind the same guard as the allow-list above, and for the same reason:
+  // these fields are what `handleCreateSubtask` and `handleReassign` require,
+  // and `handleA2ASubmission` reaches those two handlers only from the
+  // non-terminal, non-interrupted `switch (operation)` branch. Its other three
+  // branches — handleInterrupted for `input-required`/`auth-required`,
+  // handleCompleted for `completed`, handleTerminalFailure for
+  // `failed`/`canceled`/`rejected` — never look at `operation`, so they never
+  // read `summary`, `description` or `agentFieldValue` either. Requiring them
+  // on such a submission would refuse input the gateway simply ignores, which
+  // the header above promises this file does not do (V5.0 audit row 84).
+  if (gatewayReadsOperation(payload.state)) {
+    if (operation === 'create_subtask') {
+      if (!isNonEmptyString(data.summary)) errors.push(`${path}.summary must be a non-empty string for the "create_subtask" operation`);
+      // Stricter than the handler, by approved decision — see the header.
+      if (!isNonEmptyString(data.description)) errors.push(`${path}.description must be a non-empty string for the "create_subtask" operation`);
+      if (!isNonEmptyString(data.agentFieldValue)) errors.push(`${path}.agentFieldValue must be a non-empty string for the "create_subtask" operation`);
+      checkSubtaskReferences(data, errors, path);
+    }
 
-  if (operation === 'reassign') {
-    if (!isNonEmptyString(data.agentFieldValue)) errors.push(`${path}.agentFieldValue must be a non-empty string for the "reassign" operation`);
+    if (operation === 'reassign') {
+      if (!isNonEmptyString(data.agentFieldValue)) errors.push(`${path}.agentFieldValue must be a non-empty string for the "reassign" operation`);
+    }
   }
 
   // A `completed` submission's optional pull-request Artifact: `handleCompleted`

@@ -20,6 +20,7 @@ const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const CONTRACT = path.join(REPO_ROOT, 'scripts', 'startup', 'env-contract.sh');
 const VALIDATE_ENV = path.join(REPO_ROOT, 'scripts', 'startup', 'validate-env.sh');
 const ENV_TEMPLATE = path.join(REPO_ROOT, '.env.template');
+const DERIVE_ENV = path.join(REPO_ROOT, 'scripts', 'startup', 'derive-env.sh');
 
 function readContract() {
   const result = spawnSync('bash', [CONTRACT], { encoding: 'utf8', timeout: 15000 });
@@ -116,6 +117,55 @@ test("every OPTIONAL variable's default matches what .env.template ships", () =>
       `${entry.name}'s .env.template value and its contract default disagree`
     );
   }
+});
+
+// ---- the variables the contract deliberately does not list ----
+
+// Every variable derive-env.sh copies out of the platform .env by name, rather
+// than through the contract's env_value: the `env_file_get "$AIGANG_ENV_FILE"
+// <NAME>` calls, plus the loop over JIRA_FIELD_ID_VARS. Read out of the script
+// so this is the real set, not a restated copy of it.
+function copiedThroughVariables() {
+  const text = fs.readFileSync(DERIVE_ENV, 'utf8');
+  const names = new Set();
+  for (const m of text.matchAll(/env_file_get "\$AIGANG_ENV_FILE" ([A-Z][A-Z0-9_]*)/g)) {
+    names.add(m[1]);
+  }
+  const list = text.match(/JIRA_FIELD_ID_VARS=\(([^)]*)\)/);
+  assert.ok(list, 'JIRA_FIELD_ID_VARS is no longer an array literal in derive-env.sh');
+  for (const name of list[1].match(/[A-Z][A-Z0-9_]*/g) || []) names.add(name);
+  assert.ok(names.size > 1, 'found no copied-through variables, so this check would be vacuous');
+  return [...names].sort();
+}
+
+test('the copied-through variables are out of the contract on purpose and declared blank in .env.template', () => {
+  // env-contract.sh's header scopes "the single list" to the variables startup
+  // requires or defaults, and says these are defined at the place that copies
+  // them instead. That is what this pins: startup neither requires nor
+  // defaults them, so they have no contract entry — and .env.template still
+  // declares each one, blank, so an operator can see it exists (V5.0 audit row
+  // 87).
+  const contractNames = new Set(readContract().map((e) => e.name));
+  for (const name of copiedThroughVariables()) {
+    assert.ok(
+      !contractNames.has(name),
+      `${name} is copied through by derive-env.sh and is now also in the contract — ` +
+      'either give it a REQUIRED/OPTIONAL entry and stop copying it by name, or keep it out of both'
+    );
+    assert.equal(
+      templateValue(name),
+      '',
+      `${name} is copied through by derive-env.sh and must ship declared-but-empty in .env.template`
+    );
+  }
+});
+
+test('a copied-through variable is omitted from the derived .env when the platform .env leaves it blank', () => {
+  // The property that makes a contract entry wrong for these: unset is a
+  // meaningful state, not a missing value to default.
+  const text = fs.readFileSync(DERIVE_ENV, 'utf8');
+  assert.match(text, /if webhook_secret="\$\(env_file_get "\$AIGANG_ENV_FILE" WEBHOOK_SECRET\)" && \[\[ -n "\$webhook_secret" \]\]; then/);
+  assert.match(text, /if jira_value="\$\(env_file_get "\$AIGANG_ENV_FILE" "\$jira_var"\)" && \[\[ -n "\$jira_value" \]\]; then/);
 });
 
 // ---- validate-env.sh ----

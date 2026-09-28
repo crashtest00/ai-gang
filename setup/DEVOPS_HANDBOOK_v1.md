@@ -268,7 +268,14 @@ Promotion below for the full flow.
 
 4. SPECIALIST AGENTS WORK
    - Container's Streams consumer (setup/subscriber.js) invokes Claude Code with prompt
-   - Agent reads definition file from /agent-docs
+   - Agent reads definition file from this dispatch's own snapshot of
+     /agent-docs, not from the mount: every dispatch copies the definitions,
+     the role handbooks and the agent commons into a snapshot of its own and
+     rewrites the prompt's paths onto it. So editing anything under
+     /agent-docs on the host takes effect at the next dispatch and never
+     inside a running session — nothing an agent reads changes under it
+     mid-session. Each session logs the snapshot's content hash as
+     AIGANG_COMMONS_VERSION, which is the record of what it actually read.
    - Creates branch: feature/GANG-42-password-reset
    - Writes code inside project container
    - Opens PR on GitHub
@@ -388,7 +395,7 @@ point for rollback — it names the exact commit that shipped, with a PR
 history showing exactly what it contained. A separate version-tag scheme is
 not needed for the hosted web/server lane; desktop production builds are
 tagged separately for GitHub Releases distribution — see
-`DESKTOP_HANDBOOK_v1.md`.
+`/agent-docs/DESKTOP_HANDBOOK_v1.md`.
 
 ---
 
