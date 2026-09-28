@@ -3,7 +3,9 @@
 // Canonical per-project Jenkinsfile. Copy into a project's repo root, set
 // PROJECT_NAME below, and fill in the four TODO blocks with that project's
 // actual install/test/build/deploy commands (see docs/ClaudeInstructions.md
-// Phase 2 and setup/DEVOPS_HANDBOOK_v1.md).
+// Phase 2, and the DevOps handbook — a dispatched DevOps session reads its
+// own snapshot copy of that, at the path its dispatch context gives, not a
+// `setup/` directory relative to this file).
 //
 // Implements the per-story flow as TWO builds of this one file. A single build
 // can't do it all: the PR build IS the required status check that unlocks
