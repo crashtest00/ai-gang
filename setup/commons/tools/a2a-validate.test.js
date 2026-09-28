@@ -424,6 +424,62 @@ for (const c of UNREAD_OPERATION_STATES) {
   });
 }
 
+// Row 113: `checkReference` ran on every submission carrying a data Part, so a
+// malformed `data.reference` was refused on the six operations whose handlers
+// never receive it. `gateway.js:375` reads the reference once and passes it to
+// handleInterrupted, and to postFormattedComment for a `comment` or a plain
+// progress note; handleCompleted, handleTerminalFailure, handleReassign and
+// handleCreateSubtask do not take it. One case per branch that does not.
+const UNREAD_REFERENCE_CASES = [
+  { id: 'a completed submission (handleCompleted)', state: 'completed', data: {} },
+  { id: 'a failed submission (handleTerminalFailure)', state: 'failed', data: {} },
+  { id: 'a canceled submission (handleTerminalFailure)', state: 'canceled', data: {} },
+  { id: 'a rejected submission (handleTerminalFailure)', state: 'rejected', data: {} },
+  { id: 'a reassign (handleReassign)', state: 'working', data: { operation: 'reassign', agentFieldValue: 'backend-agent' } },
+];
+
+for (const c of UNREAD_REFERENCE_CASES) {
+  test(`row 113: ${c.id} carrying a malformed reference still publishes — that branch never receives it`, async () => {
+    const payload = {
+      state: c.state,
+      message: message([
+        { kind: 'text', text: 'the reference goes nowhere from here' },
+        // Malformed by REQ-02's own shape rule: neither a string nor an object
+        // with a `file`. On a path that rendered it this is exactly what
+        // divergence 3 refuses.
+        { kind: 'data', data: { ...c.data, reference: { nothing: 'useful' } } },
+      ]),
+    };
+    const result = await publish(payload);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await client.xLen(STREAM), 1);
+  });
+}
+
+// The three paths that do render it: the guard must not weaken any of them.
+const READ_REFERENCE_CASES = [
+  { id: 'an input-required submission (handleInterrupted)', state: 'input-required', data: {} },
+  { id: 'an auth-required submission (handleInterrupted)', state: 'auth-required', data: {} },
+  { id: 'a comment (postFormattedComment)', state: 'working', data: { operation: 'comment' } },
+  { id: 'a plain progress note (postFormattedComment)', state: 'working', data: {} },
+];
+
+for (const c of READ_REFERENCE_CASES) {
+  test(`row 113: ${c.id} carrying a malformed reference is still refused, and nothing is written`, async () => {
+    const payload = {
+      state: c.state,
+      message: message([
+        { kind: 'text', text: 'this one reaches formatReference' },
+        { kind: 'data', data: { ...c.data, reference: { nothing: 'useful' } } },
+      ]),
+    };
+    const result = await publish(payload);
+    assert.notEqual(result.code, 0, 'a reference the gateway would render must still be refused');
+    assert.match(result.stderr, /reference/);
+    assert.equal(await client.xLen(STREAM), 0, 'a refused submission must leave no entry');
+  });
+}
+
 test('row 84: the same fields are still required on a working submission, where gateway.js does route the operation', async () => {
   // The state class the guard must not weaken: `working` reaches the
   // `switch (operation)` branch, so handleCreateSubtask and handleReassign do
