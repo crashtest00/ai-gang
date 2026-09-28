@@ -35,8 +35,16 @@
  * audit row 37): a submission's `role` must be `agent`, not merely one of A2A's
  * two roles, and a `data.operation` must be one the gateway routes. In both
  * cases the server drops the message with a `console.warn` no producer reads,
- * having already written it to the stream. Nothing else here refuses input the
- * gateway acts on.
+ * having already written it to the stream.
+ *
+ * That third class has a limit, and it is the one this file keeps having to
+ * learn: the server must make the refusal *on that input*. Where a handler
+ * never reads a field there is no server-side refusal to move earlier, so
+ * refusing it here would refuse input the gateway simply ignores. Two checks
+ * are gated on that and nothing else is: `data.operation`, read only in the
+ * non-terminal, non-interrupted branch (V5.0 audit row 84), and
+ * `data.reference`, which only three of the gateway's paths receive (row 113,
+ * `strategy/v5.0/BUILD_DECISIONS.md` item 16, Management repository).
  */
 
 const schema = require('./a2a-schema');
@@ -126,10 +134,26 @@ const ROUTED_OPERATIONS = ['comment', 'reassign', 'create_subtask'];
 // handleCompleted/handleTerminalFailure, and an `input-required`/
 // `auth-required` one by handleInterrupted — neither branch looks at
 // `operation` at all, routed or not. Refusing an unrouted operation on one
-// of those submissions would refuse input the gateway simply ignores,
-// which the header above promises this file does not do.
+// of those submissions would refuse input the gateway simply ignores, which
+// is outside every class of divergence REQ-05 admits (see the header).
 function gatewayReadsOperation(state) {
   return !schema.TERMINAL_STATES.includes(state) && !schema.INTERRUPTED_STATES.includes(state);
+}
+
+// `handleA2ASubmission` reads `data.reference` once (`gateway.js:375`) and
+// passes it on three paths only: handleInterrupted (`:378`), and
+// postFormattedComment for a `comment` (`:391`) or for a plain progress note
+// (`:404`). handleCompleted, handleTerminalFailure, handleReassign and
+// handleCreateSubtask never receive it, so a malformed reference on one of those
+// submissions is input the gateway ignores. REQ-05's justification for refusing
+// it — that `formatReference` accepts anything and would post a comment built
+// from whatever was supplied — reaches exactly the paths that render it.
+// `create_subtask`'s own reference fields are a different pair and keep their
+// own check (V5.0 audit row 113).
+function gatewayReadsReference(state, operation) {
+  if (schema.INTERRUPTED_STATES.includes(state)) return true;
+  if (schema.TERMINAL_STATES.includes(state)) return false;
+  return operation === 'comment' || operation === undefined;
 }
 
 // REQ-02 — the fields the corresponding gateway handler requires for the
@@ -138,9 +162,11 @@ function checkOperationFields(payload, errors) {
   const data = dataOf(payload.message);
   const path = 'message.parts[data].data';
 
-  if (data) checkReference(data.reference, errors, `${path}.reference`);
-
   const operation = data ? data.operation : undefined;
+
+  if (data && gatewayReadsReference(payload.state, operation)) {
+    checkReference(data.reference, errors, `${path}.reference`);
+  }
 
   if (gatewayReadsOperation(payload.state) && operation !== undefined && !ROUTED_OPERATIONS.includes(operation)) {
     errors.push(
