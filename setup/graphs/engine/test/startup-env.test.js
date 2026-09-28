@@ -168,6 +168,88 @@ test('a copied-through variable is omitted from the derived .env when the platfo
   assert.match(text, /if jira_value="\$\(env_file_get "\$AIGANG_ENV_FILE" "\$jira_var"\)" && \[\[ -n "\$jira_value" \]\]; then/);
 });
 
+// ---- the reverse direction: .env.template -> the contract ----
+
+// Every name .env.template assigns, in source order — the set the two
+// checks above build out of the contract and derive-env.sh only ever walk
+// forward from, never back over. Read out of the file itself, same as
+// templateValue reads a single one, so this is the real set too.
+function templateAssignedVariables() {
+  const text = fs.readFileSync(ENV_TEMPLATE, 'utf8');
+  const names = new Set();
+  for (const m of text.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)) names.add(m[1]);
+  return [...names].sort();
+}
+
+// Declared in .env.template but read by neither env-contract.sh nor
+// derive-env.sh — confirmed by grepping scripts/startup/ for each name and
+// finding it nowhere. Each belongs to a phase .env.template's own "PLATFORM
+// STARTUP" section says an operator adds later — Jira, Cloudflare, Jenkins,
+// the Beta VM — and reads instead through that phase's own script, named
+// below. A name does not belong on this list because it is inconvenient;
+// it belongs here only once its one real reader is confirmed, the same way
+// copiedThroughVariables() above is read out of derive-env.sh rather than
+// asserted.
+const DECLARED_FOR_A_LATER_PHASE = new Map([
+  ['JIRA_URL', 'scripts/init-jenkins.sh'],
+  ['JIRA_EMAIL', 'scripts/init-jenkins.sh'],
+  ['JIRA_TOKEN', 'scripts/init-jenkins.sh'],
+  ['GITHUB_TOKEN', 'scripts/init-jenkins.sh'],
+  ['JENKINS_GITHUB_USER', 'scripts/init-project.sh'],
+  ['CF_API_KEY', 'scripts/spike-cloudflare-tunnel-api.sh'],
+  ['CF_ZONE_ID', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['CF_ACCOUNT_ID', 'scripts/spike-cloudflare-tunnel-api.sh'],
+  ['HQ_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['JENKINS_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['PREVIEW_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['BETA_DOMAIN', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_HOST', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_ADMIN_USER', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_TRAEFIK_PORT', 'scripts/setup-beta-vm.sh'],
+  ['HQ_URL', 'scripts/init-project.sh'],
+  ['JENKINS_URL', 'scripts/init-jenkins.sh'],
+  ['JENKINS_ADMIN_PASSWORD', 'scripts/init-jenkins.sh'],
+  ['PREVIEW_DOMAIN', 'scripts/setup-beta-vm.sh'],
+]);
+
+test('every .env.template variable is accounted for: contract, copied-through, or a named later-phase reader', () => {
+  // The two tests above start from the contract and from derive-env.sh and
+  // check outward to .env.template; nothing starts from .env.template and
+  // checks back. A variable added there — a REQUIRED/OPTIONAL-shaped one
+  // that never reached env-contract.sh, or a new JIRA_*_FIELD_ID that never
+  // reached JIRA_FIELD_ID_VARS — would ship invisible to every check above,
+  // read by nothing, silently inert. This closes that direction: every
+  // assignment must land in the contract, in derive-env.sh's copied-through
+  // set, or on the later-phase list, whose own reader is confirmed absent
+  // from scripts/startup/ below. There is nowhere left for one to hide.
+  const contractNames = new Set(readContract().map((e) => e.name));
+  const copiedThrough = new Set(copiedThroughVariables());
+  const startupDir = path.join(REPO_ROOT, 'scripts', 'startup');
+  const startupText = fs.readdirSync(startupDir)
+    .filter((f) => f.endsWith('.sh'))
+    .map((f) => fs.readFileSync(path.join(startupDir, f), 'utf8'))
+    .join('\n');
+  for (const name of templateAssignedVariables()) {
+    if (contractNames.has(name) || copiedThrough.has(name)) continue;
+    assert.ok(
+      DECLARED_FOR_A_LATER_PHASE.has(name),
+      `${name} is in .env.template but in none of: the contract, derive-env.sh's copied-through ` +
+      'set, or the later-phase list — give it a REQUIRED/OPTIONAL contract entry, wire it into ' +
+      'derive-env.sh, or add it to DECLARED_FOR_A_LATER_PHASE with the script that reads it'
+    );
+    const reader = DECLARED_FOR_A_LATER_PHASE.get(name);
+    assert.ok(
+      new RegExp(`\\b${name}\\b`).test(fs.readFileSync(path.join(REPO_ROOT, reader), 'utf8')),
+      `${name} is declared read by ${reader}, but that file no longer mentions it`
+    );
+    assert.ok(
+      !new RegExp(`\\b${name}\\b`).test(startupText),
+      `${name} is declared as a later-phase variable but scripts/startup/ reads it too — ` +
+      'give it a contract entry or wire it into derive-env.sh instead'
+    );
+  }
+});
+
 // ---- validate-env.sh ----
 
 test('a complete .env passes', () => {

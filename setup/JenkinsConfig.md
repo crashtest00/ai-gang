@@ -2,7 +2,10 @@
 
 Setup checklist and configuration record for the AI Gang Jenkins master. Work through each section in order. Check off steps as completed.
 
-**Reference:** `DEVOPS_HANDBOOK_v1.md` for architectural context.
+**Reference:** the DevOps handbook, for architectural context. `JenkinsConfig.md` stays on the
+`/agent-docs` mount (V5.0 Agent Commons Amendment 1, decision 14-2), but the handbook does not: a
+dispatched DevOps session reads its own snapshot copy of it, at the path its dispatch context
+gives — not `DEVOPS_HANDBOOK_v1.md` beside this file on the mount.
 
 ---
 
