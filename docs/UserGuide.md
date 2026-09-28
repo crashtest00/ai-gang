@@ -294,9 +294,9 @@ Choose the appropriate template for your tech stack:
 
 ```bash
 cd ~/ai-gang/projects/<project-name>
-cp ~/ai-gang/Dockerfile-node.template ./Dockerfile
+cp ~/ai-gang/Docker\ Templates/Dockerfile-node.template ./Dockerfile
 # or
-cp ~/ai-gang/Dockerfile-python.template ./Dockerfile
+cp ~/ai-gang/Docker\ Templates/Dockerfile-python.template ./Dockerfile
 ```
 
 Customize as needed for your project's dependencies.

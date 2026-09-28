@@ -27,13 +27,14 @@ over: it is this service's own credential — workitems/views.py already
 authenticates every inbound webhook against `os.environ['WEBHOOK_SECRET']`
 — so this command reads it from its own container environment
 (services/core/.env), the same way it reads everything else Django-side.
-Nothing yet derives WEBHOOK_SECRET into services/core/.env from the
-platform .env (scripts/startup/derive-env.sh does this for every
-JIRA_*_FIELD_ID but not for WEBHOOK_SECRET) — an operator must set it there
-directly today. That gap predates this command (the old ensure_webhook()
-wrote a generated secret into services/scrummaster/.env, a file core-api's
-docker-compose.yml never reads) and is out of BF-02's stated scope; see
-this track's final report for the proposal to close it.
+The operator sets it once in the platform .env, where .env.template documents
+it, and scripts/startup/derive-env.sh carries it into services/core/.env the
+same way it carries the JIRA_*_FIELD_ID values (derive-env.sh:108-110). That
+derivation did not exist when BF-02 moved this registration here, which is why
+this docstring said the gap was open; it was closed in the same build (V5.0
+audit rows 12, 53, and row 107 for this text). Before BF-02 the old
+ensure_webhook() wrote a generated secret into services/scrummaster/.env, a
+file core-api's docker-compose.yml never reads — which was the defect.
 
 Registers `${HQ_URL}/webhooks/jira?secret=<WEBHOOK_SECRET>` — the live
 route (workitems/urls.py), plural, replacing the deleted singular

@@ -389,7 +389,12 @@ cp ~/ai-gang/services/scrummaster/.env.example ~/ai-gang/services/scrummaster/.e
 # All JIRA_*_FIELD_ID vars are already written by Phase 1.1 — do not overwrite them
 # WEBHOOK_SECRET is not one of this file's values — see 2.4 Security below
 cd ~/ai-gang/services/scrummaster && docker compose up -d
-curl http://localhost:9000/health  # should return {"status":"ok"}
+# ScrumMaster publishes no port (see 2.4 Security and this service's
+# docker-compose.yml), so /health is reached from inside the container — the
+# same way scripts/startup/confirm-health.sh reaches it:
+docker exec scrummaster node -e \
+  "fetch('http://localhost:9000/health').then(r => r.text()).then(console.log)"
+# should print {"status":"ok"}
 ```
 
 ### 2.3 Jenkins
