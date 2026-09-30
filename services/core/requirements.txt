@@ -6,6 +6,7 @@ redis>=5.0,<6.0
 python-dotenv>=1.0,<2.0
 gunicorn>=22.0,<27.0
 whitenoise>=6.6,<7.0
+requests>=2.31,<3.0
 
 # Test tooling (pytest-django chosen over Django's built-in TestCase — see
 # services/core/README's test section / final report for why: it lets

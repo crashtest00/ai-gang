@@ -108,6 +108,11 @@ WIS_TMP="$(mktemp)"
   if webhook_secret="$(env_file_get "$AIGANG_ENV_FILE" WEBHOOK_SECRET)" && [[ -n "$webhook_secret" ]]; then
     printf '%s=%s\n' WEBHOOK_SECRET "$webhook_secret"
   fi
+  for jira_credential_var in JIRA_URL JIRA_EMAIL JIRA_TOKEN; do
+    if jira_credential_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_credential_var")" && [[ -n "$jira_credential_value" ]]; then
+      printf '%s=%s\n' "$jira_credential_var" "$jira_credential_value"
+    fi
+  done
   for jira_var in "${JIRA_FIELD_ID_VARS[@]}"; do
     if jira_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_var")" && [[ -n "$jira_value" ]]; then
       printf '%s=%s\n' "$jira_var" "$jira_value"
