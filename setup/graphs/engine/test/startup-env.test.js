@@ -123,17 +123,20 @@ test("every OPTIONAL variable's default matches what .env.template ships", () =>
 
 // Every variable derive-env.sh copies out of the platform .env by name, rather
 // than through the contract's env_value: the `env_file_get "$AIGANG_ENV_FILE"
-// <NAME>` calls, plus the loop over JIRA_FIELD_ID_VARS. Read out of the script
-// so this is the real set, not a restated copy of it.
+// <NAME>` calls, plus the loops over JIRA_FIELD_ID_VARS and, since V5.1's Jira
+// client, JIRA_CREDENTIAL_VARS. Read out of the script so this is the real set,
+// not a restated copy of it.
 function copiedThroughVariables() {
   const text = fs.readFileSync(DERIVE_ENV, 'utf8');
   const names = new Set();
   for (const m of text.matchAll(/env_file_get "\$AIGANG_ENV_FILE" ([A-Z][A-Z0-9_]*)/g)) {
     names.add(m[1]);
   }
-  const list = text.match(/JIRA_FIELD_ID_VARS=\(([^)]*)\)/);
-  assert.ok(list, 'JIRA_FIELD_ID_VARS is no longer an array literal in derive-env.sh');
-  for (const name of list[1].match(/[A-Z][A-Z0-9_]*/g) || []) names.add(name);
+  for (const arrayName of ['JIRA_FIELD_ID_VARS', 'JIRA_CREDENTIAL_VARS']) {
+    const list = text.match(new RegExp(`${arrayName}=\\(([^)]*)\\)`));
+    assert.ok(list, `${arrayName} is no longer an array literal in derive-env.sh`);
+    for (const name of list[1].match(/[A-Z][A-Z0-9_]*/g) || []) names.add(name);
+  }
   assert.ok(names.size > 1, 'found no copied-through variables, so this check would be vacuous');
   return [...names].sort();
 }
@@ -190,10 +193,11 @@ function templateAssignedVariables() {
 // it belongs here only once its one real reader is confirmed, the same way
 // copiedThroughVariables() above is read out of derive-env.sh rather than
 // asserted.
+// JIRA_URL, JIRA_EMAIL and JIRA_TOKEN left this map in V5.1: derive-env.sh now
+// copies all three into services/core/.env for workitems/jira_client.py, so
+// copiedThroughVariables() accounts for them and a later-phase entry would be
+// the wrong answer as well as a duplicate one.
 const DECLARED_FOR_A_LATER_PHASE = new Map([
-  ['JIRA_URL', 'scripts/init-jenkins.sh'],
-  ['JIRA_EMAIL', 'scripts/init-jenkins.sh'],
-  ['JIRA_TOKEN', 'scripts/init-jenkins.sh'],
   ['GITHUB_TOKEN', 'scripts/init-jenkins.sh'],
   ['JENKINS_GITHUB_USER', 'scripts/init-project.sh'],
   ['CF_API_KEY', 'scripts/spike-cloudflare-tunnel-api.sh'],
