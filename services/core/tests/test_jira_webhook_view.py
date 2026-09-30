@@ -22,7 +22,7 @@ from pathlib import Path
 from django.test import Client
 from django.db import connection
 
-from workitems import registry
+from workitems import project_config, registry
 from workitems.models import WorkItem
 from workitems.webhook_consumer import handle_webhook_envelope
 
@@ -131,6 +131,8 @@ def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_column
     monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
     for env_name, field_id in RELEASE_FIELD_IDS.items():
         monkeypatch.setenv(env_name, field_id)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     client = Client()
     stream = registry.webhook_stream_name(PROJECT)
 
@@ -208,6 +210,8 @@ def test_req01_an_update_webhook_for_a_release_ticket_with_no_prior_create_still
     monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
     for env_name, field_id in RELEASE_FIELD_IDS.items():
         monkeypatch.setenv(env_name, field_id)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     client = Client()
     stream = registry.webhook_stream_name(PROJECT)
 
@@ -326,6 +330,12 @@ def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_e
     # consumer for each of registry.get_project_names(), so an unregistered
     # project name would sit unconsumed forever regardless of this test.
     project = PROJECT
+    # REQ-10: run_consumers runs the real webhook consumer against this
+    # project, which otherwise defaults to local mode and would have every
+    # delivery ignored — this test is about exactly-once consumer
+    # mechanics, not REQ-10, so it needs Jira mode to exercise story
+    # materialization at all.
+    project_config.set_mode(project, 'jira')
     client = Client()
 
     total = 6
