@@ -53,6 +53,16 @@ SM_DIR="$AIGANG_ROOT/services/scrummaster"
 # services/scrummaster/src/jira.js already reads, per jira_interpret.py's
 # own module docstring, so one .env can configure both services'
 # custom-field ids identically.
+# The three Jira credentials workitems/jira_client.py reads via os.environ
+# (V5.1 REQ-01, REQ-06). An array literal, on JIRA_FIELD_ID_VARS' pattern
+# below, so setup/graphs/engine's copied-through check can read the set out of
+# this file instead of being told it.
+JIRA_CREDENTIAL_VARS=(
+  JIRA_URL
+  JIRA_EMAIL
+  JIRA_TOKEN
+)
+
 JIRA_FIELD_ID_VARS=(
   JIRA_AGENT_FIELD_ID
   JIRA_BLOCKED_FIELD_ID
@@ -108,7 +118,7 @@ WIS_TMP="$(mktemp)"
   if webhook_secret="$(env_file_get "$AIGANG_ENV_FILE" WEBHOOK_SECRET)" && [[ -n "$webhook_secret" ]]; then
     printf '%s=%s\n' WEBHOOK_SECRET "$webhook_secret"
   fi
-  for jira_credential_var in JIRA_URL JIRA_EMAIL JIRA_TOKEN; do
+  for jira_credential_var in "${JIRA_CREDENTIAL_VARS[@]}"; do
     if jira_credential_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_credential_var")" && [[ -n "$jira_credential_value" ]]; then
       printf '%s=%s\n' "$jira_credential_var" "$jira_credential_value"
     fi
