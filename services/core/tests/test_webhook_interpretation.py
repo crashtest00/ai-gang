@@ -196,10 +196,13 @@ def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, mon
 
 def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals_redispatch(clean_db, monkeypatch):
     monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
-    project_config.set_mode(PROJECT, 'jira')
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Implement thing',
                              'status': 'in-progress', 'assigneeAgentId': 'backend-agent', 'externalKey': 'TP-7'})
+    # REQ-10: the project connects to Jira (with an item already on it)
+    # only after that item exists — connect_jira's own ordering — then the
+    # webhook delivers.
+    project_config.set_mode(PROJECT, 'jira')
 
     fields = {'summary': 'Implement thing', 'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-7', 'fields': fields},
@@ -221,9 +224,9 @@ def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals
 # ---------------------------------------------------------------------------
 
 def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(clean_db):
-    project_config.set_mode(PROJECT, 'jira')
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-8'})
+    project_config.set_mode(PROJECT, 'jira')
 
     body = {
         'webhookEvent': 'comment_created',
@@ -450,9 +453,9 @@ def test_release_done_is_recorded_and_republished(clean_db):
 # ---------------------------------------------------------------------------
 
 def test_issue_link_changelog_entry_is_recorded_not_dropped(clean_db):
-    project_config.set_mode(PROJECT, 'jira')
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-13'})
+    project_config.set_mode(PROJECT, 'jira')
 
     fields = {'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-13', 'fields': fields},
