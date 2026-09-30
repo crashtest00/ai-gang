@@ -309,7 +309,7 @@ envelope schema, stream/group topology, retry, dead-letter, and idempotency
 rules are defined in Durable Agent Messaging with Redis
 Streams. This section documents
 the canonical A2A shape of `payload` for `kind: "task"` and `kind:
-"jira_operation"` — see A2A
+"gateway_operation"` — see A2A
 Messaging. There is no separate
 legacy `type`/`prompt` contract on this path.
 
@@ -359,7 +359,7 @@ different project by writing a different value into its submission — the
 stream is the authority, and an envelope whose declared project doesn't match
 is rejected and dead-lettered without any Jira effect.
 
-Envelope `kind: "jira_operation"`. `payload` is one A2A submission:
+Envelope `kind: "gateway_operation"`. `payload` is one A2A submission:
 
 ```json
 {

@@ -548,7 +548,7 @@ test('REQ-03/REQ-07: a well-formed pipeline_retry publishes and a malformed one 
 test('REQ-07: materializeDecomposition — an action outside REQ-01\'s set, validated by its definition alone', async () => {
   const ok = await publish({
     operation: 'materializeDecomposition',
-    parentJiraIssueKey: 'HW-1',
+    parentWorkItemId: 'a-canonical-parent-work-item-id',
     subtasks: [{ id: 'sub-1', displayName: 'Backend Agent: do it', agent: 'backend-agent' }],
   });
   assert.equal(ok.code, 0, ok.stderr);
@@ -556,9 +556,9 @@ test('REQ-07: materializeDecomposition — an action outside REQ-01\'s set, vali
 
   const noParent = await publish({ operation: 'materializeDecomposition', subtasks: [] });
   assert.notEqual(noParent.code, 0);
-  assert.match(noParent.stderr, /parentJiraIssueKey must be a non-empty string for the "materializeDecomposition" operation/);
+  assert.match(noParent.stderr, /parentWorkItemId must be a non-empty string for the "materializeDecomposition" operation/);
 
-  const noSubtasks = await publish({ operation: 'materializeDecomposition', parentJiraIssueKey: 'HW-1' });
+  const noSubtasks = await publish({ operation: 'materializeDecomposition', parentWorkItemId: 'a-canonical-parent-work-item-id' });
   assert.notEqual(noSubtasks.code, 0);
   assert.match(noSubtasks.stderr, /subtasks must be an array for the "materializeDecomposition" operation/);
 

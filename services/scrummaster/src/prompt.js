@@ -1,7 +1,7 @@
 'use strict';
 
 // Build the Claude Code prompt for a task_assigned-equivalent A2A dispatch.
-// issue: result of jira.getIssue()
+// issue: result of dispatchConsumer.js's issueLikeFromCanonical()
 // agent: result of registry.getAgent()
 // context.allowedAgents (optional): catalog entries for the effective
 // allowed-agent set of the target project, included only for dispatches
@@ -172,26 +172,32 @@ function buildRetryPrompt(issue, agent, evidence, task, message) {
 // constructor in the agent commons reads them itself — an agent names an
 // operation and its fields and authors nothing
 // (agent-commons.md REQ-02/REQ-03, deterministic-gateway-message-tooling.md
-// REQ-04). These three lines are the work item's own references, which an
-// agent reads: the tracker key, and the canonical ids of its specification
-// link and artifact links.
+// REQ-04). These lines are the work item's own references, which an agent
+// reads: its canonical id, its external key where it has one, and the
+// canonical ids of its specification link and artifact links.
+//
+// The work item's own id is the canonical one, in every mode (REQ-06): it is
+// the id every gateway field an agent sends back carries, and the id the A2A
+// Task is registered under. An external key appears only as a further display
+// line, exactly when `issue.externalKey` is set — which
+// dispatchConsumer.js's issueLikeFromCanonical does only for a project
+// configured for an external tracker. An agent names branches, commits and
+// pull requests from whichever of the two the prompt shows, and no
+// ScrumMaster module reads either back to find anything (REQ-07).
 function buildWorkItemReferences(issue) {
   const lines = [];
 
   lines.push(`## WORK ITEM REFERENCES`);
-  lines.push(`Jira issue key: ${issue.key}`);
+  lines.push(`Work item id: ${issue.key}`);
+  if (issue.externalKey) lines.push(`External key: ${issue.externalKey}`);
   // v4.1 agent-artifact-automation.md REQ-04 — named here, not in a
   // conditionally-omitted block: a work item with neither reference must
   // still produce a prompt that SAYS so ("none"), not one that is merely
   // silent about them (REQ-04's acceptance). `issue.specificationLink`/
   // `issue.artifactLinks` come from dispatchConsumer.js's
-  // issueLikeFromCanonical for a local-mode dispatch; a Jira-mode issue
-  // (jira.getIssue()) carries neither, so those dispatches read "none" —
-  // harmless, since this builder is shared across both modes
-  // (build brief §1b carry-forward 2) and REQ-04 scopes the requirement to
-  // the canonical path only. Every value here is an AI Gang canonical id —
-  // never a delivered path, which the building agent obtains by asking the
-  // librarian itself.
+  // issueLikeFromCanonical, so every dispatch carries both. Every value here
+  // is an AI Gang canonical id — never a delivered path, which the building
+  // agent obtains by asking the librarian itself.
   lines.push(`Specification link: ${issue.specificationLink ? `${issue.specificationLink.artifactId} (${issue.specificationLink.requirementId})` : 'none'}`);
   lines.push(`Artifact links: ${(issue.artifactLinks && issue.artifactLinks.length > 0) ? issue.artifactLinks.join(', ') : 'none'}`);
 

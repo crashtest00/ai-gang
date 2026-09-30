@@ -7,8 +7,6 @@ const streams = require('./streams');
 const registry = require('./registry');
 const { startGatewaySubscriber } = require('./gateway');
 const { createServer } = require('./server');
-const { scheduleAgentFieldAudit } = require('./audit');
-const { startJiraCatchupConsumers } = require('./jiraCatchupConsumer');
 const { startDispatchConsumers } = require('./dispatchConsumer');
 
 const PORT = process.env.PORT || 9000;
@@ -23,7 +21,6 @@ async function bootstrapStreams() {
 
   for (const projectName of registry.getProjectNames()) {
     await streams.ensureGroup(client, registry.gatewayStreamName(projectName), registry.GATEWAY_GROUP);
-    await streams.ensureGroup(client, registry.workItemEventStreamName(projectName), registry.JIRA_CATCHUP_GROUP);
     await streams.ensureGroup(client, registry.workItemEventStreamName(projectName), registry.DISPATCH_GROUP);
 
     for (const agent of registry.getEffectiveAgents(projectName)) {
@@ -44,7 +41,6 @@ function everyStreamGroup() {
   const targets = [];
   for (const projectName of registry.getProjectNames()) {
     targets.push({ stream: registry.gatewayStreamName(projectName), group: registry.GATEWAY_GROUP });
-    targets.push({ stream: registry.workItemEventStreamName(projectName), group: registry.JIRA_CATCHUP_GROUP });
     targets.push({ stream: registry.workItemEventStreamName(projectName), group: registry.DISPATCH_GROUP });
     for (const agent of registry.getEffectiveAgents(projectName)) {
       const suffix = agent.routing.channelSuffix;
@@ -87,14 +83,8 @@ async function main() {
   await connect();
   await bootstrapStreams();
   await startGatewaySubscriber();
-  await startJiraCatchupConsumers();
   await startDispatchConsumers();
   scheduleRetention();
-
-  // Startup + every-24h Jira Agent-field drift audit. Runs against live
-  // Jira, so it starts only after redis.connect()
-  // succeeds — no point auditing before the service is otherwise healthy.
-  scheduleAgentFieldAudit();
 
   const app = createServer();
   app.listen(PORT, () => {

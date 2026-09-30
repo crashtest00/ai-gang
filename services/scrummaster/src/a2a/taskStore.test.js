@@ -21,7 +21,7 @@ function freshTask(overrides = {}) {
     id: taskId,
     contextId,
     status: { state: 'submitted', timestamp: new Date().toISOString(), message },
-    metadata: { jiraIssueKey: `KEY-${taskId}` },
+    metadata: { projectName: 'hello-world', agentId: 'backend-agent' },
     ...overrides,
   });
   return { task, message, taskId, contextId, messageId };

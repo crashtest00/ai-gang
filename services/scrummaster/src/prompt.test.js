@@ -60,7 +60,7 @@ test('an empty artifactLinks array reads the same as absent', () => {
   assert.match(prompt, /Artifact links: none/);
 });
 
-test('every reference line names a canonical id only — no delivered path, no tracker key', () => {
+test('every reference line names a canonical id only — no delivered path', () => {
   const issue = baseIssue({
     specificationLink: { artifactId: 'art-spec-1', requirementId: 'REQ-7' },
     artifactLinks: ['art-1'],
@@ -72,9 +72,32 @@ test('every reference line names a canonical id only — no delivered path, no t
 
   assert.doesNotMatch(specLine, /\/workspace|\.\//, 'must not name a delivered path');
   assert.doesNotMatch(artifactLine, /\/workspace|\.\//, 'must not name a delivered path');
-  // The pre-existing tracker-labelled key line is untouched and unrelated
-  // to these two new lines (spec REQ-04's acceptance).
-  assert.match(prompt, /Jira issue key: WI-1/);
+  // v5.1 REQ-06: the work item's own id line carries the canonical id, and the
+  // tracker key never appears under it.
+  assert.match(prompt, /^Work item id: WI-1$/m);
+  assert.doesNotMatch(prompt, /issue key/i);
+});
+
+// v5.1 REQ-06 — the block carries `Work item id: <canonical id>` in every mode,
+// and `External key: <key>` exactly when the issue-like object carries one
+// (which dispatchConsumer.js sets only for a project in Jira mode).
+test('the block carries an External key line exactly when the work item has one', () => {
+  for (const [name, prompt] of Object.entries(everyBuilder(baseIssue({ externalKey: 'GANG-42' })))) {
+    assert.match(prompt, /^Work item id: WI-1$/m, `${name} must name the canonical id`);
+    assert.match(prompt, /^External key: GANG-42$/m, `${name} must show the external key for display`);
+  }
+  for (const [name, prompt] of Object.entries(everyBuilder(baseIssue()))) {
+    assert.match(prompt, /^Work item id: WI-1$/m, `${name} must name the canonical id`);
+    assert.doesNotMatch(prompt, /External key:/, `${name} must omit the line when there is no external key`);
+  }
+});
+
+// The canonical id displaces the tracker key rather than sitting beside it: an
+// external key is shown, but the work item's own id is never one.
+test('no builder labels the work item\'s own id as a tracker key', () => {
+  for (const [name, prompt] of Object.entries(everyBuilder(baseIssue({ externalKey: 'GANG-42' })))) {
+    assert.doesNotMatch(prompt, /Jira issue key/, `${name} must not label any line as a Jira issue key`);
+  }
 });
 
 test('buildUnblockPrompt and buildRetryPrompt render the same reference lines — one shared builder', () => {
@@ -150,7 +173,7 @@ test('no builder renders a term of a submission, or a submission an agent would 
   }
 });
 
-test('the surviving block is WORK ITEM REFERENCES, and it holds exactly the three reference lines', () => {
+test('the surviving block is WORK ITEM REFERENCES, and it holds exactly the reference lines', () => {
   const issue = baseIssue({
     specificationLink: { artifactId: 'art-spec-1', requirementId: 'REQ-7' },
     artifactLinks: ['art-1', 'art-2'],
@@ -161,10 +184,21 @@ test('the surviving block is WORK ITEM REFERENCES, and it holds exactly the thre
     const block = prompt.slice(prompt.indexOf('## WORK ITEM REFERENCES'))
       .split('\n').slice(1).filter(line => line.trim() !== '');
     assert.deepEqual(block, [
-      'Jira issue key: WI-1',
+      'Work item id: WI-1',
       'Specification link: art-spec-1 (REQ-7)',
       'Artifact links: art-1, art-2',
     ], `${name}'s references block must carry those three lines and nothing else`);
+  }
+
+  for (const [name, prompt] of Object.entries(everyBuilder({ ...issue, externalKey: 'GANG-42' }))) {
+    const block = prompt.slice(prompt.indexOf('## WORK ITEM REFERENCES'))
+      .split('\n').slice(1).filter(line => line.trim() !== '');
+    assert.deepEqual(block, [
+      'Work item id: WI-1',
+      'External key: GANG-42',
+      'Specification link: art-spec-1 (REQ-7)',
+      'Artifact links: art-1, art-2',
+    ], `${name}'s block gains exactly one further line for a work item with an external key`);
   }
 });
 

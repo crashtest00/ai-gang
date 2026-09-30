@@ -1,30 +1,13 @@
-"""Mirrors the Node reference implementation's catchup.test.js (not carried into this repository)."""
+"""Covers what remains in catchup.py after v5.1 retired the catch-up push
+(REQ-06): recording an external key, and the mode flip either way."""
 
 from __future__ import annotations
 
 import uuid
 
 from workitems import catchup, project_config, store
-from workitems.models import OutboxEvent
 
 PROJECT = 'test-project'
-
-
-def outbox_event_types_for(project):
-    return list(OutboxEvent.objects.filter(project=project, event_type='work_item.jira_catchup_requested'))
-
-
-def test_req15_start_catchup_push_queues_items_missing_external_key(clean_db):
-    a, b, already_pushed = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    store.create_work_item({'id': a, 'project': PROJECT, 'type': 'task', 'displayName': 'A'})
-    store.create_work_item({'id': b, 'project': PROJECT, 'type': 'task', 'displayName': 'B'})
-    store.create_work_item({'id': already_pushed, 'project': PROJECT, 'type': 'task', 'displayName': 'Already', 'externalKey': 'TP-99'})
-
-    result = catchup.start_catchup_push(PROJECT)
-    assert sorted(result['queued']) == sorted([str(a), str(b)])
-
-    events = outbox_event_types_for(PROJECT)
-    assert len(events) == 2, 'the already-pushed item must be skipped, not re-queued'
 
 
 def test_req15_record_external_key_is_idempotent(clean_db):
@@ -44,18 +27,6 @@ def test_req15_record_external_key_is_idempotent(clean_db):
     assert item.external_key == 'TP-1'
 
 
-def test_req15_resumed_push_after_partial_failure_only_queues_remaining(clean_db):
-    a, b = uuid.uuid4(), uuid.uuid4()
-    store.create_work_item({'id': a, 'project': PROJECT, 'type': 'task', 'displayName': 'A'})
-    store.create_work_item({'id': b, 'project': PROJECT, 'type': 'task', 'displayName': 'B'})
-
-    catchup.start_catchup_push(PROJECT)
-    catchup.record_external_key(a, 'TP-A')
-
-    retry = catchup.start_catchup_push(PROJECT)
-    assert retry['queued'] == [str(b)]
-
-
 def test_req14_connect_and_disconnect_jira(clean_db):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
@@ -68,9 +39,13 @@ def test_req14_connect_and_disconnect_jira(clean_db):
     assert mode['mode'] == 'jira'
     assert mode['jiraProjectKey'] == 'TP'
 
+    # REQ-06: disconnect_jira is the operator's switch back to local mode, and
+    # it keeps the project's recorded tracker key — display-only residue, not a
+    # lookup handle, so there is nothing to reconcile on the way back.
     catchup.disconnect_jira(PROJECT)
     mode = project_config.get_mode(PROJECT)
     assert mode['mode'] == 'local'
+    assert mode['jiraProjectKey'] == 'TP'
 
     item = store.get_work_item(item_id)
     assert item.id == item_id

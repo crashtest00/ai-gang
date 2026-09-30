@@ -24,7 +24,7 @@ const SCHEMA_VERSION = '1';
 const KIND = Object.freeze({
   TASK: 'task',
   TASK_STATUS: 'task_status',
-  JIRA_OPERATION: 'jira_operation',
+  GATEWAY_OPERATION: 'gateway_operation',
   WEBHOOK_EVENT: 'webhook_event',
   // A command into, or an outbound change/rejection event out of, the
   // core service's canonical work-item store (V2). Carried

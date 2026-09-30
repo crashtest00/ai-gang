@@ -146,13 +146,11 @@ function register(task) {
   const existing = tasksById.get(task.id);
   if (existing) return existing;
 
-  const jiraIssueKey = task.metadata && task.metadata.jiraIssueKey;
   const initialMessage = task.status.message || null;
 
   const record = {
     id: task.id,
     contextId: task.contextId,
-    jiraIssueKey: jiraIssueKey || null,
     metadata: task.metadata || {},
     state: task.status.state,
     messages: [],

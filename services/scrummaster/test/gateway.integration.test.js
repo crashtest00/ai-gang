@@ -2,11 +2,15 @@
 
 // End-to-end exercise of the gateway stream consumer against a real Redis
 // instance, using gateway.js's actual public entry point
-// (startGatewaySubscriber/stopGatewaySubscriber), with jira.js's network
-// calls monkey-patched to an in-memory fake. Node caches CommonJS modules by
-// reference, so mutating the already-required `jira` module's exports here
-// also affects gateway.js/handlers.js, which `require('./jira')` the same
-// cached object — no production code changes needed to make this testable.
+// (startGatewaySubscriber/stopGatewaySubscriber), with canonicalWorkItems.js's
+// network calls monkey-patched to an in-memory fake `core`. Node caches
+// CommonJS modules by reference, so mutating the already-required module's
+// exports here also affects gateway.js, which requires the same cached object
+// — no production code changes needed to make this testable.
+//
+// From v5.1 there is one destination for every gateway side effect: a
+// canonical command on core's Streams command channel (REQ-04, REQ-05). The
+// fake below is that channel, and a Task's id is the work item's canonical id.
 //
 // Gateway submissions use the canonical A2A payload shape ({ state, message,
 // artifacts? }), not the legacy
@@ -24,7 +28,6 @@ process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '..', 'config', 'project
 process.env.REDIS_HOST = process.env.REDIS_TEST_HOST || 'localhost';
 process.env.REDIS_PORT = process.env.REDIS_TEST_PORT || '16399';
 
-const jira = require('../src/jira');
 const registry = require('../src/registry');
 const streams = require('../src/streams');
 const dependencies = require('../src/dependencies');
@@ -37,26 +40,18 @@ const redisModule = require('../src/redis');
 
 let client;
 
-const fakeJira = {
-  issues: new Map(),
-  comments: [],
-  blocked: new Map(),
-  agentField: new Map(),
-  transitions: [],
-  nextSubtaskSeq: 1,
+// The in-memory stand-in for core's command channel: every command the
+// gateway publishes, in order.
+const fakeCore = {
+  commands: [],
 };
 
-function resetFakeJira() {
-  fakeJira.issues.clear();
-  fakeJira.comments = [];
-  fakeJira.blocked.clear();
-  fakeJira.agentField.clear();
-  fakeJira.transitions = [];
-  fakeJira.nextSubtaskSeq = 1;
-  fakeJira.issues.set('HW-1', {
-    key: 'HW-1', summary: 'Parent story', project: 'HW', projectName: 'hello-world',
-    comments: [], parent: null,
-  });
+function resetFakeCore() {
+  fakeCore.commands = [];
+}
+
+function commandsOf(command) {
+  return fakeCore.commands.filter(c => c.command === command);
 }
 
 // Register a Task in the in-memory store the way handlers.js's dispatchTask
@@ -71,7 +66,7 @@ function registerTask(taskId, { contextId = taskId, agentId = 'backend-agent' } 
     id: taskId,
     contextId,
     status: { state: 'submitted', timestamp: new Date().toISOString(), message },
-    metadata: { jiraIssueKey: taskId, jiraProjectKey: 'HW', jiraProjectName: 'hello-world', agentId },
+    metadata: { jiraProjectKey: 'HW', projectName: 'hello-world', agentId },
   }));
   return messageId;
 }
@@ -80,23 +75,11 @@ before(async () => {
   await redisModule.connect();
   client = redisModule.getClient();
 
-  jira.postComment = async (key, body) => { fakeJira.comments.push({ key, body }); };
-  jira.setBlockedField = async (key, val) => { fakeJira.blocked.set(key, val); };
-  jira.setAgentField = async (key, val) => { fakeJira.agentField.set(key, val); };
-  jira.transitionIssue = async (key, status) => { fakeJira.transitions.push({ key, status }); };
-  jira.getIssue = async (key) => {
-    const issue = fakeJira.issues.get(key);
-    if (!issue) throw new Error(`fake jira: no such issue ${key}`);
-    return { ...issue, comments: issue.comments || [] };
+  canonicalWorkItems.publishCommand = async (project, payload) => {
+    fakeCore.commands.push({ project, ...payload });
+    return { deduped: false };
   };
-  jira.createSubtask = async (parentKey, projectKey, summary, _description, agentFieldValue) => {
-    const subtaskKey = `HW-${100 + fakeJira.nextSubtaskSeq++}`;
-    fakeJira.issues.set(subtaskKey, {
-      key: subtaskKey, summary, project: projectKey, projectName: 'hello-world',
-      parent: parentKey, comments: [], agent: agentFieldValue,
-    });
-    return subtaskKey;
-  };
+  canonicalWorkItems.getWorkItem = async (id) => ({ id, status: 'ready' });
 });
 
 after(async () => {
@@ -105,11 +88,8 @@ after(async () => {
 
 beforeEach(async () => {
   await client.flushDb();
-  resetFakeJira();
+  resetFakeCore();
   taskStore._reset();
-  // These fixtures exercise Jira projection; local-mode cases override it.
-  // Keep the mode lookup at the same mocked network boundary as Jira.
-  canonicalWorkItems.getMode = async () => ({ mode: 'jira' });
 });
 
 function gatewayStream() { return registry.gatewayStreamName('hello-world'); }
@@ -134,9 +114,9 @@ function a2aPayload({ taskId, contextId, referenceMessageId, state, parts, artif
 
 async function publishGatewayOp(payload, { messageId } = {}) {
   const envelope = buildEnvelope({
-    kind: KIND.JIRA_OPERATION,
+    kind: KIND.GATEWAY_OPERATION,
     project: 'hello-world',
-    taskId: payload.message?.taskId || payload.parentJiraIssueKey || null,
+    taskId: payload.message?.taskId || payload.parentWorkItemId || null,
     contextId: payload.message?.contextId || null,
     payload,
     messageId,
@@ -172,7 +152,7 @@ async function waitForFailedMessage(taskId, timeoutMs = 3000) {
   throw new Error(`timed out waiting for a failed message on task ${taskId}`);
 }
 
-test('create_subtask creates the subtask once and dispatches exactly one task, even when redelivered', async () => {
+test('create_subtask forwards exactly one materialization command, even when redelivered', async () => {
   const lastMessageId = registerTask('HW-1', { agentId: 'refinement-agent' });
 
   const envelope = await publishGatewayOp(a2aPayload({
@@ -192,31 +172,28 @@ test('create_subtask creates the subtask once and dispatches exactly one task, e
 
   await gateway.startGatewaySubscriber();
   try {
-    await waitForXLen(agentStream('backend'), 1);
+    await waitFor(() => commandsOf('materializeDecomposition').length === 1, 'the subtask to be forwarded to core');
     // Give the second (duplicate) entry a chance to be processed too.
     await new Promise(r => setTimeout(r, 300));
   } finally {
     await gateway.stopGatewaySubscriber();
   }
 
-  assert.equal(fakeJira.issues.size, 2, 'exactly one subtask should have been created');
-  const subtaskKeys = [...fakeJira.issues.keys()].filter(k => k !== 'HW-1');
-  assert.equal(subtaskKeys.length, 1);
+  const materializations = commandsOf('materializeDecomposition');
+  assert.equal(materializations.length, 1, 'exactly one materialization, not two');
+  assert.equal(materializations[0].message.parentWorkItemId, 'HW-1');
+  assert.equal(materializations[0].message.subtasks.length, 1);
+  assert.equal(materializations[0].message.subtasks[0].agent, 'backend-agent');
 
-  assert.equal(await client.xLen(agentStream('backend')), 1, 'exactly one task dispatch, not two');
-  const dispatched = await client.xRange(agentStream('backend'), '-', '+');
-  const dispatchedEnvelope = fromStreamFields(dispatched[0].message);
-  assert.equal(dispatchedEnvelope.taskId, subtaskKeys[0]);
-  assert.equal(dispatchedEnvelope.contextId, 'HW-1');
-  assert.equal(dispatchedEnvelope.payload.role, 'client');
-
-  assert.equal(fakeJira.transitions.filter(t => t.key === subtaskKeys[0] && t.status === 'In Progress').length, 1);
+  // The gateway must NOT dispatch the subtask itself: core materializes it,
+  // and dispatchConsumer.js picks its own `ready` event up.
+  assert.equal(await client.xLen(agentStream('backend')), 0, 'the gateway dispatches nothing directly');
 });
 
-test('a gateway envelope claiming the wrong project is dead-lettered without any Jira effect', async () => {
+test('a gateway envelope claiming the wrong project is dead-lettered without any canonical write', async () => {
   registerTask('HW-1');
   const foreignEnvelope = buildEnvelope({
-    kind: KIND.JIRA_OPERATION,
+    kind: KIND.GATEWAY_OPERATION,
     project: 'hello-desktop', // claims a DIFFERENT project than the stream it's on
     taskId: 'HW-1',
     payload: a2aPayload({
@@ -233,10 +210,10 @@ test('a gateway envelope claiming the wrong project is dead-lettered without any
     await gateway.stopGatewaySubscriber();
   }
 
-  assert.equal(fakeJira.comments.length, 0, 'no Jira comment should have been posted');
+  assert.deepEqual(fakeCore.commands, [], 'nothing should have been written to core');
 });
 
-test('comment operation posts to Jira exactly once even if delivered twice with the same messageId', async () => {
+test('comment operation appends exactly once even if delivered twice with the same messageId', async () => {
   const lastMessageId = registerTask('HW-1');
 
   const envelope = await publishGatewayOp(a2aPayload({
@@ -258,13 +235,11 @@ test('comment operation posts to Jira exactly once even if delivered twice with 
     await gateway.stopGatewaySubscriber();
   }
 
-  assert.equal(fakeJira.comments.length, 1);
-  assert.match(fakeJira.comments[0].body, /Finished the thing/);
+  assert.equal(commandsOf('appendComment').length, 1);
+  assert.match(commandsOf('appendComment')[0].body, /Finished the thing/);
 });
 
 test('durably accepted out-of-order subtask chain defers completion until both predecessors succeed', async () => {
-  const originalGetMode = canonicalWorkItems.getMode;
-  canonicalWorkItems.getMode = async () => ({ mode: 'jira' });
   const seedMessageId = registerTask('HW-1', { agentId: 'refinement-agent' });
 
   const firstPayload = a2aPayload({
@@ -290,33 +265,29 @@ test('durably accepted out-of-order subtask chain defers completion until both p
   const second = await publishGatewayOp(secondPayload);
   const completion = await publishGatewayOp(completionPayload);
 
-  try {
-    await assert.rejects(
-      gateway._handleA2ASubmission(completion, 'hello-world'),
-      taskStore.A2ACausalDependencyPendingError
-    );
-    await assert.rejects(
-      gateway._handleA2ASubmission(second, 'hello-world'),
-      taskStore.A2ACausalDependencyPendingError
-    );
-    assert.equal(taskStore.getTaskById('HW-1').state, 'submitted');
+  await assert.rejects(
+    gateway._handleA2ASubmission(completion, 'hello-world'),
+    taskStore.A2ACausalDependencyPendingError
+  );
+  await assert.rejects(
+    gateway._handleA2ASubmission(second, 'hello-world'),
+    taskStore.A2ACausalDependencyPendingError
+  );
+  assert.equal(taskStore.getTaskById('HW-1').state, 'submitted');
 
-    await gateway._handleA2ASubmission(first, 'hello-world');
-    assert.equal(taskStore.getTaskById('HW-1').state, 'working');
-    await gateway._handleA2ASubmission(second, 'hello-world');
-    assert.equal(taskStore.getTaskById('HW-1').state, 'working');
-    await gateway._handleA2ASubmission(completion, 'hello-world');
+  await gateway._handleA2ASubmission(first, 'hello-world');
+  assert.equal(taskStore.getTaskById('HW-1').state, 'working');
+  await gateway._handleA2ASubmission(second, 'hello-world');
+  assert.equal(taskStore.getTaskById('HW-1').state, 'working');
+  await gateway._handleA2ASubmission(completion, 'hello-world');
 
-    const record = taskStore.getTaskById('HW-1');
-    assert.equal(record.state, 'completed');
-    assert.deepEqual(
-      record.messages.slice(-3).map(message => message.messageId),
-      [firstPayload.message.messageId, secondPayload.message.messageId, completionPayload.message.messageId]
-    );
-    assert.equal([...fakeJira.issues.keys()].filter(key => key !== 'HW-1').length, 2);
-  } finally {
-    canonicalWorkItems.getMode = originalGetMode;
-  }
+  const record = taskStore.getTaskById('HW-1');
+  assert.equal(record.state, 'completed');
+  assert.deepEqual(
+    record.messages.slice(-3).map(message => message.messageId),
+    [firstPayload.message.messageId, secondPayload.message.messageId, completionPayload.message.messageId]
+  );
+  assert.equal(commandsOf('materializeDecomposition').length, 2);
 });
 
 test('a materializeDecomposition operation routes to dependencies.js and is acked on success', async () => {
@@ -324,13 +295,13 @@ test('a materializeDecomposition operation routes to dependencies.js and is acke
   let calledWith = null;
   dependencies.routeMaterialization = async (message, projectName) => {
     calledWith = { message, projectName };
-    return { idToKey: new Map([['proposal-1', 'HW-101']]) };
+    return { deduped: false };
   };
 
   try {
     await publishGatewayOp({
       operation: 'materializeDecomposition',
-      parentJiraIssueKey: 'HW-1',
+      parentWorkItemId: 'HW-1',
       subtasks: [{ id: 'proposal-1', displayName: 'x', description: 'y', agent: 'backend-agent', 'Blocked By': [] }],
     });
 
@@ -350,21 +321,23 @@ test('a materializeDecomposition operation routes to dependencies.js and is acke
   }
 });
 
-test('a MaterializationValidationError from dependencies.js is dead-lettered, not retried', async () => {
+// A rejected or stalled decomposition is core's to report and dead-letter now
+// (materialize.py), so the gateway sees no such failure. What it must still do
+// is dead-letter a permanent failure to forward at all, without retrying it.
+test('a permanent failure from dependencies.js is dead-lettered, not retried', async () => {
   const originalFn = dependencies.routeMaterialization;
   let attempts = 0;
   dependencies.routeMaterialization = async () => {
     attempts += 1;
-    throw new dependencies.MaterializationValidationError(
-      [{ subtaskId: 'proposal-1', displayName: 'x', requestedAgent: 'nope-agent' }],
-      ['backend-agent']
-    );
+    const err = new Error('the decomposition could not be forwarded');
+    err.permanent = true;
+    throw err;
   };
 
   try {
     await publishGatewayOp({
       operation: 'materializeDecomposition',
-      parentJiraIssueKey: 'HW-1',
+      parentWorkItemId: 'HW-1',
       subtasks: [{ id: 'proposal-1', displayName: 'x', description: 'y', agent: 'nope-agent', 'Blocked By': [] }],
     });
 
@@ -375,60 +348,43 @@ test('a MaterializationValidationError from dependencies.js is dead-lettered, no
       await gateway.stopGatewaySubscriber();
     }
 
-    assert.equal(attempts, 1, 'a validation failure must not be retried');
+    assert.equal(attempts, 1, 'a permanent failure must not be retried');
   } finally {
     dependencies.routeMaterialization = originalFn;
   }
 });
 
-// Regression test for a gap that a passing unit test hid: mode-aware routing
-// (dependencies.js's routeMaterialization) was built and covered in
-// isolation, but gateway.js's dispatch path called
-// dependencies.materializeDecomposition directly, bypassing it entirely — so
-// a local-mode project's decomposition silently kept going straight to Jira
-// in production while everything written to cover it still passed. This test
-// exercises gateway.js's real, unmocked entry point end to end and would
-// have failed against that bug.
-test('a materializeDecomposition operation for a local-mode project publishes to the core service, not Jira', async () => {
+// REQ-06's acceptance, end to end through gateway.js's real, unmocked entry
+// point: a decomposition becomes one canonical command carrying the parent's
+// canonical id, with no mode read and no second destination. The regression
+// this guards is the original one — a passing unit test on
+// routeMaterialization while the gateway's dispatch path bypassed it.
+test('a materializeDecomposition operation publishes one canonical command carrying the parent work item id', async () => {
+  let modeReads = 0;
   const originalGetMode = canonicalWorkItems.getMode;
-  const originalPublishCommand = canonicalWorkItems.publishCommand;
-  const originalCreateSubtask = jira.createSubtaskForProposal;
-  const publishedCommands = [];
-  let jiraSubtaskCalls = 0;
-
-  canonicalWorkItems.getMode = async () => ({ mode: 'local' });
-  canonicalWorkItems.publishCommand = async (project, payload) => {
-    publishedCommands.push({ project, payload });
-    return { deduped: false };
-  };
-  jira.createSubtaskForProposal = async (...args) => {
-    jiraSubtaskCalls += 1;
-    return originalCreateSubtask(...args);
-  };
+  canonicalWorkItems.getMode = async (...args) => { modeReads += 1; return originalGetMode(...args); };
 
   try {
     await publishGatewayOp({
       operation: 'materializeDecomposition',
-      parentJiraIssueKey: 'local-parent-work-item-id',
+      parentWorkItemId: 'local-parent-work-item-id',
       subtasks: [{ id: 'proposal-1', displayName: 'x', description: 'y', agent: 'backend-agent', 'Blocked By': [] }],
     });
 
     await gateway.startGatewaySubscriber();
     try {
-      await new Promise(r => setTimeout(r, 400));
+      await waitFor(() => commandsOf('materializeDecomposition').length === 1, 'the decomposition to reach core');
     } finally {
       await gateway.stopGatewaySubscriber();
     }
 
-    assert.equal(publishedCommands.length, 1, 'local mode must publish a canonical materializeDecomposition command');
-    assert.equal(publishedCommands[0].payload.command, 'materializeDecomposition');
-    assert.equal(publishedCommands[0].payload.message.parentWorkItemId, 'local-parent-work-item-id');
-    assert.equal(jiraSubtaskCalls, 0, 'local mode must never touch Jira directly');
+    const materializations = commandsOf('materializeDecomposition');
+    assert.equal(materializations.length, 1);
+    assert.equal(materializations[0].message.parentWorkItemId, 'local-parent-work-item-id');
+    assert.equal(modeReads, 0, 'no mode branch survives on this path');
     assert.equal((await client.xPending(gatewayStream(), registry.GATEWAY_GROUP)).pending, 0, 'entry should be acked');
   } finally {
     canonicalWorkItems.getMode = originalGetMode;
-    canonicalWorkItems.publishCommand = originalPublishCommand;
-    jira.createSubtaskForProposal = originalCreateSubtask;
   }
 });
 
@@ -454,8 +410,8 @@ test('a submission that exhausts its transient retries is recorded failed on its
     parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })],
   }));
 
-  const originalPostComment = jira.postComment;
-  jira.postComment = async () => { throw new Error('transient jira outage'); };
+  const originalPublishCommand = canonicalWorkItems.publishCommand;
+  canonicalWorkItems.publishCommand = async () => { throw new Error('transient core outage'); };
 
   const consumer = streams.createConsumer(client, {
     stream: gatewayStream(),
@@ -473,7 +429,7 @@ test('a submission that exhausts its transient retries is recorded failed on its
     await waitForFailedMessage('HW-1', 2000);
   } finally {
     await consumer.stop();
-    jira.postComment = originalPostComment;
+    canonicalWorkItems.publishCommand = originalPublishCommand;
   }
 
   assert.deepEqual(taskStore.failedMessageIds('HW-1'), [submission.payload.message.messageId]);
@@ -593,7 +549,7 @@ test('a late duplicate entry for a terminal task is acknowledged once and does n
     logLines.filter(line => line.includes('Task completed for HW-1')).length, 1,
     'the completion must be reported once, not once per delivery'
   );
-  assert.equal(fakeJira.comments.length, 1, 'and its comment posted once');
+  assert.equal(commandsOf('appendComment').length, 1, 'and its comment appended once');
   assert.equal(await client.xLen(streams.deadLetterStreamName(gatewayStream())), 0,
     'a duplicate is not a failure and must never dead-letter');
   assert.equal((await client.xPending(gatewayStream(), registry.GATEWAY_GROUP)).pending, 0,
@@ -650,7 +606,7 @@ test('a later message for a task that already finished is acknowledged and repor
     assert.notEqual(late.payload.message.messageId, completion.payload.message.messageId,
       'this must not be the same message as the completion — otherwise it is the duplicate case, not this one');
 
-    await waitFor(() => fakeJira.comments.length === 2, 'the late message to be reported on the work item');
+    await waitFor(() => commandsOf('appendComment').length === 2, 'the late message to be reported on the work item');
     // Several retry/reclaim cycles at this consumer's timings — long enough
     // for a retry, a dead letter or a second report to have appeared.
     await new Promise(r => setTimeout(r, 400));
@@ -665,9 +621,9 @@ test('a later message for a task that already finished is acknowledged and repor
   assert.equal(taskStore.failedMessageIds('HW-1').length, 0,
     'so nothing is recorded failed against a task that genuinely finished');
 
-  const reports = fakeJira.comments.filter(c => /already finished/.test(c.body));
+  const reports = commandsOf('appendComment').filter(c => /already finished/.test(c.body));
   assert.equal(reports.length, 1, 'exactly one comment, saying the work had already finished');
-  assert.equal(reports[0].key, 'HW-1');
+  assert.equal(reports[0].workItemId, 'HW-1');
   assert.match(reports[0].body, /completed/, 'and naming the outcome it finished with');
 
   // The whole point: the container's own later report for this task still

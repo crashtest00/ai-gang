@@ -3,23 +3,19 @@
 // Dispatch is triggered by canonical domain events, not by ingestion path.
 // A work item's transition into a dispatch-eligible state MUST trigger
 // agent dispatch via the SAME mechanism regardless of which mode or
-// ingress produced that transition — a Jira-originated event validated by
-// core, a Django Admin Panel write (local mode), or any
+// ingress produced that transition — an externally-originated event
+// validated by core, a Django Admin Panel write, or any
 // future ingress. This is that single mechanism: one durable Streams
 // consumer on core's outbound canonical-event stream
-// (aigang:workitems:{project}:events — the same stream
-// jiraCatchupConsumer.js already consumes, for a different purpose; this
-// is a second, independent consumer group, Streams' normal fan-out).
+// (aigang:workitems:{project}:events), as one consumer group among the
+// groups any interested subscriber creates there.
 //
-// This is ALSO where ScrumMaster's now-deleted `routeWebhookEvent`
-// Jira-mode side effects (posting a comment, setting the Agent/Blocked
-// custom fields, mirroring a dispatch to Jira's "In Progress" status,
-// triggering the Release Jenkins jobs) are re-homed, driven by the small,
-// already-Django-decided `work_item.jira_side_effect`/
-// `work_item.jira_release_event` canonical events
-// workitems/webhook_consumer.py now publishes — this module never
-// interprets a raw Jira field name, status string, or changelog shape
-// itself; it only executes what Django already decided.
+// Every side effect this module performs is a canonical one, decided in
+// Django and executed here against the canonical store or Jenkins. From v5.1
+// no ScrumMaster module calls an external tracker at all (REQ-04, REQ-05), so
+// the side-effect events this consumer acts on are the canonical ones alone:
+// a cleared-block redispatch, and a release event it can resolve to a
+// canonical work item.
 //
 // Known simplification (flagged in the final report): dispatch-eligibility
 // below checks `status === 'ready'` literally rather than resolving a
@@ -34,7 +30,6 @@
 const redis = require('./redis');
 const registry = require('./registry');
 const streams = require('./streams');
-const jira = require('./jira');
 const canonicalWorkItems = require('./canonicalWorkItems');
 const taskStore = require('./a2a/taskStore');
 const handlers = require('./handlers');
@@ -65,22 +60,30 @@ async function stopDispatchConsumers() {
 }
 
 // Map a canonical work item (core's full-record HTTP shape,
-// serializers.serialize_work_item_full) into the same "issue"-shaped
-// object jira.getIssue() returns, so the existing dispatchTask/
-// buildTaskPrompt/buildUnblockPrompt/buildRetryPrompt pipeline needs no
-// local-mode-specific branch of its own — dispatch deliberately has no
-// local-mode-specific code path.
-function issueLikeFromCanonical(full) {
+// serializers.serialize_work_item_full) into the "issue"-shaped object the
+// dispatchTask/buildTaskPrompt/buildUnblockPrompt/buildRetryPrompt pipeline
+// takes. From v5.1 this is the only such object ScrumMaster ever builds, in
+// every mode, and every name on it is a canonical one.
+//
+// `mode` is the project's own configuration (canonicalWorkItems.getMode's
+// result) or null. It decides two display-only fields and nothing else: the
+// work item's `externalKey`, carried for the prompt's `External key:` line
+// and set only for a project in Jira mode, and the project's own tracker key.
+// Neither is read to resolve anything, here or anywhere else in ScrumMaster
+// (REQ-07).
+function issueLikeFromCanonical(full, mode = null) {
   const detail = full.storyDetail || {};
+  const jiraMode = !!mode && mode.mode === 'jira';
   return {
     key: full.id,
-    project: full.project,
+    externalKey: jiraMode ? (full.external_key || null) : null,
+    jiraProjectKey: (mode && mode.jiraProjectKey) || null,
     projectName: full.project,
     parent: full.parent_id || null,
     summary: full.display_name,
     description: full.description || '',
     status: full.status,
-    issuetype: full.type === 'story' ? 'Story' : 'Task',
+    type: full.type,
     agent: full.assignee_agent_id,
     behavior: detail.behavior || null,
     acceptanceCriteria: detail.acceptance_criteria || null,
@@ -99,61 +102,15 @@ function issueLikeFromCanonical(full) {
   };
 }
 
-// Jira-mode: always fetch the live issue for full fidelity, exactly as
-// every dispatch before this change did — the canonical mirror is
-// authoritative for status/assignment but does not project every
-// Jira-only field (summary/description text formatting, live comment
-// authorship) into canonical events. Local mode: no Jira issue exists at
-// all, so the canonical record IS the full record.
-//
-// `external_key` only means something when this project actually has a live
-// Jira integration to resolve it against — a local-mode project's supported
-// path is the one the UserGuide documents, leaving it blank. A work item
-// that carries one anyway (typed in believing it was optional metadata, say)
-// would otherwise reach jira.getIssue() below and get a 404 that reads as a
-// transient failure — retried to exhaustion with no subtask, no agent
-// dispatch, and no pull request, and nothing telling the operator why.
-// Caught here, before ever calling Jira: explained on the item itself (the
-// only place an operator watching Django admin will see it — there is no
-// Jira ticket to comment on) and refused permanently, so it dead-letters
-// once instead of burning its retry budget on something a retry can never
-// fix.
+// The canonical record IS the full record, in every mode: from v5.1 no
+// ScrumMaster module reads a tracker (REQ-05), so there is no live issue to
+// fetch and no branch on a work item's external key. The project's mode is
+// read for one reason only — whether the issue-like object carries the work
+// item's external key and the project's tracker key for display
+// (issueLikeFromCanonical above).
 async function issueLikeFor(full) {
-  if (full.external_key) {
-    const mode = await canonicalWorkItems.getMode(full.project);
-    if (mode.mode !== 'jira') {
-      await explainUnsupportedExternalKey(full);
-      const err = new Error(
-        `Work item ${full.id} has an External key ("${full.external_key}") but project "${full.project}" has no Jira integration configured`
-      );
-      err.permanent = true;
-      throw err;
-    }
-    return jira.getIssue(full.external_key);
-  }
-  return issueLikeFromCanonical(full);
-}
-
-async function explainUnsupportedExternalKey(full) {
-  const body =
-    `[system] Cannot dispatch this item — it has an External key ("${full.external_key}") set, but this ` +
-    `project has no Jira integration configured. External key must stay blank until one is set up; clear ` +
-    `it and save to retry.`;
-
-  await canonicalWorkItems.publishCommand(full.project, {
-    command: 'appendComment',
-    actor: 'system',
-    workItemId: full.id,
-    author: 'system',
-    body,
-    referenceFile: null,
-    referenceFunction: null,
-    sourceMessageId: null,
-  });
-  await canonicalWorkItems.publishCommand(full.project, {
-    command: 'transitionStatus', actor: 'system', workItemId: full.id, status: 'needs-clarification',
-  });
-  console.error(`[dispatch] Work item ${full.id} has an unsupported External key ("${full.external_key}") for a local-mode project — refusing dispatch`);
+  const mode = await canonicalWorkItems.getMode(full.project);
+  return issueLikeFromCanonical(full, mode);
 }
 
 async function maybeDispatch(workItemId, envelope) {
@@ -175,21 +132,20 @@ async function maybeDispatch(workItemId, envelope) {
 
   let promptFactory;
   if (isRefinement) {
-    // handleStoryCreated/handleBlockedCleared's refinement-agent branch:
-    // always the full task prompt (with the project's allowed-agent set),
-    // never the bare unblock prompt, whether this is the Story's first
-    // dispatch or a redispatch after its required fields were filled in.
+    // The Refinement Agent always gets the full task prompt (with the
+    // project's allowed-agent set), never the bare unblock prompt, whether
+    // this is the story's first dispatch or a redispatch after its required
+    // fields were filled in.
     const allowedAgents = registry.getEffectiveAgents(full.project);
     promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { allowedAgents, task, message });
   } else if (!existingTask) {
-    // handleShovelReady's branch: a fresh dispatch (first time this item
-    // has ever been assigned a Task).
+    // A fresh dispatch: the first time this item has ever been assigned a
+    // Task.
     promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { task, message });
   } else {
     // A dev-agent item reaching 'ready' again after already having a Task
     // (e.g. a dependency-blocked subtask unblocked, then re-readied) —
-    // resume via the same BLOCKED-marker search handleBlockedCleared's
-    // non-refinement branch used.
+    // resume via the BLOCKED-marker search.
     const blockedMarker = await handlers.findBlockedMarker(issueLike.key);
     promptFactory = (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker);
   }
@@ -198,51 +154,32 @@ async function maybeDispatch(workItemId, envelope) {
 
   // Post-dispatch, the work item must stop reading as merely waiting to be
   // picked up: an agent now has it, and the only place an operator can see
-  // that is the item's own status.
+  // that is the item's own status. So the item itself is moved to
+  // 'in-progress' — for every dispatch made here, in every mode, refinement
+  // included: nothing else ever moves it off 'ready', and an item being
+  // decomposed is being worked just as much as one being implemented. Until
+  // this, an item could be dispatched, worked, and have a pull request
+  // opened on it while still displaying as ready to pick up.
   //
-  // With a Jira integration, that is the linked issue's "In Progress"
-  // status, mirrored exactly as it always has been for a dev-agent dispatch
-  // — and, as before, not for a refinement dispatch, whose ticket a human
-  // moves on the Jira board. An external key can only be present at all
-  // when the project has a live Jira integration (issueLikeFor above
-  // refuses it otherwise), so it is the whole condition for that branch.
-  //
-  // Without a Jira integration there is no issue to mirror onto, and the
-  // canonical record is the only thing anyone can look at. So the item
-  // itself is moved to 'in-progress' — for every dispatch made here,
-  // refinement included: nothing else ever moves it off 'ready', and an
-  // item being decomposed is being worked just as much as one being
-  // implemented. Until this, an item could be dispatched, worked, and have
-  // a pull request opened on it while still displaying as ready to pick up.
+  // One command, no mode branch (REQ-04): for a project in Jira mode core's
+  // own write gate refuses this command and dead-letters it as
+  // WRITE_GATE_REJECTED, which is what "Jira mode is off" means in v5.1 —
+  // ScrumMaster publishes the same canonical command either way and decides
+  // nothing about the tracker.
   //
   // That transition echoes back as a status-changed event this same
   // consumer reads. It costs nothing and repeats nothing: maybeDispatch's
   // own `status !== 'ready'` guard above rejects the echo, and
   // maybeRedispatchForRework acts only on an 'in-review' -> 'in-progress'
   // history entry, which this is not.
-  if (full.external_key) {
-    if (!isRefinement) await jira.transitionIssue(full.external_key, 'In Progress');
-    return;
-  }
-
-  // An item with no external key in a Jira-mode project has no issue to
-  // mirror onto AND no accepted direct-write path either — the internal API
-  // accepts a status write only from a validated Jira-originated event
-  // while a project is in Jira mode — so there is nothing this can do but
-  // leave it alone.
-  const mode = await canonicalWorkItems.getMode(full.project);
-  if (mode.mode === 'jira') return;
-
   await canonicalWorkItems.publishCommand(full.project, {
     command: 'transitionStatus', actor: full.assignee_agent_id, workItemId: full.id, status: 'in-progress',
   });
 }
 
-// handleReworkRequested's trigger: a human moved a ticket from "In Review"
-// back to "In Progress". Detected from the
-// item's own append-only history rather than from any Jira-specific
-// string — the canonical status_changed event and the history row behind
-// it are all this needs.
+// A human sent a work item back for rework after review. Detected from the
+// item's own append-only history — the canonical status_changed event and the
+// history row behind it are all this needs.
 async function maybeRedispatchForRework(workItemId, envelope) {
   if (!workItemId) return;
   const full = await canonicalWorkItems.getWorkItem(workItemId, { full: true });
@@ -262,42 +199,10 @@ async function maybeRedispatchForRework(workItemId, envelope) {
   });
 }
 
-// handleStoryCreated / handleBlockedCleared's refinement-agent branch's
-// Jira-visible side effects — the DECISION (what happened, what the
-// comment should say) was already made in Django
-// (workitems/webhook_consumer.py's `_handle_story_created`/
-// `_handle_blocked_field_change`); this only executes it.
-async function handleStoryIntake(detail, jiraIssueKey) {
-  const { ok, missing, reblock } = detail || {};
-
-  if (reblock) {
-    const list = (missing || []).map(l => `  - ${l}`).join('\n');
-    await jira.postComment(
-      jiraIssueKey,
-      `Story is still missing required fields and cannot be refined until they are filled in:\n\n${list}\n\nPlease complete these fields and clear the Blocked field again to retry.`
-    );
-    await jira.setBlockedField(jiraIssueKey, true);
-    return;
-  }
-
-  await jira.setAgentField(jiraIssueKey, 'refinement-agent');
-  await jira.postComment(jiraIssueKey, 'Ticket received. Assigned to Refinement Agent for decomposition.');
-
-  if (!ok) {
-    const list = (missing || []).map(l => `  - ${l}`).join('\n');
-    await jira.postComment(
-      jiraIssueKey,
-      `Story is missing required fields and cannot be refined until they are filled in:\n\n${list}\n\nPlease complete these fields and move the ticket back to Backlog to retry.`
-    );
-    await jira.setBlockedField(jiraIssueKey, true);
-  }
-}
-
-// handleBlockedCleared's non-refinement branch: Blocked was cleared on a
-// dev-agent ticket already mid-implementation — redispatch as a
-// continuation using the BLOCKED-marker search, without touching status
-// (Django never attempted a status transition for this case — see
-// webhook_consumer.py's `_handle_blocked_field_change`).
+// A cleared block on a dev-agent work item already mid-implementation —
+// redispatch as a continuation using the BLOCKED-marker search, without
+// touching status (Django never attempted a status transition for this
+// case — see webhook_consumer.py's `_handle_blocked_field_change`).
 async function handleBlockedClearedSideEffect(workItemId, envelope) {
   if (!workItemId) return;
   const full = await canonicalWorkItems.getWorkItem(workItemId, { full: true });
@@ -312,6 +217,55 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
     dispatchId: envelope.messageId,
     promptFactory: (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker),
   });
+}
+
+// Route one release event to its Jenkins job, or log it as unresolved.
+//
+// A release event ScrumMaster can act on names a canonical work item
+// (`workItemId`), and belongs to a project whose configured mode is not
+// `jira` (core's store.py `_publish_release_event`). Two kinds cannot be
+// acted on until v5.2's writer:
+//
+//  - one carrying no `workItemId`, which core publishes straight from a
+//    tracker webhook and identifies by an external key alone; and
+//  - any event for a project whose configured mode is `jira`, whose gates
+//    (a missing target project, a missing candidate SHA, a work item still
+//    awaiting acceptance) were made by reads ScrumMaster no longer performs
+//    and core does not make for it.
+//
+// Neither is rebuilt from the canonical replica and neither is routed to its
+// local-mode sibling, because the sibling relies on Django having already run
+// those gates (REQ-04). Both are logged at error level, naming the kind, and
+// trigger no Jenkins job.
+async function routeReleaseEvent(data, projectName) {
+  const { kind, workItemId, project } = data;
+
+  if (!workItemId) {
+    console.error(
+      `[dispatch] Unresolved release event (kind "${kind}") on ${projectName} — it names no canonical work item, ` +
+      `so no Jenkins job was triggered; resolving it is v5.2's`
+    );
+    return;
+  }
+
+  const mode = await canonicalWorkItems.getMode(projectName);
+  if (mode.mode === 'jira') {
+    console.error(
+      `[dispatch] Unresolved release event (kind "${kind}") for work item ${workItemId} — project ${projectName} ` +
+      `is configured for an external tracker, whose release gates ScrumMaster no longer evaluates, ` +
+      `so no Jenkins job was triggered; resolving it is v5.2's`
+    );
+    return;
+  }
+
+  const ref = { workItemId, project };
+  if (kind === 'requested') {
+    await handlers.handleReleaseRequested(ref);
+  } else if (kind === 'abandoned') {
+    await handlers.handleReleaseAbandoned(ref);
+  } else if (kind === 'done') {
+    await handlers.handleDone(ref);
+  }
 }
 
 // The outbound event stream is a fan-out: every event type
@@ -331,31 +285,18 @@ async function handleWorkItemEventEnvelope(envelope, projectName) {
   }
 
   if (eventType === 'work_item.jira_side_effect') {
-    const { kind, jiraIssueKey, detail } = data;
-    if (kind === 'story_intake') {
-      await handleStoryIntake(detail, jiraIssueKey);
-    } else if (kind === 'blocked_cleared') {
+    // `blocked_cleared` is the one side-effect kind ScrumMaster acts on from
+    // v5.1. Every other kind is recorded by core and has no consumer here
+    // until v5.2's writer.
+    const { kind } = data;
+    if (kind === 'blocked_cleared') {
       await handleBlockedClearedSideEffect(payload.workItemId, envelope);
     }
     return;
   }
 
   if (eventType === 'work_item.jira_release_event') {
-    // The same event type now also carries a local-mode-originated
-    // candidate-cut/abandon/done, keyed by
-    // `workItemId`/`project` instead of `jiraIssueKey` (core's
-    // store.py `_publish_release_event`, no jiraIssueKey in the payload).
-    // handlers.js branches on which one is present; this routing is
-    // otherwise unchanged from Jira mode.
-    const { kind, jiraIssueKey, workItemId, project } = data;
-    const ref = { jiraIssueKey, workItemId, project };
-    if (kind === 'requested') {
-      await handlers.handleReleaseRequested(ref);
-    } else if (kind === 'abandoned') {
-      await handlers.handleReleaseAbandoned(ref);
-    } else if (kind === 'done') {
-      await handlers.handleDone(ref);
-    }
+    await routeReleaseEvent(data, projectName);
     return;
   }
 
@@ -370,7 +311,6 @@ module.exports = {
   handleWorkItemEventEnvelope,
   maybeDispatch,
   maybeRedispatchForRework,
-  handleStoryIntake,
   handleBlockedClearedSideEffect,
   issueLikeFromCanonical,
 };

@@ -124,10 +124,13 @@ Read only files you are about to modify or that directly inform your change. Do 
 
 ```bash
 git checkout main && git pull
-git checkout -b feature/GANG-XX-short-description
+git checkout -b feature/<reference>-short-description
 ```
 
-Branch naming: `feature/TICKET-KEY-short-slug`. Ticket key is mandatory in the branch name.
+Branch naming: `feature/<reference>-short-slug`, where `<reference>` is the
+`External key` line from your prompt's `## WORK ITEM REFERENCES` block when it
+shows one, and the `Work item id` line otherwise. The reference is mandatory in
+the branch name.
 
 ---
 
@@ -182,22 +185,22 @@ Keeping CLAUDE.md accurate is part of leaving the codebase in a clean state for 
 
 ```bash
 git add -p   # stage intentionally — review each hunk
-git commit -m "GANG-XX: concise description of what was done and verified"
+git commit -m "<reference>: concise description of what was done and verified"
 ```
 
-Ticket key in commit message is mandatory.
+The same reference in the commit message is mandatory.
 
 ---
 
 ### Step 7 — Push and open a PR
 
 ```bash
-git push origin feature/GANG-XX-short-description
+git push origin feature/<reference>-short-description
 
 gh pr create \
-  --title "GANG-XX: concise description" \
+  --title "<reference>: concise description" \
   --body "$(cat <<'EOF'
-Closes GANG-XX
+Closes <reference>
 
 ## What
 <summary of changes>
@@ -244,8 +247,12 @@ and run it again.
 If you need human clarification to proceed, leave a marker at the exact point in the code where you are blocked:
 
 ```html
-<!-- BLOCKED GANG-XX precise description of what you need -->
+<!-- BLOCKED <work item id> precise description of what you need -->
 ```
+
+The marker carries the `Work item id` from your prompt, never the
+`External key`: that is the id ScrumMaster searches for when the block is
+cleared and it resumes you.
 
 Then report it with the `input-required` operation (you need information) or
 `auth-required` (you are missing a credential or an authorization), with the

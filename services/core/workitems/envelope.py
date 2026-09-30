@@ -33,7 +33,7 @@ SCHEMA_VERSION = '1'
 class Kind:
     TASK = 'task'
     TASK_STATUS = 'task_status'
-    JIRA_OPERATION = 'jira_operation'
+    GATEWAY_OPERATION = 'gateway_operation'
     WEBHOOK_EVENT = 'webhook_event'
     WORK_ITEM_COMMAND = 'work_item_command'
     WORK_ITEM_EVENT = 'work_item_event'
@@ -46,7 +46,7 @@ class Kind:
 
 
 VALID_KINDS = {
-    Kind.TASK, Kind.TASK_STATUS, Kind.JIRA_OPERATION,
+    Kind.TASK, Kind.TASK_STATUS, Kind.GATEWAY_OPERATION,
     Kind.WEBHOOK_EVENT, Kind.WORK_ITEM_COMMAND, Kind.WORK_ITEM_EVENT,
     Kind.ARTIFACT_EVENT, Kind.ARTIFACT_DELIVERY_REQUEST, Kind.ARTIFACT_DELIVERY_RESPONSE,
 }

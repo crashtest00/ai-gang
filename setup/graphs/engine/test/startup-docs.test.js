@@ -245,11 +245,17 @@ test('the end-to-end leg uses the work-item type and status the service actually
   assert.match(admin, /WorkItemStoryDetailInline/);
   assert.match(leg.replace(/\s+/g, ' '), /three saves/);
 
-  // An External key names a Jira issue: with no Jira integration configured
-  // the dispatch refuses the item rather than routing it through Jira, so
-  // the leg has to say to leave it empty.
+  // An External key names an issue in an external tracker. From v5.1 the
+  // dispatch never resolves one (v5.1 REQ-05): it copies the value onto the
+  // issue-like object for the prompt's display line and branches on no
+  // property of it, so the value has no effect on a project that is not in
+  // Jira mode. The leg still says to leave it empty, because a key that names
+  // nothing is misleading to whoever reads the work item next.
   const dispatchSource = read(path.join(REPO_ROOT, 'services', 'scrummaster', 'src', 'dispatchConsumer.js'));
-  assert.match(dispatchSource, /if \(full\.external_key\) \{[\s\S]{0,600}?mode\.mode !== 'jira'[\s\S]{0,600}?return jira\.getIssue\(full\.external_key\)/);
+  assert.match(dispatchSource, /externalKey: jiraMode \? \(full\.external_key \|\| null\) : null/,
+    'the external key is copied for display, unread');
+  assert.doesNotMatch(dispatchSource, /if \(full\.external_key\)/,
+    'and nothing branches on whether a work item has one');
   assert.match(leg.replace(/\s+/g, ' '), /External key.{0,40}leave it empty/i);
 });
 
