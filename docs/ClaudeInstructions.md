@@ -638,9 +638,9 @@ There is no manual `beta → prod` PR for a human to open — `prod` only change
 via the Release-ticket flow:
 1. Human creates a Jira Release ticket (Target Project field required) once
    enough has accumulated on `beta`
-2. Jenkins checks `beta`'s queue is clean, pins the candidate SHA, cuts
-   `release/<sha>`, opens the `release/<sha> → prod` PR, and deploys a
-   private preview — link posted back to the ticket
+2. The `core` service checks `beta`'s queue is clean; Jenkins then pins the
+   candidate SHA, cuts `release/<sha>`, opens the `release/<sha> → prod` PR,
+   and deploys a private preview — link posted back to the ticket
 3. Human reviews the preview, then moves the Release ticket to **Done**
 4. Jenkins merges the frozen PR and redeploys that exact artifact to
    production — no manual Jenkins or GitHub action required

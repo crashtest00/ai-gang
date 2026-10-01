@@ -492,8 +492,8 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
    /agent-docs/agents/{agent-definition-file}.md"
 
 2. TICKET CONTEXT
-   Ticket: {ticket_key} — {ticket_title}
-   Parent ticket: {parent_key}  (if subtask)
+   Ticket: {canonical work item id} — {work item title}
+   Parent ticket: {parent work item id}  (if subtask)
 
    Task dispatch only:
      ### Behavior

@@ -110,8 +110,9 @@ stories means N promotions and N approvals — so promotion is now split into
 the three jobs described below (`dev → beta` automatic, `release-candidate`,
 and `production-promote`), batching many tickets' work into one release
 approval. There is no Jira automation rule driving any of it — ScrumMaster
-calls Jenkins directly in every case, same as before, just via these
-different jobs.
+calls Jenkins directly for a local-mode release, same as before, just via
+these different jobs. A Jira-mode release event triggers nothing until v5.2
+(V5.1 REQ-04).
 
 ### dev → beta (automatic, no Jira involvement)
 
@@ -156,7 +157,7 @@ triggers this job. A Jira-mode release event triggers nothing until v5.2
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-candidate
-Body: { "workItemId": "REL-3", "projectName": "hello-world" }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world" }
 ```
 
 The job pins `beta`'s current SHA as the candidate, cuts `release/<sha>`,
@@ -192,7 +193,7 @@ release event at all, so no trigger exists for it (beta already has the code):
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=production-promote
-Body: { "workItemId": "REL-3", "projectName": "hello-world", "candidateSha": "abc1234..." }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world", "candidateSha": "abc1234..." }
 ```
 
 The job merges the frozen `release/<sha> → prod` PR (squash, no merge
@@ -220,7 +221,7 @@ Fired by `handleReleaseAbandoned` when a release work item reaches
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-preview-teardown
-Body: { "workItemId": "REL-3", "projectName": "hello-world" }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world" }
 ```
 
 - [ ] Verify job exists: Jenkins UI → `release-preview-teardown`

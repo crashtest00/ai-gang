@@ -6,7 +6,7 @@
 
 ## Overview
 
-AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with Jira and GitHub on your behalf.
+AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with GitHub on your behalf. They are never given a tracker: a work item reaches an agent through its prompt, and everything an agent reports goes back through ScrumMaster to the core service.
 
 Three shared services run alongside the project containers, and platform
 startup brings up all three: **Redis** (message broker), the **core
@@ -441,7 +441,7 @@ docker compose up -d
 
 **ScrumMaster not routing to this project**
 
-- Confirm `PROJECT_NAME` in `.env` matches the Jira project name
+- Confirm `PROJECT_NAME` in `.env` matches the project name recorded on the work items in `core`
 - Confirm the Redis subscriber is running: `docker compose exec dev ps aux | grep subscriber`
 - Check ScrumMaster logs: `cd ~/ai-gang/services/scrummaster && docker compose logs`
 
