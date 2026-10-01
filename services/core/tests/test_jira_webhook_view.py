@@ -361,13 +361,29 @@ def spawn_consumers():
             pass
 
 
-def wait_for(predicate, timeout_s=20.0, interval_s=0.1):
+def wait_for(predicate, timeout_s=20.0, interval_s=0.1, expected=None, observed=None):
+    """Polls `predicate` until it holds or `timeout_s` elapses.
+
+    `expected` names, in words, the state being waited for, and `observed` is a
+    zero-argument callable sampled only when the wait fails, so the message
+    carries the value the predicate was looking at. Both exist because the bare
+    `wait_for timed out` this used to raise sent the first diagnosis of a real
+    failure to the wrong place: it was read as too short a deadline, when
+    "observed 4/6 created" would have pointed straight at a second consumer in
+    the group stealing two of the six deliveries (V5.1 audit rows 5, 11, 28).
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if predicate():
             return
         time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
+    message = f'wait_for timed out after {timeout_s}s waiting for: {expected or "<unlabelled predicate>"}'
+    if observed is not None:
+        try:
+            message += f' — observed: {observed()}'
+        except Exception as exc:  # pragma: no cover — a broken sampler must not hide the timeout
+            message += f' — observed: unavailable, the sampler raised {exc!r}'
+    raise TimeoutError(message)
 
 
 def _created_count(project):
@@ -408,7 +424,9 @@ def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_e
     # signalled whenever `wait_for` timed out, so it raised TimeoutExpired
     # over the real failure and left the consumer running.
     first = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='700')
-    wait_for(lambda: _created_count(project) >= 1)
+    wait_for(lambda: _created_count(project) >= 1,
+             expected=f'the first consumer to materialize at least 1 of the {total} {project} stories',
+             observed=lambda: f'{_created_count(project)}/{total} created')
     mid_run_count = _created_count(project)
     assert mid_run_count < total, f'expected a partial batch at kill time, got {mid_run_count}/{total} already processed'
     first.send_signal(signal.SIGKILL)
@@ -418,7 +436,9 @@ def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_e
     # no Jira redelivery involved (the events are still sitting, durably,
     # on the Streams entry this consumer never acked).
     second = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='0')
-    wait_for(lambda: _created_count(project) == total, timeout_s=20.0)
+    wait_for(lambda: _created_count(project) == total, timeout_s=20.0,
+             expected=f'the restarted consumer to drain the remainder, all {total} {project} stories materialized',
+             observed=lambda: f'{_created_count(project)}/{total} created')
     second.send_signal(signal.SIGKILL)
     second.wait(timeout=10)
 
