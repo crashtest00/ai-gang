@@ -297,7 +297,7 @@ async function handleA2ASubmission(envelope, projectName) {
   const taskId = envelope.taskId;
   const record = taskStore.getTaskById(taskId);
   if (!record) {
-    console.warn(`[gateway] Unknown task ${taskId} on jira-gateway:${projectName} — dropping`);
+    console.warn(`[gateway] Unknown task ${taskId} on ${registry.gatewayStreamName(projectName)} — dropping`);
     return null;
   }
 

@@ -19,7 +19,7 @@ from typing import Any
 from . import store, write_gate
 from .materialize import materialize_decomposition
 from .stream_topology import COMMAND_GROUP, command_stream_name
-from .streams import PermanentError, create_consumer
+from .streams import create_consumer
 
 PERMANENT_REJECTION_CODES = {
     'VALIDATION_ERROR', 'ASSIGNMENT_REJECTED', 'DEPENDENCY_GATE_REJECTED', 'WRITE_GATE_REJECTED',
