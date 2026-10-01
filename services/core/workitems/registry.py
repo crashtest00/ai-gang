@@ -40,7 +40,7 @@ from typing import Any, Optional
 from django.conf import settings
 
 _lock = threading.Lock()
-_catalog: Optional[dict[str, Any]] = None   # {'by_id': {...}, 'ids': [...], 'retired_ids': [...]}
+_catalog: Optional[dict[str, Any]] = None   # {'by_id': {...}, 'ids': [...]}
 _projects: Optional[dict[str, Any]] = None  # {name: {'name', 'jiraProjectKey', 'agents': [...]}}
 
 
@@ -109,7 +109,7 @@ def _parse_catalog(raw: dict, path: str) -> dict[str, Any]:
         joined = '\n  - '.join(errors)
         raise ValueError(f'Invalid agent catalog at {path}:\n  - {joined}')
 
-    return {'by_id': by_id, 'ids': list(by_id.keys()), 'retired_ids': [r['id'] for r in retired_agents]}
+    return {'by_id': by_id, 'ids': list(by_id.keys())}
 
 
 def _parse_projects(raw: dict, path: str, catalog: dict[str, Any]) -> dict[str, Any]:

@@ -30,7 +30,7 @@ Key principles:
 Each project runs on its own droplet with its own Jenkins instance. There is no shared CI/CD infrastructure between projects. The `ai-gang` repo is the canonical source — cloning it on a fresh droplet and running the bootstrap scripts is all that is needed to stand up a fully working project. Zero external dependencies on other projects or shared services.
 
 **2. Tickets Drive Everything**
-Work originates as a canonical work item in Django/`core`, the platform's record of all work. The Engineering Lead agent interprets work items and breaks them into subtasks. Nothing gets built that doesn't trace back to a work item.
+Work originates as a canonical work item in Django/`core`, the platform's record of all work. The Refinement Agent interprets work items and breaks them into subtasks. Nothing gets built that doesn't trace back to a work item.
 
 **3. Build Once, Promote**
 Artifacts built in a project container are promoted through environments (dev → staging → production), never rebuilt. What passes tests is exactly what gets deployed.
@@ -555,7 +555,7 @@ docker system prune -a
 ### What the DevOps Agent Does NOT Own
 
 ❌ Project application code (specialist agents own this)
-❌ Jira ticket content (Engineering Lead agent owns this)
+❌ Work item content (the Refinement Agent owns this)
 ❌ Production platform configuration (cloud engineering agent owns this)
 
 ### Key Files
