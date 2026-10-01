@@ -12,7 +12,11 @@
  * always durably reported back on the gateway stream.
  *
  * Required env vars:
- *   PROJECT_NAME          — matches the Jira project name (e.g. "hello-world")
+ *   PROJECT_NAME          — matches the canonical project name recorded on the
+ *                           work items in `core` (e.g. "hello-world"), which is
+ *                           what a task envelope's `project` carries and what
+ *                           makeTaskHandler below compares it against. Not a
+ *                           Jira project name: no part of a dispatch reads one
  *   REDIS_HOST            — hostname of the Redis container
  *   REDIS_PORT            — Redis port (default 6379)
  *   ANTHROPIC_API_KEY     — required by Claude Code
