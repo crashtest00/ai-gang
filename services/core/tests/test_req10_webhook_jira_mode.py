@@ -8,9 +8,11 @@ control (the same fixture, switched to Jira mode, applied as today):
     Target Project once materialized);
   - the mode read in the Release mirror (`_materialize_release`), which
     refuses to file a Jira Release under a Target Project not in Jira mode;
-  - the mode read on the work item a webhook resolves to, which catches a
-    Release filed under a local-mode Target Project before this check
-    existed (or switched to local since).
+  - the mode read on the work item a webhook resolves to, at both its
+    enforcement points — `_handle_changelog_item` and `_handle_comment_event`
+    — which catches a Release filed under a local-mode Target Project before
+    this check existed (or switched to local since), and a comment on any
+    such item.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import uuid
 
 from workitems import project_config, registry, store
 from workitems.envelope import Kind, build_envelope
-from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemReleaseDetail
+from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment, WorkItemReleaseDetail
 from workitems.webhook_consumer import handle_webhook_envelope
 
 PROJECT = 'test-project'
@@ -39,10 +41,12 @@ def _set_release_field_env(monkeypatch):
         monkeypatch.setenv(env_name, field_id)
 
 
-def _envelope(project, event, issue_key, fields, *, changelog=None):
+def _envelope(project, event, issue_key, fields, *, changelog=None, comment=None):
     body = {'webhookEvent': event, 'issue': {'key': issue_key, 'fields': fields}}
     if changelog is not None:
         body['changelog'] = {'items': changelog}
+    if comment is not None:
+        body['comment'] = comment
     return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(project), payload={
         'event': event, 'issue': {'key': issue_key, 'fields': fields}, 'body': body,
     })
@@ -126,18 +130,25 @@ def test_an_update_for_a_release_ticket_never_materialized_under_a_local_mode_ta
     project_config.set_mode(PROJECT, 'jira')
 
     fields = _release_fields(PROJECT, TARGET_PROJECT)
+    # Two changelog items in one envelope: REQ-10's second bullet requires the
+    # failure be recorded "for each such changelog item", and each item
+    # re-enters _materialize_release independently, so a single-item changelog
+    # cannot tell per-item repetition from per-envelope.
     env = _envelope(PROJECT, 'jira:issue_updated', 'REL-101', fields,
-                     changelog=[{'field': 'status', 'toString': 'In Review'}])
+                     changelog=[{'field': 'status', 'toString': 'In Review'},
+                                {'field': 'status', 'toString': 'In Progress'}])
     handle_webhook_envelope(env)
 
     assert WorkItem.objects.filter(external_key='REL-101').count() == 0
-    failure = WebhookFailure.objects.get(external_key='REL-101')
-    assert failure.project == TARGET_PROJECT
+    failures = list(WebhookFailure.objects.filter(external_key='REL-101'))
+    assert len(failures) == 2, 'one failure per changelog item, not one per envelope'
+    assert {f.project for f in failures} == {TARGET_PROJECT}
     # Handled as for any unmaterialized ticket: a status change other than
-    # Done is recorded with _record_generic_event.
-    generic = OutboxEvent.objects.get(event_type='work_item.jira_event_received')
-    assert generic.payload['detail']['field'] == 'status'
-    assert generic.payload['detail']['to'] == 'In Review'
+    # Done is recorded with _record_generic_event, once per item.
+    generics = list(OutboxEvent.objects.filter(event_type='work_item.jira_event_received'))
+    assert len(generics) == 2
+    assert [g.payload['detail']['field'] for g in generics] == ['status', 'status']
+    assert {g.payload['detail']['to'] for g in generics} == {'In Review', 'In Progress'}
 
 
 def test_a_release_ticket_materializes_under_a_jira_mode_target_project_as_today(clean_db, monkeypatch):
@@ -207,3 +218,53 @@ def test_a_changelog_update_for_a_release_row_in_a_jira_mode_project_still_syncs
 
     detail = WorkItemReleaseDetail.objects.get(work_item_id=item_id)
     assert detail.candidate_sha == 'abc1234', 'a Jira-mode resolved item still re-syncs from the webhook snapshot'
+
+
+def _comment_env(issue_key, *, comment_id='9001'):
+    return _envelope(PROJECT, 'comment_created', issue_key, _story_fields(PROJECT),
+                     comment={'id': comment_id, 'author': {'displayName': 'Jane Jira'},
+                              'body': 'A comment from Jira.'})
+
+
+def _local_mode_story(external_key):
+    """A work item in TARGET_PROJECT, which has no ProjectConfig row and is
+    therefore local, reached by a webhook whose own project (PROJECT) is in
+    Jira mode — the only way read 2 is exercised, since the entry-level check
+    would otherwise ignore the envelope first."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': TARGET_PROJECT, 'type': 'story',
+                             'displayName': 'A story', 'status': 'proposed', 'externalKey': external_key})
+    return item_id
+
+
+def test_a_comment_on_a_work_item_in_a_local_mode_project_is_ignored(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
+    item_id = _local_mode_story('TP-105')
+
+    handle_webhook_envelope(_comment_env('TP-105'))
+
+    assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 0, \
+        'no Jira comment reaches a local-mode project\'s work item'
+    assert not OutboxEvent.objects.filter(event_type='work_item.comment_added').exists()
+    assert not OutboxEvent.objects.filter(event_type='work_item.jira_side_effect').exists()
+    assert WebhookFailure.objects.count() == 0, 'ignored, not a failure'
+    generic = OutboxEvent.objects.get(event_type='work_item.jira_event_received', work_item_id=item_id)
+    assert generic.payload['jiraIssueKey'] == 'TP-105'
+    assert generic.payload['detail']['event'] == 'comment'
+    assert generic.payload['detail']['ignored']
+
+
+def test_a_comment_on_a_work_item_in_a_jira_mode_project_is_appended_as_today(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
+    item_id = _local_mode_story('TP-106')
+    # Switched to Jira mode only after the row exists, so the positive control
+    # is the same envelope against the same fixture, mode being the one
+    # difference.
+    project_config.set_mode(TARGET_PROJECT, 'jira')
+
+    handle_webhook_envelope(_comment_env('TP-106'))
+
+    comment = WorkItemComment.objects.get(work_item_id=item_id)
+    assert comment.author == 'Jane Jira'
+    assert comment.body == 'A comment from Jira.'
+    assert comment.source_message_id == 'jira-comment:TP-106:9001'
