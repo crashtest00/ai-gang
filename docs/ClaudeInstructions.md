@@ -280,15 +280,12 @@ Create a dedicated Atlassian account for AI Gang. Jira API tokens inherit the fu
 - `[HUMAN]` Create a new Atlassian account — e.g. `ai-gang-bot@your-domain.com` (use a shared mailbox or email alias)
 - `[HUMAN]` Invite it to your Jira instance: **Jira Settings → User Management → Invite Users**
 - `[HUMAN]` Log in as the service account → **Manage Account → Security → Create and manage API tokens** → create a token named `ai-gang-hq`
-- `[HUMAN]` Add to `services/scrummaster/.env`:
-  ```
-  JIRA_USER_EMAIL=ai-gang-bot@your-domain.com
-  JIRA_API_TOKEN=<token from above>
-  ```
-- `[HUMAN]` Also add to `~/ai-gang/.env` (used by `init-project.sh`):
+- `[HUMAN]` Add to `~/ai-gang/.env` (the platform `.env` `derive-env.sh` reads at
+  startup, copying these into `services/core/.env` for Django/`core` — the
+  platform's only Jira client, V5.1 REQ-01, REQ-06):
   ```
   JIRA_EMAIL=ai-gang-bot@your-domain.com
-  JIRA_TOKEN=<same token>
+  JIRA_TOKEN=<token from above>
   JIRA_URL=https://your-org.atlassian.net
   ```
 
@@ -820,8 +817,9 @@ Existing containers are unaffected; the new container is independent.
 Update the value in the relevant `.env` file, then restart the service that uses it:
 
 ```bash
-# ScrumMaster (e.g. JIRA_API_TOKEN)
-cd ~/ai-gang/services/scrummaster && docker compose restart
+# Jira credentials (e.g. JIRA_TOKEN) — update ~/ai-gang/.env, the platform
+# .env, then re-run platform startup so derive-env.sh re-derives
+# services/core/.env and restarts core, the platform's only Jira client
 
 # Jenkins (update via JCasC reload)
 curl -X POST http://localhost:8080/configuration-as-code/reload \

@@ -60,22 +60,21 @@ payload:
 in force (see final report for the full reasoning):**
 Release-ticket BUSINESS LOGIC (the beta-queue-clean check ahead of cutting
 a release candidate, and the Jenkins job triggers themselves) is NOT
-reimplemented here. This service has no Jira client of its own and never
-calls Jira directly, and the beta-queue-clean check needs a
-live Jira JQL search ScrumMaster's Jira-mode subtask-creation path
-(`dependencies.js`'s `materializeDecomposition`, unchanged/out of scope
-for this task) does not mirror into this service's own store — so this
-service cannot correctly answer "is the beta queue clean" from its own
-data today. The existing, already-tested
-`handleReleaseRequested`/`handleReleaseAbandoned`/`handleDone` Release
-branch in `services/scrummaster/src/handlers.js` remain the sole executors
-of that logic and the Jenkins triggers, invoked by ScrumMaster's
-dispatch/side-effect consumer (`dispatchConsumer.js`) reacting to the
-unchanged `work_item.jira_release_event`. What BF-01 adds is narrower and
-purely representational: recording the ticket's own fields as a canonical
-`release` work item and `work_item_release_detail` row, the SAME table and
-columns REQ-01 already gives local-mode releases, so a Jira-mode release is
-observable through the same internal read API
+reimplemented here. Django/`core` holds the running platform's only Jira
+client (`workitems/jira_client.py`, V5.1 REQ-01); no running consumer calls
+it until v5.2's outbound writer, besides `ensure_jira_webhook.py`'s webhook
+registration (BF-02), and Jenkins' own Jira writes remain until v5.2
+(`jira-integration-relocation.md` REQ-06, REQ-08). From v5.1 nothing acts on
+a Jira-mode release event: ScrumMaster's write and read call sites into
+Jira, including the Release branch that used to run this beta-queue-clean
+check and trigger the Jenkins jobs, are deleted outright (REQ-04, REQ-05),
+and a `work_item.jira_release_event` for a project in Jira mode, or one that
+carries no `workItemId`, is logged by ScrumMaster at error level as
+unresolved and triggers no Jenkins job (REQ-04). What BF-01 adds is narrower
+and purely representational: recording the ticket's own fields as a
+canonical `release` work item and `work_item_release_detail` row, the SAME
+table and columns REQ-01 already gives local-mode releases, so a Jira-mode
+release is observable through the same internal read API
 (`GET /work-items/<id>?full=true`). It does not decide candidate-cut
 eligibility, does not trigger Jenkins, and does not change
 `work_item_release_detail`'s shape.
@@ -149,14 +148,17 @@ def jira_status_to_canonical(project: str, jira_status_name: str) -> str:
 
 
 def _publish_side_effect(project: str, work_item_id, jira_issue_key: str, kind: str, detail: dict) -> None:
-    """A small, Django-decided instruction for ScrumMaster's Jira-facing
-    side-effect consumer (dispatchConsumer.js) — e.g. "post this exact
-    missing-fields comment," "trigger the release-candidate Jenkins job."
-    The DECISION (what happened, what should happen next) is made here;
-    the consumer only executes the Jira/Jenkins call using values this
-    event already carries. Must be called from inside an existing
-    transaction.atomic() block so it lands atomically with whatever
-    canonical write (if any) it accompanies."""
+    """A small, Django-decided instruction, durably recorded for whichever
+    consumer eventually acts on it. From v5.1 ScrumMaster's side-effect
+    consumer (dispatchConsumer.js) acts only on a `blocked_cleared` kind,
+    redispatching the assigned agent; `story_intake` — the kind this
+    function's other caller, `_handle_story_created`, publishes — has no
+    consumer at all until v5.2's outbound writer posts the acknowledgement
+    or missing-fields comment it decides on. The DECISION (what happened,
+    what should happen next) is made here regardless of which kind;
+    executing it against Jira is deferred to that future writer. Must be
+    called from inside an existing transaction.atomic() block so it lands
+    atomically with whatever canonical write (if any) it accompanies."""
     store.write_outbox_event(
         project=project, event_type='work_item.jira_side_effect', work_item_id=work_item_id,
         payload={'kind': kind, 'jiraIssueKey': jira_issue_key, 'detail': detail},
@@ -261,10 +263,11 @@ def _handle_story_created(project: str, issue: dict, issue_key: str, envelope: d
             },
             actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
         )
-        # handlers.js always sets the Agent field and posts the
-        # acknowledgement comment BEFORE checking required fields — ok is
-        # carried through so ScrumMaster's side-effect consumer can decide
-        # which of the two (ack vs. missing-fields-block) to perform.
+        # `ok` distinguishes the acknowledgement comment from the
+        # missing-fields-block comment — the same choice V1's
+        # handleStoryCreated made before posting. Neither comment is posted
+        # today: this `story_intake` side effect has no consumer until
+        # v5.2's outbound writer decides between the two from `ok`.
         _publish_side_effect(project, item.id, issue_key, 'story_intake', {'ok': not missing, 'missing': missing})
 
 
@@ -278,9 +281,12 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
     became_unblocked = bool(change.get('from')) and not change.get('to')
     if not became_unblocked:
         # V1 never had a "became blocked" webhook-driven handler either —
-        # Blocked is only ever SET by ScrumMaster's own side effects (a
-        # missing-fields or assignment-rejection comment), not a human
-        # action this module needs to react to.
+        # Blocked was only ever SET by ScrumMaster's own side effects (a
+        # missing-fields or assignment-rejection comment). From v5.1 no AI
+        # Gang component sets Jira's Blocked field at all: ScrumMaster's
+        # write call sites are retired (REQ-04), and v5.2's outbound writer
+        # is the first thing that will set it again. Either way this is not
+        # a human action this module needs to react to.
         return
 
     if work_item_id is None:
@@ -367,7 +373,13 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
     `external_key`, same shape as `_handle_story_created`'s redelivery
     guard — then (re)syncs the detail row from `issue['fields']` either
     way, so a caller that already had an item still picks up any fields
-    it hasn't seen yet. Shared by `_handle_release_requested`
+    it hasn't seen yet. Under REQ-10 it can decline both halves: it
+    refuses to create a row at all when the ticket's Target Project (or its
+    own project, absent one) is not in Jira mode, recording a webhook
+    failure instead; and for a ticket that already resolves to a work item,
+    it refuses to (re)sync the detail row when that item's own project is
+    not in Jira mode, recording a generic event instead and returning
+    `None`. Shared by `_handle_release_requested`
     (`jira:issue_created`) and `_handle_changelog_item` (an update webhook
     for a Release ticket that was never materialized — BUGFIXES.md BF-01
     Pass 1 audit row 2, REQ-01 "create or update webhook"). Must be called
@@ -416,17 +428,20 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
 
 
 def _handle_release_requested(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
-    """Handler 5 (handlers.js `handleReleaseRequested`) — BUT the
-    materialization half is new (BF-01): a Release ticket's `jira:issue_created`
-    now also creates the canonical `release` work item and its
-    `work_item_release_detail` row via `_materialize_release`. The
-    `work_item.jira_release_event` republish that follows is UNCHANGED
-    from before this fix — same event_type, same `work_item_id=None`, same
-    payload shape — because `handlers.js`'s Jira-mode branch
-    (`if (jiraIssueKey)`) reads Target Project/Candidate SHA etc. straight
-    off a fresh `jira.getIssue(issueKey)` call, never off this event's
-    payload or `workItemId`; the beta-queue check and Jenkins trigger it
-    does next are still out of scope here (see module docstring)."""
+    """A Release ticket's `jira:issue_created` creates the canonical
+    `release` work item and its `work_item_release_detail` row via
+    `_materialize_release` (BF-01), then republishes the existing
+    `work_item.jira_release_event` (kind `requested`, `work_item_id=None`)
+    unchanged. Nothing acts on that event until v5.2's outbound writer:
+    ScrumMaster's former Jira-mode Release branch, which used to read
+    Target Project/Candidate SHA off a fresh `jira.getIssue(issueKey)` call
+    and run the beta-queue check and Jenkins trigger itself, is deleted
+    (REQ-04), so a Jira-mode release event is logged as unresolved and
+    triggers no Jenkins job (see module docstring). `_materialize_release`
+    returns `None`, and this function publishes nothing, when REQ-10's mode
+    check declines to create or re-resolve the row — a Release filed under
+    a Target Project not in Jira mode, or one that resolves to a work item
+    whose own project isn't."""
     with transaction.atomic():
         item = _materialize_release(project, issue, issue_key, envelope)
         if item is None:

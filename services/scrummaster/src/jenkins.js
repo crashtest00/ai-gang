@@ -32,9 +32,9 @@ function _refLabel(ref) {
   return typeof ref === 'string' ? ref : ref.workItemId;
 }
 
-// Fired once ScrumMaster (Jira mode) or core (local mode, via
-// its own Django-side check) has confirmed beta's queue is clean for a new
-// release. Jenkins pins the candidate SHA, cuts `release/<sha>`, opens the
+// Fired once `core` has confirmed beta's queue is clean for a
+// local-mode release; a Jira-mode release event triggers nothing until v5.2.
+// Jenkins pins the candidate SHA, cuts `release/<sha>`, opens the
 // `release/<sha> → prod` PR, and stands up the preview container.
 async function triggerReleaseCandidate(ref, projectName) {
   await invoke('release-candidate', { ..._refPayload(ref), projectName });
@@ -49,9 +49,9 @@ async function triggerProductionPromote(ref, projectName, candidateSha) {
   console.log(`[jenkins] Triggered production-promote for ${_refLabel(ref)} (${projectName} @ ${candidateSha})`);
 }
 
-// Fired when a release reaches a terminal state without shipping (Jira
-// mode: resolution set to Abandoned; local mode: `cancelled`) so its
-// preview container doesn't outlive it.
+// Fired when `core` reports a release reached a terminal state without
+// shipping (its `abandoned` release event), so its preview container
+// doesn't outlive it.
 async function triggerPreviewTeardown(ref, projectName) {
   await invoke('release-preview-teardown', { ..._refPayload(ref), projectName });
   console.log(`[jenkins] Triggered release-preview-teardown for ${_refLabel(ref)} (${projectName})`);

@@ -49,10 +49,8 @@ SM_DIR="$AIGANG_ROOT/services/scrummaster"
 
 # Every JIRA_*_FIELD_ID workitems/jira_interpret.py and
 # workitems/webhook_consumer.py read via os.environ (grepped from both —
-# see this file's header comment). Reuses the SAME env var names
-# services/scrummaster/src/jira.js already reads, per jira_interpret.py's
-# own module docstring, so one .env can configure both services'
-# custom-field ids identically.
+# see this file's header comment). `core` is their only reader (V5.1
+# REQ-01, REQ-06); one platform .env configures them under its own names.
 # The three Jira credentials workitems/jira_client.py reads via os.environ
 # (V5.1 REQ-01, REQ-06). An array literal, on JIRA_FIELD_ID_VARS' pattern
 # below, so setup/graphs/engine's copied-through check can read the set out of

@@ -7,13 +7,13 @@
       "routing": { "channelSuffix": "refinement" },
       "agentCard": {
         "name": "Refinement Agent",
-        "description": "Decomposes an implementation-ready Jira story into subtasks and assigns each to the agent role required to implement it.",
+        "description": "Decomposes an implementation-ready story into subtasks and assigns each to the agent role required to implement it.",
         "version": "1.0.0",
         "skills": [
           {
             "id": "decompose-story",
             "name": "Decompose story",
-            "description": "Breaks a validated Jira story down into self-contained subtasks, one per required agent role, and assigns each an owner."
+            "description": "Breaks a validated story down into self-contained subtasks, one per required agent role, and assigns each an owner."
           }
         ]
       }
@@ -67,7 +67,7 @@
           {
             "id": "operate-cicd-pipeline",
             "name": "Operate CI/CD pipeline",
-            "description": "Maintains, triages, and troubleshoots the pipeline connecting GitHub, Jenkins, and Jira for a project."
+            "description": "Maintains, triages, and troubleshoots the pipeline connecting GitHub and Jenkins for a project."
           }
         ]
       }

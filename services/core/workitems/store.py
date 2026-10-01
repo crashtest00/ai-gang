@@ -471,12 +471,12 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
         # SAME canonical event Jira-mode candidate-cut/production-promote/
         # abandonment already publish (webhook_consumer.py's
         # _handle_release_requested/_handle_release_done/
-        # _handle_release_abandoned), so ScrumMaster's existing
-        # dispatchConsumer.js consumer executes both modes through one
-        # code path, with no new Django-side handler. No
-        # `jiraIssueKey` in the payload — dispatchConsumer.js/handlers.js
-        # branch on its absence to read canonical fields instead of
-        # calling Jira.
+        # _handle_release_abandoned), with no new Django-side handler.
+        # `workItemId` in the payload is how the two modes now diverge on
+        # ScrumMaster's side (REQ-04): this local-mode event carries it, so
+        # dispatchConsumer.js's existing consumer triggers Jenkins for it as
+        # today, while the Jira-mode events above carry none and are logged
+        # as unresolved, triggering no Jenkins job.
         kind = _RELEASE_EVENT_KIND_BY_STATUS.get(new_status)
         if kind:
             _publish_release_event(item, kind)
