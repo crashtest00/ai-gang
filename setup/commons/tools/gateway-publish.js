@@ -30,10 +30,14 @@
  *   { state, message: { taskId, contextId, ... }, artifacts?: [...] }
  * taskId/contextId for the transport envelope come from that message —
  * never from agent-supplied top-level fields, so an agent cannot misroute a
- * submission by writing a different id at the top level. The legacy
- * ticket_key/parent_ticket_key/parentJiraIssueKey fallbacks below exist only
- * for the materializeDecomposition operation, which
- * defines its own structured-data contract outside A2A Message shape.
+ * submission by writing a different id at the top level. The
+ * ticket_key/parent_ticket_key/parentWorkItemId fallbacks below exist only for
+ * the operations that define their own structured-data contract outside A2A
+ * Message shape: materializeDecomposition, whose id field is the parent work
+ * item's canonical id (v5.1 REQ-06), and Jenkins' pipeline_retry, whose
+ * `ticket_key` is the tracker key Jenkins found in a branch name. Nothing
+ * resolves that one: ScrumMaster logs a pipeline_retry as unresolved until
+ * v5.2 routes it through core with a canonical id (v5.1 REQ-05).
  */
 
 const fs = require('fs');
@@ -97,9 +101,9 @@ async function main() {
   const stream = `aigang:gateway:${project}`;
 
   const envelope = buildEnvelope({
-    kind: KIND.JIRA_OPERATION,
+    kind: KIND.GATEWAY_OPERATION,
     project,
-    taskId: payload.message?.taskId || payload.ticket_key || payload.parent_ticket_key || payload.parentJiraIssueKey || null,
+    taskId: payload.message?.taskId || payload.ticket_key || payload.parent_ticket_key || payload.parentWorkItemId || null,
     contextId: payload.message?.contextId || null,
     payload,
   });

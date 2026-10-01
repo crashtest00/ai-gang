@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
 
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '../config/agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json');
@@ -10,14 +11,22 @@ process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json
 const redis = require('./redis');
 const streams = require('./streams');
 const registry = require('./registry');
-const jira = require('./jira');
 const jenkins = require('./jenkins');
 const canonicalWorkItems = require('./canonicalWorkItems');
 const taskStore = require('./a2a/taskStore');
 const schema = require('./a2a/schema');
-const { dispatchTask, handleBlockedCleared, handleDone, handleReleaseRequested, handleReleaseAbandoned } = require('./handlers');
+const { dispatchTask, handleDone, handleReleaseRequested, handleReleaseAbandoned } = require('./handlers');
 
-const ISSUE = { key: 'GANG-42', project: 'GANG', projectName: 'hello-world', parent: null };
+// The shape dispatchConsumer.js's issueLikeFromCanonical builds, which from
+// v5.1 is the only issue-like object any dispatch path passes in: `key` is the
+// work item's canonical id in every mode.
+const ISSUE = {
+  key: 'wi-42-canonical',
+  externalKey: null,
+  jiraProjectKey: 'GANG',
+  projectName: 'hello-world',
+  parent: null,
+};
 
 function mockPublish(t) {
   const published = [];
@@ -32,7 +41,7 @@ function mockPublish(t) {
 test.beforeEach(() => taskStore._reset());
 
 // dispatchTask is the sole place that builds and publishes an A2A Task
-// dispatch/continuation envelope: one Task per ticket for its whole
+// dispatch/continuation envelope: one Task per work item for its whole
 // lifecycle.
 
 test('dispatchTask publishes a schema-valid Message payload for a fresh Task', async (t) => {
@@ -56,6 +65,28 @@ test('dispatchTask publishes a schema-valid Message payload for a fresh Task', a
 
   const record = taskStore.getTaskById(ISSUE.key);
   assert.equal(record.state, 'submitted');
+});
+
+// REQ-06 — the Task's id is the work item's canonical id, and its metadata
+// carries the project's canonical name. The Task id IS the work item, so a
+// second copy of the work item's identity under a tracker-specific name would
+// be exactly the handle REQ-07 forbids keying on: the record and its metadata
+// are asserted by their full key sets, so any such field reappearing fails
+// here.
+test('a registered Task is keyed by the canonical work item id and carries no tracker-named id', async (t) => {
+  mockPublish(t);
+  const agent = registry.getAgent('backend-agent');
+
+  await dispatchTask(ISSUE, agent, { promptFactory: () => 'prompt' });
+
+  const record = taskStore.getTaskById(ISSUE.key);
+  assert.equal(record.id, 'wi-42-canonical');
+  assert.equal(record.metadata.projectName, 'hello-world');
+  assert.equal(record.metadata.jiraProjectKey, 'GANG');
+  assert.deepEqual(Object.keys(record).sort(),
+    ['artifacts', 'contextId', 'id', 'messages', 'metadata', 'state']);
+  assert.deepEqual(Object.keys(record.metadata).sort(),
+    ['agentId', 'jiraProjectKey', 'projectName']);
 });
 
 test('the prompt factory receives the Task id/contextId before publishing', async (t) => {
@@ -93,7 +124,7 @@ test('dispatchTask resumes an interrupted Task with a new Message, same identity
   assert.notEqual(secondMessageId, firstMessageId, 'a new Message identity is created for the continuation');
 });
 
-test('dispatchTask does not create a second Task for the same Jira issue', async (t) => {
+test('dispatchTask does not create a second Task for the same work item', async (t) => {
   mockPublish(t);
   const agent = registry.getAgent('backend-agent');
 
@@ -127,128 +158,18 @@ test('dispatchTask reopens a completed Task under the same identity and retains 
 test('a subtask under a story shares its contextId with the parent', async (t) => {
   mockPublish(t);
   const agent = registry.getAgent('backend-agent');
-  const subtask = { key: 'GANG-43', project: 'GANG', projectName: 'hello-world', parent: 'GANG-42' };
+  const subtask = { ...ISSUE, key: 'wi-43-canonical', parent: 'wi-42-canonical' };
 
   await dispatchTask(subtask, agent, { promptFactory: () => 'prompt' });
 
-  assert.equal(taskStore.getTaskById('GANG-43').contextId, 'GANG-42');
+  assert.equal(taskStore.getTaskById('wi-43-canonical').contextId, 'wi-42-canonical');
 });
 
-// handleBlockedCleared — B2: clearing Blocked on a refinement-agent story
-// must not bypass the same required-fields gate handleStoryCreated applies,
-// and once fields are present it must redispatch with the full task prompt
-// (Behavior/Acceptance Criteria/Constraints/Edge Cases/Out of Scope), not
-// the bare-description unblock prompt used for dev-agent tickets.
+// Handler 5 — handleReleaseRequested triggers Jenkins for a release event
+// dispatchConsumer.js has already resolved to a canonical work item. The
+// beta-queue check ran in Django before the event was published.
 
-test('handleBlockedCleared redispatches a refinement-agent story with the full task prompt once required fields are present', async (t) => {
-  const published = mockPublish(t);
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-42',
-    project: 'GANG',
-    projectName: 'hello-world',
-    parent: null,
-    agent: 'refinement-agent',
-    summary: 'Add password reset flow',
-    description: 'bare description text',
-    behavior: 'Users can request a reset link.',
-    acceptanceCriteria: 'Given an email, a reset link is sent.',
-    constraints: 'Must expire in 1 hour.',
-    edgeCases: 'Unknown email is silently accepted.',
-    outOfScope: 'SMS-based reset.',
-    comments: [],
-  }));
-  let commentPosted = false;
-  let blockedSet = false;
-  t.mock.method(jira, 'postComment', async () => { commentPosted = true; });
-  t.mock.method(jira, 'setBlockedField', async () => { blockedSet = true; });
-
-  await handleBlockedCleared('GANG-42', { dispatchId: 'wh-refine-1' });
-
-  assert.equal(commentPosted, false, 'should not re-block or comment when fields are present');
-  assert.equal(blockedSet, false);
-  assert.equal(published.length, 1);
-  const prompt = published[0].envelope.payload.parts[0].text;
-  assert.match(prompt, /### Behavior/);
-  assert.match(prompt, /### Acceptance Criteria/);
-  assert.match(prompt, /### Constraints/);
-  assert.match(prompt, /### Edge Cases/);
-  assert.match(prompt, /### Out of Scope/);
-  assert.match(prompt, /## ALLOWED AGENTS/);
-});
-
-test('handleBlockedCleared re-blocks a refinement-agent story that is still missing required fields', async (t) => {
-  const published = mockPublish(t);
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-42',
-    project: 'GANG',
-    projectName: 'hello-world',
-    parent: null,
-    agent: 'refinement-agent',
-    summary: 'Add password reset flow',
-    description: 'bare description text',
-    behavior: 'Users can request a reset link.',
-    acceptanceCriteria: '',
-    constraints: 'Must expire in 1 hour.',
-    edgeCases: '',
-    outOfScope: 'SMS-based reset.',
-    comments: [],
-  }));
-  let posted = null;
-  let blocked = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
-  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
-
-  await handleBlockedCleared('GANG-42');
-
-  assert.equal(published.length, 0, 'must not dispatch while required fields are still missing');
-  assert.deepEqual(blocked, { key: 'GANG-42', value: true });
-  assert.match(posted.body, /Acceptance Criteria/);
-  assert.match(posted.body, /Edge Cases/);
-});
-
-test('handleBlockedCleared still uses the bare-description unblock prompt for a dev-agent ticket', async (t) => {
-  const published = mockPublish(t);
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-44',
-    project: 'GANG',
-    projectName: 'hello-world',
-    parent: null,
-    agent: 'backend-agent',
-    summary: 'Implement reset endpoint',
-    description: 'Implement the reset endpoint per the story.',
-    comments: [],
-  }));
-
-  await handleBlockedCleared('GANG-44', { dispatchId: 'wh-dev-1' });
-
-  assert.equal(published.length, 1);
-  const prompt = published[0].envelope.payload.parts[0].text;
-  assert.match(prompt, /## RESUME POINT/);
-  assert.doesNotMatch(prompt, /## ALLOWED AGENTS/);
-  assert.doesNotMatch(prompt, /### Behavior/);
-});
-
-// Handler 5 — handleReleaseRequested triggers Jenkins only once the beta
-// queue is confirmed clean.
-
-test('handleReleaseRequested triggers the release-candidate job when the beta queue is clean', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-50', targetProject: 'GANG', targetProjectName: 'hello-world',
-  }));
-  t.mock.method(jira, 'searchIssues', async () => []);
-  let triggered = null;
-  t.mock.method(jenkins, 'triggerReleaseCandidate', async (issueKey, projectName) => {
-    triggered = { issueKey, projectName };
-  });
-
-  await handleReleaseRequested({ jiraIssueKey: 'GANG-50' });
-
-  assert.deepEqual(triggered, { issueKey: 'GANG-50', projectName: 'hello-world' });
-});
-
-test('handleReleaseRequested (local mode) triggers release-candidate directly — Django already checked the queue', async (t) => {
-  let searchCalled = false;
-  t.mock.method(jira, 'searchIssues', async () => { searchCalled = true; return []; });
+test('handleReleaseRequested triggers release-candidate with the canonical work item id', async (t) => {
   let triggered = null;
   t.mock.method(jenkins, 'triggerReleaseCandidate', async (ref, projectName) => {
     triggered = { ref, projectName };
@@ -256,62 +177,13 @@ test('handleReleaseRequested (local mode) triggers release-candidate directly �
 
   await handleReleaseRequested({ workItemId: 'wi-release-1', project: 'hello-world' });
 
-  assert.equal(searchCalled, false); // no Jira call at all for a local-mode event
   assert.deepEqual(triggered, { ref: { workItemId: 'wi-release-1' }, projectName: 'hello-world' });
 });
 
-test('handleReleaseRequested blocks on outstanding in-review tickets instead of triggering Jenkins', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-50', targetProject: 'GANG', targetProjectName: 'hello-world',
-  }));
-  t.mock.method(jira, 'searchIssues', async () => [{ key: 'GANG-10' }, { key: 'GANG-11' }]);
-  let called = false;
-  t.mock.method(jenkins, 'triggerReleaseCandidate', async () => { called = true; });
-  let posted = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
+// Handler 4 — handleDone promotes to production using the release work item's
+// own recorded Candidate SHA.
 
-  await handleReleaseRequested({ jiraIssueKey: 'GANG-50' });
-
-  assert.equal(called, false);
-  assert.equal(posted.key, 'GANG-50');
-  assert.match(posted.body, /GANG-10/);
-  assert.match(posted.body, /GANG-11/);
-});
-
-test('handleReleaseRequested with no Target Project reports the error and never calls Jenkins', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({ key: 'GANG-50', targetProject: null, targetProjectName: null }));
-  let searchCalled = false;
-  t.mock.method(jira, 'searchIssues', async () => { searchCalled = true; return []; });
-  let jenkinsCalled = false;
-  t.mock.method(jenkins, 'triggerReleaseCandidate', async () => { jenkinsCalled = true; });
-  let posted = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
-
-  await handleReleaseRequested({ jiraIssueKey: 'GANG-50' });
-
-  assert.equal(searchCalled, false);
-  assert.equal(jenkinsCalled, false);
-  assert.match(posted.body, /Target Project/);
-});
-
-// Handler 4 — handleDone promotes to production only for a Release ticket
-// with both a Target Project and a pinned Candidate SHA.
-
-test('handleDone triggers production-promote for a fully-formed Release ticket', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-60', issuetype: 'Release', targetProject: 'GANG', targetProjectName: 'hello-world', candidateSha: 'abc1234',
-  }));
-  let triggered = null;
-  t.mock.method(jenkins, 'triggerProductionPromote', async (issueKey, projectName, candidateSha) => {
-    triggered = { issueKey, projectName, candidateSha };
-  });
-
-  await handleDone({ jiraIssueKey: 'GANG-60' });
-
-  assert.deepEqual(triggered, { issueKey: 'GANG-60', projectName: 'hello-world', candidateSha: 'abc1234' });
-});
-
-test('handleDone (local mode) promotes using the release work item\'s recorded Candidate SHA', async (t) => {
+test('handleDone promotes using the release work item\'s recorded Candidate SHA', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
     id: 'wi-release-1', releaseDetail: { candidate_sha: 'def5678' },
   }));
@@ -325,7 +197,7 @@ test('handleDone (local mode) promotes using the release work item\'s recorded C
   assert.deepEqual(triggered, { ref: { workItemId: 'wi-release-1' }, projectName: 'hello-world', candidateSha: 'def5678' });
 });
 
-test('handleDone (local mode) does not promote when no Candidate SHA is recorded', async (t) => {
+test('handleDone does not promote when no Candidate SHA is recorded', async (t) => {
   t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({ id: 'wi-release-1', releaseDetail: null }));
   let called = false;
   t.mock.method(jenkins, 'triggerProductionPromote', async () => { called = true; });
@@ -335,62 +207,10 @@ test('handleDone (local mode) does not promote when no Candidate SHA is recorded
   assert.equal(called, false);
 });
 
-test('handleDone does not promote a Release ticket with no Candidate SHA set', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-60', issuetype: 'Release', targetProject: 'GANG', targetProjectName: 'hello-world', candidateSha: null,
-  }));
-  let called = false;
-  t.mock.method(jenkins, 'triggerProductionPromote', async () => { called = true; });
-
-  await handleDone({ jiraIssueKey: 'GANG-60' });
-
-  assert.equal(called, false);
-});
-
-test('handleDone does not promote a Release ticket with no Target Project set', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-60', issuetype: 'Release', targetProject: null, targetProjectName: null, candidateSha: 'abc1234',
-  }));
-  let called = false;
-  t.mock.method(jenkins, 'triggerProductionPromote', async () => { called = true; });
-
-  await handleDone({ jiraIssueKey: 'GANG-60' });
-
-  assert.equal(called, false);
-});
-
-test('handleDone never calls Jenkins for a non-Release ticket', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-61', issuetype: 'Story', targetProject: 'GANG', targetProjectName: 'hello-world', candidateSha: 'abc1234',
-  }));
-  let called = false;
-  t.mock.method(jenkins, 'triggerProductionPromote', async () => { called = true; });
-
-  await handleDone({ jiraIssueKey: 'GANG-61' });
-
-  assert.equal(called, false);
-});
-
 // Handler 6 — handleReleaseAbandoned tears down the preview container so it
-// doesn't outlive an abandoned Release ticket.
+// doesn't outlive an abandoned release.
 
 test('handleReleaseAbandoned tears down the preview container', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({
-    key: 'GANG-62', targetProject: 'GANG', targetProjectName: 'hello-world',
-  }));
-  let triggered = null;
-  t.mock.method(jenkins, 'triggerPreviewTeardown', async (issueKey, projectName) => {
-    triggered = { issueKey, projectName };
-  });
-
-  await handleReleaseAbandoned({ jiraIssueKey: 'GANG-62' });
-
-  assert.deepEqual(triggered, { issueKey: 'GANG-62', projectName: 'hello-world' });
-});
-
-test('handleReleaseAbandoned (local mode) tears down the preview container without calling Jira', async (t) => {
-  let jiraCalled = false;
-  t.mock.method(jira, 'getIssue', async () => { jiraCalled = true; return {}; });
   let triggered = null;
   t.mock.method(jenkins, 'triggerPreviewTeardown', async (ref, projectName) => {
     triggered = { ref, projectName };
@@ -398,16 +218,20 @@ test('handleReleaseAbandoned (local mode) tears down the preview container witho
 
   await handleReleaseAbandoned({ workItemId: 'wi-release-1', project: 'hello-world' });
 
-  assert.equal(jiraCalled, false);
   assert.deepEqual(triggered, { ref: { workItemId: 'wi-release-1' }, projectName: 'hello-world' });
 });
 
-test('handleReleaseAbandoned with no Target Project never calls Jenkins', async (t) => {
-  t.mock.method(jira, 'getIssue', async () => ({ key: 'GANG-62', targetProject: null, targetProjectName: null }));
-  let called = false;
-  t.mock.method(jenkins, 'triggerPreviewTeardown', async () => { called = true; });
-
-  await handleReleaseAbandoned({ jiraIssueKey: 'GANG-62' });
-
-  assert.equal(called, false);
+// REQ-07 — `findBlockedMarker` greps for `BLOCKED <work item id>`, keyed on the
+// canonical id, and the agent role documents are where an agent learns to write
+// that marker. The two have to agree or a resumed dispatch silently finds
+// nothing, so the documents are read here rather than trusted.
+test('every agent role document teaches the marker format findBlockedMarker searches for', () => {
+  const rolesDir = path.join(__dirname, '..', '..', '..', 'setup', 'agents');
+  for (const name of ['backend-agent.md', 'frontend-agent.md', 'devops-agent.md']) {
+    const doc = fs.readFileSync(path.join(rolesDir, name), 'utf8');
+    assert.match(doc, /BLOCKED <work item id>/,
+      `${name} must teach the marker keyed on the canonical work item id`);
+    assert.doesNotMatch(doc, /BLOCKED GANG-/,
+      `${name} must not teach a marker keyed on a tracker key`);
+  }
 });

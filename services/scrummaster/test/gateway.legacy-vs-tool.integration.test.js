@@ -11,25 +11,22 @@
  * `setup/commons/tools/a2a-submit.js`, run as a real child process with the
  * dispatch environment the subscriber exports. Both rounds are then compared on
  * two things: the Streams entry that reached the gateway, and the gateway-side
- * effect it produced — comments, the Blocked flag, the Agent field,
- * transitions, subtasks created, tasks dispatched, and the canonical commands
- * local mode publishes in place of all of that.
+ * effect it produced — the canonical commands published to core, and the tasks
+ * dispatched.
  *
- * Every case runs twice more, once per canonical-work-item mode (V5.0 audit row
- * 40). Each handler has two halves and only the Jira one used to be compared:
- * the `canonicalWorkItems` half is a different projection of the same
- * submission — `transitionStatus`/`assign`/`appendComment`/
- * `materializeDecomposition` commands rather than Jira calls — and REQ-05's "for
- * every operation type" is about the submission, not about one of its two
- * projections. `canceled` and `rejected` are in the case list for the same
- * reason: they are the two states whose canonical status differs from `failed`
- * (`mapTerminalStateToStatus`), so leaving them out left the one place the three
- * terminal states are not interchangeable uncompared.
+ * From v5.1 a handler has one half, not two: every projection of a submission is
+ * a canonical command — `transitionStatus`/`assign`/`appendComment`/
+ * `materializeDecomposition` — published to core in every mode (v5.1 REQ-04,
+ * REQ-05), so there is one outcome per case to compare rather than one per mode
+ * (V5.0 audit row 40 compared both). `canceled` and `rejected` stay in the case
+ * list: they are the two states whose canonical status differs from `failed`
+ * (`mapTerminalStateToStatus`), so leaving them out would leave the one place
+ * the three terminal states are not interchangeable uncompared.
  *
  * Only identifiers and timestamps are normalised away, because the constructor
  * mints its own and the whole point of it is that no id crosses the agent.
  * Nothing in gateway.js changes for this test: it drives the real
- * startGatewaySubscriber over the same jira.js in-memory fake
+ * startGatewaySubscriber over the same in-memory fake `core`
  * gateway.integration.test.js installs.
  *
  * The two approved divergences (a `create_subtask` with no `description` and
@@ -51,7 +48,6 @@ process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '..', 'config', 'project
 process.env.REDIS_HOST = process.env.REDIS_TEST_HOST || 'localhost';
 process.env.REDIS_PORT = process.env.REDIS_TEST_PORT || '16399';
 
-const jira = require('../src/jira');
 const registry = require('../src/registry');
 const streams = require('../src/streams');
 const canonicalWorkItems = require('../src/canonicalWorkItems');
@@ -75,42 +71,16 @@ const NODE_PATH = process.env.NODE_PATH || path.join(__dirname, '..', 'node_modu
 let client;
 let dispatchDir;
 
-// Which projection the gateway makes of a submission. Set by each test; the
-// fixture below stands in for whichever side it reaches.
-let mode = 'jira';
-
-// Local mode's half of every handler: the canonical commands the gateway
-// publishes instead of touching Jira at all.
+// The one projection the gateway makes of a submission: the canonical commands
+// it publishes to core.
 const fakeCanonical = {
   commands: [],
   // What `persistedStatus` reads back after a completion; only ever reported.
   status: 'in-progress',
 };
 
-const fakeJira = {
-  issues: new Map(),
-  comments: [],
-  blocked: new Map(),
-  agentField: new Map(),
-  transitions: [],
-  nextSubtaskSeq: 1,
-};
-
 function resetFakeCanonical() {
   fakeCanonical.commands = [];
-}
-
-function resetFakeJira() {
-  fakeJira.issues.clear();
-  fakeJira.comments = [];
-  fakeJira.blocked.clear();
-  fakeJira.agentField.clear();
-  fakeJira.transitions = [];
-  fakeJira.nextSubtaskSeq = 1;
-  fakeJira.issues.set(TASK_ID, {
-    key: TASK_ID, summary: 'Parent story', project: 'HW', projectName: PROJECT,
-    comments: [], parent: null,
-  });
 }
 
 function registerTask() {
@@ -123,7 +93,7 @@ function registerTask() {
     contextId: TASK_ID,
     status: { state: 'submitted', timestamp: new Date().toISOString(), message },
     metadata: {
-      jiraIssueKey: TASK_ID, jiraProjectKey: 'HW', jiraProjectName: PROJECT,
+      jiraProjectKey: 'HW', projectName: PROJECT,
       agentId: 'refinement-agent',
     },
   }));
@@ -133,29 +103,10 @@ before(async () => {
   await redisModule.connect();
   client = redisModule.getClient();
 
-  jira.postComment = async (key, body) => { fakeJira.comments.push({ key, body }); };
-  jira.setBlockedField = async (key, val) => { fakeJira.blocked.set(key, val); };
-  jira.setAgentField = async (key, val) => { fakeJira.agentField.set(key, val); };
-  jira.transitionIssue = async (key, status) => { fakeJira.transitions.push({ key, status }); };
-  jira.getIssue = async (key) => {
-    const issue = fakeJira.issues.get(key);
-    if (!issue) throw new Error(`fake jira: no such issue ${key}`);
-    return { ...issue, comments: issue.comments || [] };
-  };
-  canonicalWorkItems.getMode = async () => ({ mode });
   canonicalWorkItems.publishCommand = async (projectName, command) => {
     fakeCanonical.commands.push({ projectName, ...command });
   };
   canonicalWorkItems.getWorkItem = async (id) => ({ id, status: fakeCanonical.status });
-
-  jira.createSubtask = async (parentKey, projectKey, summary, description, agentFieldValue) => {
-    const subtaskKey = `HW-${100 + fakeJira.nextSubtaskSeq++}`;
-    fakeJira.issues.set(subtaskKey, {
-      key: subtaskKey, summary, description, project: projectKey, projectName: PROJECT,
-      parent: parentKey, comments: [], agent: agentFieldValue,
-    });
-    return subtaskKey;
-  };
 
   // The constructor keeps its chain in the `state/` directory beside the
   // commons snapshot; each round gets a fresh one, so both rounds' submissions
@@ -170,17 +121,15 @@ after(async () => {
 
 beforeEach(async () => {
   await client.flushDb();
-  resetFakeJira();
   resetFakeCanonical();
   taskStore._reset();
-  mode = 'jira';
 });
 
 // --- the two paths ---------------------------------------------------------
 
 async function publishLegacy(payload) {
   const envelope = buildEnvelope({
-    kind: KIND.JIRA_OPERATION,
+    kind: KIND.GATEWAY_OPERATION,
     project: PROJECT,
     taskId: payload.message.taskId,
     contextId: payload.message.contextId,
@@ -290,12 +239,6 @@ async function gatewaySideEffect() {
   }
   return {
     canonicalCommands: normalizeCommands(),
-    comments: fakeJira.comments.map(c => ({ key: c.key, body: c.body })),
-    blocked: [...fakeJira.blocked.entries()].sort(),
-    agentField: [...fakeJira.agentField.entries()].sort(),
-    transitions: fakeJira.transitions,
-    issues: [...fakeJira.issues.values()]
-      .map(i => ({ key: i.key, summary: i.summary, description: i.description, parent: i.parent, agent: i.agent })),
     dispatches: dispatches.sort((a, b) => `${a.suffix}${a.taskId}`.localeCompare(`${b.suffix}${b.taskId}`)),
     taskState: taskStore.getTaskById(TASK_ID).state,
     failedMessages: taskStore.failedMessageIds(TASK_ID).length,
@@ -313,9 +256,8 @@ async function waitFor(predicate, description, timeoutMs = 4000) {
 
 // One round: seed the fixture, publish one submission the given way, let the
 // real gateway consumer apply it, and report both the entry and the effect.
-async function round(publish, { expectDispatch = false } = {}) {
+async function round(publish) {
   await client.flushDb();
-  resetFakeJira();
   resetFakeCanonical();
   taskStore._reset();
   registerTask();
@@ -326,15 +268,11 @@ async function round(publish, { expectDispatch = false } = {}) {
 
   await gateway.startGatewaySubscriber();
   try {
-    // Local mode touches nothing in the Jira fixture: every projection is a
-    // canonical command, including create_subtask, which materializes the
-    // subtask and dispatches from its own ready event rather than here.
+    // Every projection is a canonical command, including create_subtask, which
+    // materializes the subtask in core and dispatches from its own ready event
+    // rather than here.
     await waitFor(
-      async () => (mode === 'local'
-        ? fakeCanonical.commands.length > 0
-        : expectDispatch
-          ? fakeJira.issues.size > 1
-          : fakeJira.comments.length > 0 || fakeJira.agentField.size > 0),
+      async () => fakeCanonical.commands.length > 0,
       'the gateway to apply the submission'
     );
     // Let any follow-on step (transition, dispatch) finish too.
@@ -421,7 +359,6 @@ const CASES = [
   },
   {
     name: 'create_subtask, with both optional references',
-    expectDispatch: true,
     legacy: {
       state: 'working',
       message: message([
@@ -482,7 +419,7 @@ const CASES = [
   },
   {
     // canceled and rejected are the two states mapTerminalStateToStatus does
-    // not map to 'failed', so they are the only terminal states whose local-mode
+    // not map to 'failed', so they are the only terminal states whose canonical
     // projection differs from the one above.
     name: 'a canceled task',
     legacy: {
@@ -501,34 +438,20 @@ const CASES = [
   },
 ];
 
-for (const testMode of ['jira', 'local']) {
-  for (const testCase of CASES) {
-    test(`REQ-05 (${testMode} mode): ${testCase.name} — the legacy path and the constructor produce the same entry and the same outcome`, async () => {
-      mode = testMode;
-      const options = { expectDispatch: testCase.expectDispatch };
-      const legacy = await round(() => publishLegacy(testCase.legacy), options);
-      const tool = await round(() => publishThroughConstructor(testCase.args), options);
+for (const testCase of CASES) {
+  test(`REQ-05: ${testCase.name} — the legacy path and the constructor produce the same entry and the same outcome`, async () => {
+    const legacy = await round(() => publishLegacy(testCase.legacy));
+    const tool = await round(() => publishThroughConstructor(testCase.args));
 
-      assert.deepEqual(tool.entry, legacy.entry, 'the Streams entry differs');
-      assert.deepEqual(tool.effect, legacy.effect, 'the gateway-side outcome differs');
-      assert.equal(tool.effect.failedMessages, 0, 'neither path may record a failed message');
-      assert.equal(tool.entry.payload.message.chainedToTheDispatch, true,
-        'the constructor chains its first submission to the dispatch message, with no id given to it');
+    assert.deepEqual(tool.entry, legacy.entry, 'the Streams entry differs');
+    assert.deepEqual(tool.effect, legacy.effect, 'the gateway-side outcome differs');
+    assert.equal(tool.effect.failedMessages, 0, 'neither path may record a failed message');
+    assert.equal(tool.entry.payload.message.chainedToTheDispatch, true,
+      'the constructor chains its first submission to the dispatch message, with no id given to it');
 
-      // The comparison is only worth anything if the mode under test is the one
-      // the handler actually took: a local-mode round that quietly reached Jira
-      // would compare two empty command lists and pass.
-      if (testMode === 'local') {
-        assert.ok(tool.effect.canonicalCommands.length > 0,
-          'a local-mode round must project the submission as canonical commands');
-        assert.deepEqual(tool.effect.comments, [], 'and must touch Jira nowhere');
-        assert.deepEqual(tool.effect.transitions, []);
-        assert.deepEqual(tool.effect.blocked, []);
-        assert.deepEqual(tool.effect.agentField, []);
-      } else {
-        assert.deepEqual(tool.effect.canonicalCommands, [],
-          'a Jira-mode round publishes no canonical command');
-      }
-    });
-  }
+    // The comparison is only worth anything if the submission really reached a
+    // handler: two empty command lists would otherwise compare equal and pass.
+    assert.ok(tool.effect.canonicalCommands.length > 0,
+      'every submission must project as at least one canonical command');
+  });
 }

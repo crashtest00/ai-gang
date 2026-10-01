@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from . import catchup, store, write_gate
+from . import store, write_gate
 from .materialize import materialize_decomposition
 from .stream_topology import COMMAND_GROUP, command_stream_name
 from .streams import PermanentError, create_consumer
@@ -41,14 +41,14 @@ def is_permanent_rejection(err: Exception) -> bool:
 def handle_command(envelope: dict[str, Any]) -> Any:
     """envelope['payload'] shape: { command, actor, ...commandArgs }.
     `command` is one of: create, assign, transitionStatus, attachArtifact,
-    appendComment, createLink, materializeDecomposition, recordExternalKey,
+    appendComment, createLink, materializeDecomposition,
     recordSpecificationLink, addArtifactLink (work-items.md REQ-01/REQ-02 —
     the only write path for these two references; see that spec's REQ-03).
     Origin is always DIRECT here — this consumer IS the "direct" internal-API
     write path the write-gate gates; a Jira-originated write instead goes through
-    webhook_consumer.py with origin JIRA_WEBHOOK. recordExternalKey,
-    recordSpecificationLink and addArtifactLink are not gated (none of them
-    touches a status/assignment/dependency field)."""
+    webhook_consumer.py with origin JIRA_WEBHOOK. recordSpecificationLink and
+    addArtifactLink are not gated (neither touches a
+    status/assignment/dependency field)."""
     payload = envelope['payload']
     command = payload.get('command')
     actor = payload.get('actor')
@@ -70,14 +70,6 @@ def handle_command(envelope: dict[str, Any]) -> Any:
     if command == 'createLink':
         return store.create_link(payload['fromWorkItemId'], payload['toWorkItemId'], payload['linkType'],
                                   actor=actor, origin=write_gate.Origins.DIRECT)
-    if command == 'recordExternalKey':
-        # The catch-up push: the Jira-facing
-        # consumer (jiraCatchupConsumer.js) reports a newly-created Jira
-        # issue's key back here after catchup.py's
-        # work_item.jira_catchup_requested event. Idempotent — a no-op if
-        # external_key is already set, per record_external_key's own
-        # contract.
-        return catchup.record_external_key(payload['workItemId'], payload['externalKey'], actor=actor or 'jira-catchup')
     if command == 'recordSpecificationLink':
         return store.record_specification_link(
             payload['workItemId'], payload['artifactId'], payload['requirementId'], actor=actor,

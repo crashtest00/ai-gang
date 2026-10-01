@@ -262,7 +262,7 @@ function checkA2ASubmission(payload, errors) {
 //     fallback chain (`payload.message?.taskId || payload.ticket_key || ...`),
 //     so a further action that carries its own id field needs that chain
 //     extended too, or its entries reach the stream with a null taskId.
-//  2. Both entry points hard-code `kind: KIND.JIRA_OPERATION`
+//  2. Both entry points hard-code `kind: KIND.GATEWAY_OPERATION`
 //     (`a2a-submit.js`, `gateway-publish.js`), which makes
 //     dispatchGatewayOperation's `KIND.TASK_STATUS` branch unreachable from
 //     either of them — a future `task_status` producer needs a `kind` argument,
@@ -276,8 +276,8 @@ const DEFINITIONS = [
     id: 'materializeDecomposition',
     matches: payload => payload.operation === 'materializeDecomposition',
     check(payload, errors) {
-      if (!isNonEmptyString(payload.parentJiraIssueKey)) {
-        errors.push('parentJiraIssueKey must be a non-empty string for the "materializeDecomposition" operation');
+      if (!isNonEmptyString(payload.parentWorkItemId)) {
+        errors.push('parentWorkItemId must be a non-empty string for the "materializeDecomposition" operation');
       }
       if (!Array.isArray(payload.subtasks)) {
         errors.push('subtasks must be an array for the "materializeDecomposition" operation');

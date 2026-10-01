@@ -114,7 +114,17 @@ Auto-update service outages must not be "fixed" by publishing manually.
 
 These are used on every task. They are reproduced here so you do not need to load the handbook for routine work.
 
-**Branch naming:** `feature/GANG-42-short-description`, `bugfix/GANG-99-description`, `chore/GANG-7-description`
+**Branch naming:** `feature/<reference>-short-description`,
+`bugfix/<reference>-description`, `chore/<reference>-description`, and the same
+`<reference>` in the commit message and the PR title. `<reference>` is the
+`External key` line from your prompt's `## WORK ITEM REFERENCES` block when it
+shows one, and the `Work item id` line otherwise.
+
+**BLOCKED marker format:** `BLOCKED <work item id>` followed by the precise
+description of what you need, inside the comment syntax of the file you are
+editing. It carries the `Work item id` from your prompt, never the
+`External key`: that is the id ScrumMaster searches for when the block is
+cleared and it resumes you.
 
 **Branch gates:**
 - PR against `dev` → Install, Test, Build; auto-merge on pass, Jira comment + In Progress on fail

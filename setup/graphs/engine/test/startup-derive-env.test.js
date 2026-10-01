@@ -155,12 +155,17 @@ test("an absent ScrumMaster .env is seeded from the service's own .env.example",
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   const text = fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8');
-  assert.match(text, /JIRA_AGENT_FIELD_ID=/, 'the example file\'s own keys should still be there');
+  // v5.1 REQ-06 removed ScrumMaster's tracker variables from this template, so
+  // the seeded file is checked against keys it still declares.
+  assert.match(text, /PROJECTS_BASE_PATH=/, 'the example file\'s own keys should still be there');
+  assert.match(text, /STREAM_RETENTION_DAYS=/);
 });
 
 test('an existing ScrumMaster .env keeps every value this flow does not own', () => {
   // scripts/create-jira-fields.sh and scripts/init-project.sh both write
-  // into this file. Derivation must never be the thing that loses them.
+  // into this file — v5.1 REQ-06 removed the tracker variables from the
+  // template, not from those scripts. Derivation must never be the thing that
+  // loses a value another writer put there.
   const existing = [
     'JIRA_AGENT_FIELD_ID=customfield_10099',
     'WEBHOOK_SECRET=an-existing-secret',

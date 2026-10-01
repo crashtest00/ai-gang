@@ -86,32 +86,6 @@ def test_req03_unknown_command_is_dead_lettered(clean_db, redis_client, redis_fa
         consumer.stop()
 
 
-def test_record_external_key_command_over_streams_is_idempotent(clean_db, redis_client, redis_factory):
-    """jiraCatchupConsumer.js reports a
-    newly-created Jira issue's key back via this command. Not gated
-    (external_key isn't a status/assignment/dependency field), and applying
-    it twice (a redelivered command) must not error or overwrite a
-    different key — record_external_key's own idempotency contract."""
-    item_id = uuid.uuid4()
-    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Catch-up target'})
-
-    consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='test-5')
-    consumer.start()
-    try:
-        publish_command(redis_client, {'command': 'recordExternalKey', 'actor': 'jira-catchup',
-                                        'workItemId': str(item_id), 'externalKey': 'GANG-1'})
-        wait_for(lambda: store.get_work_item(item_id).external_key == 'GANG-1')
-
-        # Redelivery / retry with the same key: must remain a no-op, not an error.
-        publish_command(redis_client, {'command': 'recordExternalKey', 'actor': 'jira-catchup',
-                                        'workItemId': str(item_id), 'externalKey': 'GANG-1'})
-        time.sleep(0.2)
-    finally:
-        consumer.stop()
-
-    assert store.get_work_item(item_id).external_key == 'GANG-1'
-
-
 def test_status_change_against_jira_mode_project_is_dead_lettered(clean_db, redis_client, redis_factory):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Gated'})

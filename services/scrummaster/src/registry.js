@@ -220,14 +220,10 @@ function getEffectiveAgents(projectName) {
 // already bound to (a Jira issue's own project, or the stream a consumer is
 // reading), not from message content.
 const GATEWAY_GROUP = 'scrummaster';
-// This service's own consumer group on the core service's
-// outbound event stream (any interested subscriber creates its own group —
-// see services/core/workitems/stream_topology.py's module comment).
-const JIRA_CATCHUP_GROUP = 'jira-catchup';
-// ScrumMaster's dispatch-trigger consumer
-// group on that SAME outbound event stream. A second, independent
-// subscriber (Streams' normal fan-out — every interested consumer gets its
-// own group), not a replacement for JIRA_CATCHUP_GROUP.
+// ScrumMaster's dispatch-trigger consumer group on the core service's
+// outbound event stream — this service's only group there, one among the
+// groups any interested subscriber creates for itself (see
+// services/core/workitems/stream_topology.py's module comment).
 const DISPATCH_GROUP = 'dispatch';
 
 function normalizeProjectName(name) {
@@ -276,6 +272,5 @@ module.exports = {
   gatewayStreamName,
   workItemEventStreamName,
   GATEWAY_GROUP,
-  JIRA_CATCHUP_GROUP,
   DISPATCH_GROUP,
 };

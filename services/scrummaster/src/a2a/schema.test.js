@@ -60,22 +60,22 @@ test('validateMessage rejects "from"/"to" as top-level content fields', () => {
 
 // AI Gang integration metadata must live in `metadata`
 
-test('validateTask accepts a Jira issue key inside metadata', () => {
+test('validateTask accepts an external system key inside metadata', () => {
   schema.validateTask(buildTask({
     id: 'task-1',
     contextId: 'ctx-1',
     status: { state: 'submitted', timestamp: new Date().toISOString(), message: baseMessage() },
-    metadata: { jiraIssueKey: 'GANG-42' },
+    metadata: { externalKey: 'GANG-42' },
   }));
 });
 
-test('validateTask rejects a Jira issue key at the top level', () => {
+test('validateTask rejects an external system key at the top level', () => {
   const task = buildTask({
     id: 'task-1',
     contextId: 'ctx-1',
     status: { state: 'submitted', timestamp: new Date().toISOString(), message: baseMessage() },
   });
-  task.jiraIssueKey = 'GANG-42';
+  task.externalKey = 'GANG-42';
   assert.throws(() => schema.validateTask(task), schema.A2AValidationError);
 });
 

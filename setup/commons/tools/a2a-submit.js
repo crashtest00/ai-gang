@@ -456,7 +456,7 @@ async function main() {
 
   const stream = `aigang:gateway:${context.project}`;
   const envelope = buildEnvelope({
-    kind: KIND.JIRA_OPERATION,
+    kind: KIND.GATEWAY_OPERATION,
     project: context.project,
     taskId: context.taskId,
     contextId: context.contextId,

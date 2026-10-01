@@ -2,6 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { buildEnvelope, validateEnvelope, KIND, toStreamFields, fromStreamFields, SCHEMA_VERSION } = require('../src/envelope');
 const {
@@ -12,7 +14,7 @@ const {
 } = require('../../../setup/commons/tools/envelope');
 
 test('buildEnvelope produces a schema-valid envelope with defaults', () => {
-  const envelope = buildEnvelope({ kind: KIND.JIRA_OPERATION, project: 'hello-world', payload: { type: 'comment' } });
+  const envelope = buildEnvelope({ kind: KIND.GATEWAY_OPERATION, project: 'hello-world', payload: { type: 'comment' } });
   assert.equal(envelope.schemaVersion, '1');
   assert.match(envelope.messageId, /^msg-/);
   assert.equal(envelope.taskId, null);
@@ -36,13 +38,13 @@ test('validateEnvelope rejects an unknown kind', () => {
 
 test('validateEnvelope rejects a wrong schemaVersion', () => {
   assert.throws(
-    () => validateEnvelope({ schemaVersion: '2', messageId: 'm', kind: KIND.JIRA_OPERATION, project: 'p', createdAt: new Date().toISOString(), payload: {} }),
+    () => validateEnvelope({ schemaVersion: '2', messageId: 'm', kind: KIND.GATEWAY_OPERATION, project: 'p', createdAt: new Date().toISOString(), payload: {} }),
     /schemaVersion/
   );
 });
 
 test('toStreamFields/fromStreamFields round-trip', () => {
-  const envelope = buildEnvelope({ kind: KIND.JIRA_OPERATION, project: 'p', payload: { type: 'comment', body: 'hi' } });
+  const envelope = buildEnvelope({ kind: KIND.GATEWAY_OPERATION, project: 'p', payload: { type: 'comment', body: 'hi' } });
   const fields = toStreamFields(envelope);
   assert.deepEqual(Object.keys(fields), ['data']);
   const parsed = fromStreamFields(fields);
@@ -61,6 +63,39 @@ test('fromStreamFields returns null instead of throwing on garbage', () => {
 // genuine kind here too (VALID_KINDS membership, not just presence).
 test('KIND is identical to setup/commons/tools/envelope.js\'s container-side copy', () => {
   assert.deepStrictEqual(KIND, CONTAINER_SIDE_KIND);
+});
+
+// v5.1 REQ-06 — the envelope schema has a third copy, core's Python port
+// (services/core/workitems/envelope.py), whose VALID_KINDS validates every
+// envelope core publishes or consumes. The gateway kind had to be renamed in
+// all three at once: renaming it in fewer dead-letters every gateway entry the
+// commons tools publish (src/envelope.js's VALID_KINDS check). The two JS
+// copies are compared object-to-object above; the Python one is read as text,
+// because that is the only way to compare it from here.
+test('the gateway kind matches core\'s Python port of the envelope schema, and the retired name is in none of the three', () => {
+  const pythonCopy = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'core', 'workitems', 'envelope.py'), 'utf8');
+  const containerCopy = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'setup', 'commons', 'tools', 'envelope.js'), 'utf8');
+  const scrumMasterCopy = fs.readFileSync(path.join(__dirname, '..', 'src', 'envelope.js'), 'utf8');
+
+  assert.equal(KIND.GATEWAY_OPERATION, 'gateway_operation');
+  assert.match(pythonCopy, /GATEWAY_OPERATION = 'gateway_operation'/,
+    'core\'s port must declare the same name and value');
+  assert.match(pythonCopy, /Kind\.GATEWAY_OPERATION/,
+    'and must accept it as a valid kind');
+
+  // The retired name, spelled out only here: a copy that still carries it
+  // would validate envelopes the other two reject.
+  const retired = ['JIRA', 'OPERATION'].join('_');
+  for (const [name, source] of [
+    ['services/scrummaster/src/envelope.js', scrumMasterCopy],
+    ['setup/commons/tools/envelope.js', containerCopy],
+    ['services/core/workitems/envelope.py', pythonCopy],
+  ]) {
+    assert.ok(!source.includes(retired), `${name} must not carry the retired gateway kind`);
+    assert.ok(!source.includes(retired.toLowerCase()), `${name} must not carry its retired value`);
+  }
 });
 
 test('ARTIFACT_DELIVERY_REQUEST/_RESPONSE match setup/commons/tools/envelope.js\'s container-side copy byte-for-byte', () => {
@@ -88,9 +123,9 @@ const ENVELOPE_TABLE_NOW = new Date().toISOString();
 // instead of only showing up as a runtime dead-letter mismatch.
 const ENVELOPE_TABLE = [
   {
-    name: 'valid jira_operation envelope',
+    name: 'valid gateway_operation envelope',
     valid: true,
-    envelope: { schemaVersion: '1', messageId: 'm-1', kind: KIND.JIRA_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: { type: 'comment' } },
+    envelope: { schemaVersion: '1', messageId: 'm-1', kind: KIND.GATEWAY_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: { type: 'comment' } },
   },
   {
     name: 'valid task envelope with taskId/contextId',
@@ -125,27 +160,27 @@ const ENVELOPE_TABLE = [
   {
     name: 'wrong schemaVersion',
     valid: false,
-    envelope: { schemaVersion: '2', messageId: 'm-8', kind: KIND.JIRA_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
+    envelope: { schemaVersion: '2', messageId: 'm-8', kind: KIND.GATEWAY_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
   },
   {
     name: 'empty messageId',
     valid: false,
-    envelope: { schemaVersion: '1', messageId: '', kind: KIND.JIRA_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
+    envelope: { schemaVersion: '1', messageId: '', kind: KIND.GATEWAY_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
   },
   {
     name: 'empty project',
     valid: false,
-    envelope: { schemaVersion: '1', messageId: 'm-9', kind: KIND.JIRA_OPERATION, project: '', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
+    envelope: { schemaVersion: '1', messageId: 'm-9', kind: KIND.GATEWAY_OPERATION, project: '', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: {} },
   },
   {
     name: 'unparseable createdAt',
     valid: false,
-    envelope: { schemaVersion: '1', messageId: 'm-10', kind: KIND.JIRA_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: 'not-a-date', payload: {} },
+    envelope: { schemaVersion: '1', messageId: 'm-10', kind: KIND.GATEWAY_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: 'not-a-date', payload: {} },
   },
   {
     name: 'null payload',
     valid: false,
-    envelope: { schemaVersion: '1', messageId: 'm-11', kind: KIND.JIRA_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: null },
+    envelope: { schemaVersion: '1', messageId: 'm-11', kind: KIND.GATEWAY_OPERATION, project: 'p', taskId: null, contextId: null, correlationId: null, createdAt: ENVELOPE_TABLE_NOW, payload: null },
   },
 ];
 

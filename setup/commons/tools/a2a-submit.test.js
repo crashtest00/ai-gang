@@ -261,7 +261,7 @@ for (const testCase of CASES) {
     const message = published.payload.message;
 
     assert.equal(published.payload.state, testCase.state);
-    assert.equal(published.kind, 'jira_operation');
+    assert.equal(published.kind, 'gateway_operation');
     assert.equal(published.project, PROJECT);
     assert.equal(message.kind, 'message');
     assert.equal(message.role, 'agent');
