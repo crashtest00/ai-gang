@@ -12,7 +12,6 @@ const { deriveAgentCard } = require('./a2a/agentCard');
 
 let catalog = null;   // { byId: Map<string, agent>, ids: string[] }
 let projects = null;  // Map<string, { name, jiraProjectKey, agents: string[] }>
-let agentCardsById = null; // Map<string, AgentCard> — derived from catalog.byId
 
 function catalogPath() {
   return process.env.AGENTS_CATALOG_PATH || '/app/config/agents.json';
@@ -153,10 +152,10 @@ function load() {
 
   // Fail fast: every registered agent must produce a valid AgentCard. A
   // catalog entry that can't derive one is a configuration error, not a
-  // runtime-recoverable condition.
-  agentCardsById = new Map();
+  // runtime-recoverable condition. Nothing reads the derived cards, so they
+  // are not retained — deriving each one is the whole point.
   for (const id of catalog.ids) {
-    agentCardsById.set(id, deriveAgentCard(catalog.byId.get(id)));
+    deriveAgentCard(catalog.byId.get(id));
   }
 }
 
@@ -165,18 +164,6 @@ function load() {
 function getAgent(id) {
   load();
   return catalog.byId.get(id) || null;
-}
-
-// Look up the derived AgentCard for a registered agent, or null if unknown.
-function getAgentCard(id) {
-  load();
-  return agentCardsById.get(id) || null;
-}
-
-// All registered AgentCards, keyed by catalog agent id.
-function listAgentCards() {
-  load();
-  return Object.fromEntries(agentCardsById);
 }
 
 function getProjectNames() {
@@ -247,8 +234,6 @@ module.exports = {
   parseCatalog,
   parseProjects,
   getAgent,
-  getAgentCard,
-  listAgentCards,
   getProjectNames,
   getProject,
   getEffectiveAgents,

@@ -95,7 +95,7 @@ Use the index below to go directly to the relevant section. Read only what you n
 | Installing or checking Jenkins plugins | `## Jenkins Setup` → `### Jenkins Plugins Required` |
 | Writing or modifying a Jenkinsfile | `## Jenkins Setup` → `### Jenkinsfile (Per Project)` |
 | Configuring Jenkins ↔ Jira connection | `## Jira Integration` → `### Connection Setup` |
-| Branch naming for a ticket | `## Jira Integration` → `### Ticket → Branch Naming Convention` |
+| Branch naming for a ticket | this file's `## Key Conventions (Memorised — Do Not Look These Up)` → **Branch naming** |
 | Understanding pipeline stage gates by branch | `## The Full Lifecycle` → `### Jenkinsfile Branch Gates` |
 | Understanding the full ticket-to-deploy flow | `## The Full Lifecycle` → `### End-to-End Flow` |
 | Promoting beta to production | `## Production Promotion` |
@@ -128,9 +128,9 @@ cleared and it resumes you.
 
 **Branch gates:**
 - PR against `dev` → Install, Test, Build; auto-merge on pass, Jira comment + In Progress on fail
-- `dev` (post-merge) → Deploy to dev environment
+- `dev` (post-merge) → Promote to beta and deploy
 - Jira Done webhook → Promote dev → beta
-- Manual PR `beta → prod` → Deploy to production only (no re-test)
+- `production-promote` job → merges the frozen `release/<sha> → prod` PR, deploy only (no re-test)
 
 **Jira site name in Jenkinsfiles:** `ai-gang-jira`
 
