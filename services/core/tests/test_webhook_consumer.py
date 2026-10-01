@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from workitems import project_config, registry, store
@@ -11,16 +10,9 @@ from workitems.models import WebhookFailure
 from workitems.streams import ensure_group, publish
 from workitems.webhook_consumer import create_webhook_consumer
 
+from tests.wait_support import wait_for
+
 PROJECT = 'test-project'
-
-
-def wait_for(predicate, timeout_s=5.0, interval_s=0.03):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
 
 
 def jira_webhook_envelope(issue_key, to_status):
@@ -41,7 +33,9 @@ def test_req11_validated_jira_status_change_is_applied(clean_db, redis_client, r
     try:
         stream = registry.webhook_stream_name(PROJECT)
         publish(redis_client, stream, jira_webhook_envelope('TP-1', 'In Progress'))
-        wait_for(lambda: store.get_work_item(item_id).status == 'in-progress')
+        wait_for(lambda: store.get_work_item(item_id).status == 'in-progress',
+                 expected="the webhook status change to be applied — TP-1 at canonical status 'in-progress'",
+                 observed=lambda: f'status is {store.get_work_item(item_id).status!r}')
     finally:
         consumer.stop()
 
@@ -63,7 +57,10 @@ def test_req11_jira_change_violating_dependency_gate_is_rejected_and_recorded(cl
         # is still incomplete, so this must be rejected, not applied.
         publish(redis_client, stream, jira_webhook_envelope('TP-2', 'Shovel Ready'))
 
-        wait_for(lambda: WebhookFailure.objects.filter(work_item_id=item_id).count() == 1)
+        wait_for(lambda: WebhookFailure.objects.filter(work_item_id=item_id).count() == 1,
+                 expected='the dependency-gate rejection to be recorded — exactly 1 WebhookFailure row for the dependent',
+                 observed=lambda: (f'{WebhookFailure.objects.filter(work_item_id=item_id).count()} WebhookFailure row(s), '
+                                   f'status is {store.get_work_item(item_id).status!r}'))
     finally:
         consumer.stop()
 
@@ -86,7 +83,9 @@ def test_req02_per_project_jira_status_mapping_overrides_the_default_map(clean_d
     try:
         stream = registry.webhook_stream_name(PROJECT)
         publish(redis_client, stream, jira_webhook_envelope('TP-4', 'Doing'))
-        wait_for(lambda: store.get_work_item(item_id).status == 'in-review')
+        wait_for(lambda: store.get_work_item(item_id).status == 'in-review',
+                 expected="the per-project mapping to decide the outcome — TP-4 at canonical status 'in-review'",
+                 observed=lambda: f'status is {store.get_work_item(item_id).status!r}')
     finally:
         consumer.stop()
 
@@ -107,7 +106,9 @@ def test_req12_jira_mode_project_feeds_existing_scrummaster_webhook_group_unchan
     consumer.start()
     try:
         # This service's own "core" group independently drains the entry.
-        wait_for(lambda: (redis_client.xpending(stream, 'core') or {}).get('pending', 0) == 0)
+        wait_for(lambda: (redis_client.xpending(stream, 'core') or {}).get('pending', 0) == 0,
+                 expected="this service's own 'core' group to drain the entry — 0 pending",
+                 observed=lambda: f"{(redis_client.xpending(stream, 'core') or {}).get('pending', 0)} pending")
     finally:
         consumer.stop()
 

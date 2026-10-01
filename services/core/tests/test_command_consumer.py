@@ -9,7 +9,6 @@ Node reference implementation's approach.
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from workitems import project_config, store
@@ -17,6 +16,8 @@ from workitems.command_consumer import create_command_consumer
 from workitems.envelope import Kind, build_envelope
 from workitems.stream_topology import command_stream_name
 from workitems.streams import dead_letter_stream_name, publish
+
+from tests.wait_support import wait_for
 
 PROJECT = 'test-project'
 
@@ -26,15 +27,6 @@ def publish_command(redis_client, payload):
     return publish(redis_client, command_stream_name(PROJECT), envelope)
 
 
-def wait_for(predicate, timeout_s=5.0, interval_s=0.03):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
-
-
 def test_req03_create_command_over_streams_is_durably_applied(clean_db, redis_client, redis_factory):
     item_id = uuid.uuid4()
     consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='test-1')
@@ -42,7 +34,9 @@ def test_req03_create_command_over_streams_is_durably_applied(clean_db, redis_cl
     try:
         publish_command(redis_client, {'command': 'create', 'actor': 'tester',
                                         'input': {'id': str(item_id), 'project': PROJECT, 'type': 'task', 'displayName': 'Via Streams'}})
-        wait_for(lambda: store.get_work_item(item_id) is not None)
+        wait_for(lambda: store.get_work_item(item_id) is not None,
+                 expected=f'the create command to be applied — work item {item_id} readable from the store',
+                 observed=lambda: f'get_work_item({item_id}) is {store.get_work_item(item_id)!r}')
     finally:
         consumer.stop()
 
@@ -57,13 +51,19 @@ def test_req03_full_command_sequence_over_streams(clean_db, redis_client, redis_
     try:
         publish_command(redis_client, {'command': 'create', 'actor': 'tester',
                                         'input': {'id': str(item_id), 'project': PROJECT, 'type': 'task', 'displayName': 'Seq'}})
-        wait_for(lambda: store.get_work_item(item_id) is not None)
+        wait_for(lambda: store.get_work_item(item_id) is not None,
+                 expected=f'the create command to be applied — work item {item_id} readable from the store',
+                 observed=lambda: f'get_work_item({item_id}) is {store.get_work_item(item_id)!r}')
 
         publish_command(redis_client, {'command': 'assign', 'actor': 'tester', 'workItemId': str(item_id), 'agentId': 'backend-agent'})
-        wait_for(lambda: store.get_work_item(item_id).assignee_agent_id == 'backend-agent')
+        wait_for(lambda: store.get_work_item(item_id).assignee_agent_id == 'backend-agent',
+                 expected="the assign command to be applied — assignee_agent_id 'backend-agent'",
+                 observed=lambda: f'assignee_agent_id is {store.get_work_item(item_id).assignee_agent_id!r}')
 
         publish_command(redis_client, {'command': 'transitionStatus', 'actor': 'tester', 'workItemId': str(item_id), 'status': 'in-progress'})
-        wait_for(lambda: store.get_work_item(item_id).status == 'in-progress')
+        wait_for(lambda: store.get_work_item(item_id).status == 'in-progress',
+                 expected="the transitionStatus command to be applied — status 'in-progress'",
+                 observed=lambda: f'status is {store.get_work_item(item_id).status!r}')
 
         publish_command(redis_client, {'command': 'attachArtifact', 'actor': 'tester', 'workItemId': str(item_id),
                                         'artifactType': 'commit', 'reference': 'sha1'})
@@ -71,7 +71,9 @@ def test_req03_full_command_sequence_over_streams(clean_db, redis_client, redis_
                                         'author': 'backend-agent', 'body': 'done'})
 
         from workitems.models import WorkItemComment
-        wait_for(lambda: WorkItemComment.objects.filter(work_item_id=item_id).count() == 1)
+        wait_for(lambda: WorkItemComment.objects.filter(work_item_id=item_id).count() == 1,
+                 expected='the appendComment command to be applied — exactly 1 comment on the work item',
+                 observed=lambda: f'{WorkItemComment.objects.filter(work_item_id=item_id).count()} comment(s)')
     finally:
         consumer.stop()
 
@@ -81,7 +83,9 @@ def test_req03_unknown_command_is_dead_lettered(clean_db, redis_client, redis_fa
     consumer.start()
     try:
         publish_command(redis_client, {'command': 'not-a-real-command'})
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
+                 expected='the unknown command to be dead-lettered — 1 entry on the dead-letter stream',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -95,7 +99,9 @@ def test_status_change_against_jira_mode_project_is_dead_lettered(clean_db, redi
     consumer.start()
     try:
         publish_command(redis_client, {'command': 'transitionStatus', 'actor': 'tester', 'workItemId': str(item_id), 'status': 'in-progress'})
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
+                 expected="the write gate's refusal to be dead-lettered — 1 entry on the dead-letter stream",
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
     finally:
         consumer.stop()
         project_config.revert_to_local(PROJECT)
@@ -122,7 +128,9 @@ def test_release_candidate_cut_against_dirty_queue_is_dead_lettered(clean_db, re
     try:
         publish_command(redis_client, {'command': 'transitionStatus', 'actor': 'tester',
                                         'workItemId': str(release_id), 'status': 'in-review'})
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
+                 expected='the release-gate rejection to be dead-lettered — 1 entry on the dead-letter stream',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
     finally:
         consumer.stop()
 

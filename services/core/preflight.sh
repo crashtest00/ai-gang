@@ -22,9 +22,11 @@
 # result or a named refusal, never "I changed your tree".
 #
 # The wedged test database IS recovered automatically, because it can be made
-# safe: see `suite_lock_state` and the four gates below. Every gate that
+# safe: see `suite_lock_state` and the five gates below. Every gate that
 # cannot be proven refuses, prints the backends it found and gives the exact
-# recovery commands instead.
+# recovery commands instead. Two of the five are the lock-ownership gates, and
+# together they mean only the run holding the suite lock ever recovers anything
+# (V5.1 audit row 47).
 #
 # Run through run_tests.sh, which exports the PG*/REDIS* environment this
 # needs; running it bare stops on PGDATABASE with that instruction.
@@ -102,9 +104,19 @@ fi
 #
 #   ours   our own caller holds the lock. We are the legitimate run; nobody
 #          else can be, so any other backend on the test database is a leftover
-#   free   nobody holds it. There is no legitimate run to protect
+#   free   nobody holds it — so this run was invoked bare, without the `flock`
+#          wrapper, and the ownership test is unavailable: a second bare run's
+#          backends and a dead run's are indistinguishable from here. Refuse
 #   other   someone who is not an ancestor of ours holds it: a live suite.
 #          Refuse, and say so — its backends are not ours to kill
+#
+# Only `ours` reaches the terminate-and-drop path. The documented invocation
+# always yields `ours`, so refusing `free` costs a correct caller nothing, and
+# it removes the only way the ownership test can be wrong — a bare run (a
+# mistake this build made twice) otherwise reached a destructive path guarded
+# by idleness alone, which cannot tell a second bare run from a dead one.
+# A bare run whose test database is clean is unaffected: the gates below are
+# reached only when backends are actually sitting on it.
 suite_lock_state() {
   local target fd
   target="$(readlink -f -- "$LOCK_FILE" 2>/dev/null || true)"
@@ -204,6 +216,19 @@ with conn.cursor() as cur:
         refuse(f'{TEST_DB} has {len(backends)} other connection(s), and a process that is not an '
                f'ancestor of this one holds the suite lock {LOCK_FILE} — so a live suite is running '
                f'and these are most likely its backends. Not touching them.', backends)
+
+    if LOCK_STATE != 'ours':
+        # 'free'. Nobody holds the lock, so this run was invoked bare and
+        # cannot claim ownership of anything: the backends below could equally
+        # be a second bare run's, mid-test and about to lose its database.
+        # Terminating them is only safe for the run that holds the lock,
+        # because the lock is what makes "there is no other legitimate run"
+        # true. Say what to invoke instead; the recovery text follows.
+        refuse(f'{TEST_DB} has {len(backends)} other connection(s), and nobody holds the suite lock '
+               f'{LOCK_FILE} — so this run was invoked bare and cannot tell whether those backends '
+               f'belong to a dead run or to a second bare run still using them. Re-run the documented '
+               f'way, which takes the lock and makes this run their only legitimate owner:\n\n'
+               f'    flock {LOCK_FILE} ./run_tests.sh', backends)
 
     busy = [b for b in backends if b[1] != 'idle']
     if busy:

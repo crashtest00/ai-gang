@@ -94,7 +94,6 @@ function parseCatalog(raw, path) {
   return {
     byId,
     ids: Array.from(byId.keys()),
-    retiredIds: retiredAgents.map(r => r.id),
   };
 }
 
@@ -180,17 +179,6 @@ function listAgentCards() {
   return Object.fromEntries(agentCardsById);
 }
 
-// All registered agent ids, in catalog order.
-function getAllAgentIds() {
-  load();
-  return catalog.ids.slice();
-}
-
-function getRetiredAgentIds() {
-  load();
-  return catalog.retiredIds.slice();
-}
-
 function getProjectNames() {
   load();
   return Array.from(projects.keys());
@@ -261,8 +249,6 @@ module.exports = {
   getAgent,
   getAgentCard,
   listAgentCards,
-  getAllAgentIds,
-  getRetiredAgentIds,
   getProjectNames,
   getProject,
   getEffectiveAgents,

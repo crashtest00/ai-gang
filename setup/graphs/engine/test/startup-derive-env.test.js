@@ -142,6 +142,42 @@ test('WEBHOOK_SECRET set in the platform .env is carried into the core service .
   assert.equal('WEBHOOK_SECRET' in derivedWithoutSecret, false, 'WEBHOOK_SECRET should not appear when unset in the platform .env');
 });
 
+// V5.1 REQ-06: services/core/workitems/jira_client.py authenticates from the
+// platform .env's own JIRA_URL/JIRA_EMAIL/JIRA_TOKEN (its REQUIRED_ENV), so
+// derivation has to carry them the same way it carries the field ids.
+// startup-env.test.js reads the JIRA_CREDENTIAL_VARS array literal out of the
+// script, which proves the set is declared; this runs the script and proves the
+// set is delivered.
+const ALL_JIRA_CREDENTIAL_VARS = ['JIRA_URL', 'JIRA_EMAIL', 'JIRA_TOKEN'];
+
+test('a Jira credential set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
+  const values = {
+    JIRA_URL: 'https://jira.example.invalid',
+    JIRA_EMAIL: 'operator@example.invalid',
+    JIRA_TOKEN: 'a-test-only-jira-token',
+  };
+  const withCredentials = makeRoot({
+    platformEnv: PLATFORM_ENV + ALL_JIRA_CREDENTIAL_VARS.map((name) => `${name}=${values[name]}`).join('\n') + '\n',
+  });
+  const result = run(withCredentials);
+  assert.equal(result.status, 0, result.stderr);
+  const derivedWith = parseEnvFile(path.join(withCredentials, 'services', 'core', '.env'));
+  for (const name of ALL_JIRA_CREDENTIAL_VARS) {
+    assert.equal(derivedWith[name], values[name], `${name} was not carried into the core service .env`);
+  }
+
+  // Not set in the platform .env — a local-mode-only deployment must see no
+  // trace of them, not even an empty assignment, because jira_client.py's
+  // REQUIRED_ENV check treats an empty value and an absent one alike and the
+  // derived file is what distinguishes a configured deployment from a bare one.
+  const withoutCredentials = makeRoot();
+  assert.equal(run(withoutCredentials).status, 0);
+  const derivedWithout = parseEnvFile(path.join(withoutCredentials, 'services', 'core', '.env'));
+  for (const name of ALL_JIRA_CREDENTIAL_VARS) {
+    assert.equal(name in derivedWithout, false, `${name} should not appear when unset in the platform .env`);
+  }
+});
+
 test("ScrumMaster's environment file gets AI_GANG_HOME set to the checkout's own path", () => {
   const root = makeRoot();
   assert.equal(run(root).status, 0);

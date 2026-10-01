@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 
 from django.test import Client
@@ -32,6 +31,7 @@ from workitems.stream_topology import command_stream_name
 from workitems.streams import dead_letter_stream_name, publish
 
 from tests.test_work_item_references_store import make_artifact
+from tests.wait_support import wait_for
 
 PROJECT = 'test-project'
 
@@ -39,15 +39,6 @@ PROJECT = 'test-project'
 def publish_command(redis_client, payload):
     envelope = build_envelope(Kind.WORK_ITEM_COMMAND, PROJECT, payload=payload)
     return publish(redis_client, command_stream_name(PROJECT), envelope)
-
-
-def wait_for(predicate, timeout_s=5.0, interval_s=0.03):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
 
 
 def test_req01_materialize_decomposition_over_streams_records_references_on_the_subtask(clean_db, redis_client, redis_factory):
@@ -90,7 +81,10 @@ def test_req01_materialize_decomposition_over_streams_records_references_on_the_
                 ],
             },
         })
-        wait_for(lambda: store.get_work_item(with_refs) is not None and store.get_work_item(without_refs) is not None)
+        wait_for(lambda: store.get_work_item(with_refs) is not None and store.get_work_item(without_refs) is not None,
+                 expected='both subtasks of the materializeDecomposition command to exist',
+                 observed=lambda: (f'with_refs={store.get_work_item(with_refs) is not None}, '
+                                   f'without_refs={store.get_work_item(without_refs) is not None}'))
     finally:
         consumer.stop()
 
@@ -139,7 +133,9 @@ def test_req01_materialize_decomposition_with_unresolved_artifact_rolls_back_and
                 }],
             },
         })
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1,
+                 expected=f'the command to be dead-lettered — 1 entry on {dead_letter_stream_name(stream)}',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(stream))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -195,7 +191,9 @@ def test_req01_materialize_decomposition_with_unresolved_specification_link_also
                 }],
             },
         })
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1,
+                 expected=f'the command to be dead-lettered — 1 entry on {dead_letter_stream_name(stream)}',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(stream))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -240,7 +238,9 @@ def test_req01_materialize_decomposition_unresolved_artifact_report_reaches_a_st
                 }],
             },
         })
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1,
+                 expected=f'the command to be dead-lettered — 1 entry on {dead_letter_stream_name(stream)}',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(stream))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -301,7 +301,9 @@ def test_req01_materialize_decomposition_unresolved_artifact_report_survives_a_r
                     }],
                 },
             })
-            wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1)
+            wait_for(lambda: redis_client.xlen(dead_letter_stream_name(stream)) == 1,
+                     expected=f'the command to be dead-lettered — 1 entry on {dead_letter_stream_name(stream)}',
+                     observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(stream))} dead-letter entry/entries')
     finally:
         consumer.stop()
 

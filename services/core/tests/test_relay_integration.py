@@ -22,7 +22,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 import uuid
 from pathlib import Path
 
@@ -30,6 +29,8 @@ from django.db import connection, transaction
 
 from workitems.stream_topology import event_stream_name
 from workitems.store import write_outbox_event
+
+from tests.wait_support import wait_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANAGE_PY = REPO_ROOT / 'manage.py'
@@ -72,15 +73,6 @@ def published_count():
     return OutboxEvent.objects.filter(project=PROJECT, published_at__isnull=False).count()
 
 
-def wait_for(predicate, timeout_s=20.0, interval_s=0.1):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
-
-
 def test_req06_killing_relay_mid_batch_and_restarting_loses_nothing_and_duplicates_nothing(clean_db, redis_client):
     total = 8
     outbox_ids = []
@@ -101,7 +93,9 @@ def test_req06_killing_relay_mid_batch_and_restarting_loses_nothing_and_duplicat
         # Prove this is genuinely a MID-RUN kill: wait until at least one
         # row has published, then confirm not everything has published yet
         # before killing.
-        wait_for(lambda: published_count() >= 1)
+        wait_for(lambda: published_count() >= 1, timeout_s=20.0, interval_s=0.1,
+                 expected=f'the first relay to publish at least 1 of the {total} outbox rows',
+                 observed=lambda: f'{published_count()}/{total} published')
         mid_run_count = published_count()
         assert mid_run_count < total, f'expected a partial batch at kill time, got {mid_run_count}/{total} already published'
 
@@ -112,7 +106,9 @@ def test_req06_killing_relay_mid_batch_and_restarting_loses_nothing_and_duplicat
     # Restart with no artificial delay — drains the remainder quickly.
     second = spawn_relay(RELAY_ROW_DELAY_MS='0')
     try:
-        wait_for(lambda: published_count() == total, timeout_s=20.0)
+        wait_for(lambda: published_count() == total, timeout_s=20.0, interval_s=0.1,
+                 expected=f'the restarted relay to drain the remainder, all {total} outbox rows published',
+                 observed=lambda: f'{published_count()}/{total} published')
     finally:
         second.send_signal(signal.SIGKILL)
         second.wait(timeout=10)

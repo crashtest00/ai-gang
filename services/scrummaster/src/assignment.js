@@ -100,33 +100,4 @@ function roleAliases(agent) {
   return Array.from(new Set(tokens.concat(tokens.map(withoutAgentSuffix))));
 }
 
-// Validate an entire proposed decomposition atomically: every subtask's
-// `agent` must be valid, or the whole batch is rejected together.
-// subtasks: [{ id, displayName, agent, ... }]
-// Returns { ok: true } or:
-//   { ok: false, errorCode: 'INVALID_AGENT_ASSIGNMENT',
-//     rejected: [{ subtaskId, displayName, requestedAgent }],
-//     permittedAgents: [...] }
-function validateDecomposition(projectName, subtasks) {
-  const project = registry.getProject(projectName);
-  const permittedAgents = project ? project.agents.slice() : [];
-
-  const rejected = [];
-  for (const subtask of subtasks || []) {
-    const result = validateAssignment(projectName, subtask.agent);
-    if (!result.ok) {
-      rejected.push({
-        subtaskId: subtask.id,
-        displayName: subtask.displayName,
-        requestedAgent: subtask.agent,
-      });
-    }
-  }
-
-  if (rejected.length > 0) {
-    return { ok: false, errorCode: 'INVALID_AGENT_ASSIGNMENT', rejected, permittedAgents };
-  }
-  return { ok: true };
-}
-
-module.exports = { validateAssignment, validateDecomposition, deriveAgentFromSummary, ERROR_CODES };
+module.exports = { validateAssignment, deriveAgentFromSummary, ERROR_CODES };

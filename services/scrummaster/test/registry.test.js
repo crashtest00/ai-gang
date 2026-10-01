@@ -110,9 +110,6 @@ test('load() reads the fixture catalog and project config; getEffectiveAgents/ge
 
   freshRegistry.load();
 
-  assert.deepEqual(freshRegistry.getAllAgentIds(), ['refinement-agent', 'backend-agent', 'frontend-agent']);
-  assert.deepEqual(freshRegistry.getRetiredAgentIds(), ['qa-agent']);
-
   const effective = freshRegistry.getEffectiveAgents('test-project');
   assert.deepEqual(effective.map(a => a.id), ['refinement-agent', 'backend-agent']);
 
