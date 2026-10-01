@@ -310,9 +310,18 @@ This creates:
 - **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
-- Writes all 9 `JIRA_*_FIELD_ID` vars automatically to `services/scrummaster/.env`
+- Records the 9 `JIRA_*_FIELD_ID` values it created in `services/scrummaster/.env`
 
-Verify: `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l` should return `9`.
+From V5.1 no running service reads that output — only the provisioning scripts
+themselves do.
+
+- `[HUMAN]` Copy the IDs into `~/ai-gang/.env`, the platform `.env`, which
+  `derive-env.sh` carries to `core`, the platform's only Jira client (V5.1
+  REQ-01, REQ-06)
+
+Verify: `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l` should
+return `9`, and the same grep against `~/ai-gang/.env` should return `9` once the IDs
+are copied.
 
 When adding a new project, apply existing fields via `init-project.sh` — do not recreate them.
 
@@ -382,8 +391,13 @@ docker compose exec ai-gang-redis redis-cli ping  # should return PONG
 
 ```bash
 cp ~/ai-gang/services/scrummaster/.env.example ~/ai-gang/services/scrummaster/.env
-# Fill in .env: Jira credentials
-# All JIRA_*_FIELD_ID vars are already written by Phase 1.1 — do not overwrite them
+# .env.example declares no Jira variable, and ScrumMaster reads none: the Jira
+# credentials and the Phase 1.1 field ids both live in the platform .env, which
+# derive-env.sh carries to Django/core (see Phase 1.0 and 1.1). Do not fill in
+# any Jira value here.
+# If Phase 1.1 has already run, this file exists and holds that script's record
+# of the field ids, which the other provisioning scripts read — copy
+# .env.example over it only after preserving those lines.
 # WEBHOOK_SECRET is not one of this file's values — see 2.4 Security below
 cd ~/ai-gang/services/scrummaster && docker compose up -d
 # ScrumMaster publishes no port (see 2.4 Security and this service's

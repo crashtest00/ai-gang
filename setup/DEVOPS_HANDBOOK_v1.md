@@ -30,7 +30,7 @@ Key principles:
 Each project runs on its own droplet with its own Jenkins instance. There is no shared CI/CD infrastructure between projects. The `ai-gang` repo is the canonical source — cloning it on a fresh droplet and running the bootstrap scripts is all that is needed to stand up a fully working project. Zero external dependencies on other projects or shared services.
 
 **2. Tickets Drive Everything**
-Work originates in Jira. The Engineering Lead agent interprets tickets and breaks them into subtasks. Nothing gets built that doesn't trace back to a ticket.
+Work originates as a canonical work item in Django/`core`, the platform's record of all work. The Engineering Lead agent interprets work items and breaks them into subtasks. Nothing gets built that doesn't trace back to a work item.
 
 **3. Build Once, Promote**
 Artifacts built in a project container are promoted through environments (dev → staging → production), never rebuilt. What passes tests is exactly what gets deployed.
@@ -48,13 +48,15 @@ Each project lives entirely on its own droplet. There is no shared CI/CD infrast
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Atlassian Cloud (Jira)                                       │
-│  - Tickets created / updated                                 │
-│  - ScrumMaster routes work to dev agents                     │
-│  - Human creates a Release ticket → ScrumMaster → Jenkins    │
-│  - Human moves Release ticket to Done → ScrumMaster → Jenkins│
+│ Django/core — the canonical work record                      │
+│  - Work items created / updated                              │
+│  - ScrumMaster reads core’s events, routes work to dev agents│
+│  - Human creates a Release work item → ScrumMaster → Jenkins │
+│  - Human moves the Release to done → ScrumMaster → Jenkins   │
+│  Jira is optional and off in V5.1. Where a project is in Jira│
+│  mode, core — never ScrumMaster — is the only Jira client.   │
 └─────────────────┬──────────────────────────────────────────┬─┘
-                  │ Webhook / API                             │ Release created / Done
+                  │ Canonical events / commands               │ Release requested / done
                   ↓                                          ↓
 ┌─────────────────────────────────┐   ┌────────────────────────────────────┐
 │ GitHub                          │   │ Project Droplet — Jenkins          │
@@ -179,9 +181,9 @@ Jira comment/transition on pass or fail).
 What the template does NOT cover — release candidates and production
 promotion — lives centrally in `jenkins/jenkins.yaml` instead
 (`release-candidate`, `production-promote`, `release-preview-teardown`; see
-`setup/JenkinsConfig.md` §6), because those are triggered by a Jira Release
-ticket batching work across many projects' pipeline runs, not by anything
-project-specific.
+`setup/JenkinsConfig.md` §6), because those are triggered by ScrumMaster from
+a canonical Release work item batching work across many projects' pipeline
+runs, not by anything project-specific.
 
 ### GitHub Webhook Configuration
 
@@ -195,6 +197,16 @@ Registered automatically by `init-repo.sh` for each repo. For manual registratio
 ---
 
 ## Jira Integration
+
+**Scope of this section: Jenkins' own Jira writes, and nothing else.** Jenkins
+keeps its Jira connection and keeps commenting on, and transitioning, the
+ticket a branch name names — that is the one remaining path from AI Gang to
+Jira, and it stays until v5.2. It is wholly separate from the platform's work
+record: ScrumMaster is no longer a Jira client, receives no Jira webhook and
+makes no Jira call (V5.1 REQ-01, REQ-04); where a project is in Jira mode,
+Django/`core` is the only component that talks to Jira. Jira mode is off for
+V5.1's release, so for a local-mode project nothing in this section fires and
+status lives only in `core`.
 
 ### Connection Setup
 
@@ -221,26 +233,30 @@ chore/GANG-7-update-dependencies
 
 The Jenkinsfile extracts the ticket key (`GANG-42`) from the branch name and uses it to post status updates back to Jira.
 
-### Jira Workflow States
+### Workflow States
+
+Status lives on the canonical work item in `core`. These are its statuses, not
+Jira's; where a project is in Jira mode, Jenkins mirrors the two transitions
+marked below onto the ticket its branch name names, until v5.2.
 
 ```
-Backlog → In Progress → In Review → Done
-           ↑                ↑           ↑
-     Scrum Master      Jenkins merges  Human accepts on beta
-     assigns subtask   to dev,         (no promotion fires —
-                       auto-deploys    beta already has it)
+backlog → in-progress → in-review → done
+            ↑               ↑           ↑
+     ScrumMaster       Jenkins merges  Human accepts on beta
+     dispatches the    to dev,         (no promotion fires —
+     subtask           auto-deploys    beta already has it)
                        to beta
 ```
 
 | Transition | Who / What |
 |---|---|
-| Backlog → In Progress | Scrum Master (assigns to dev agent) |
-| In Progress → In Review | Jenkins (on test pass, merge to `dev`, and automatic deploy to beta) |
-| In Review → In Progress | Jenkins (on test failure — posts comment first) |
-| In Review → Done | Human (reviewing the change on the **Beta VM**) — means "accepted on beta," not a promotion trigger |
+| backlog → in-progress | ScrumMaster, on dispatching the subtask to a dev agent — published to `core` as a canonical command, never written to Jira |
+| in-progress → in-review | Jenkins (on test pass, merge to `dev`, and automatic deploy to beta) — also mirrored to Jira |
+| in-review → in-progress | Jenkins (on test failure — posts comment first) — also mirrored to Jira |
+| in-review → done | Human (reviewing the change on the **Beta VM**) — means "accepted on beta," not a promotion trigger |
 
-Story/Sub-task Done never triggers Jenkins. Production only moves via a
-separate Release ticket type — see The Full Lifecycle and Production
+Story/Sub-task done never triggers Jenkins. Production only moves via a
+separate Release work item — see The Full Lifecycle and Production
 Promotion below for the full flow.
 
 ---
@@ -250,19 +266,20 @@ Promotion below for the full flow.
 ### End-to-End Flow
 
 ```
-1. TICKET CREATED
-   Human creates Jira ticket (e.g. GANG-42: "Add password reset flow")
+1. WORK ITEM CREATED
+   Human creates a work item in `core` (e.g. "Add password reset flow")
    ScrumMaster assigns to Refinement Agent
 
 2. REFINEMENT AGENT
    - Reads ticket
    - Decomposes into subtasks (backend API, frontend UI, tests)
-   - Sets Agent field on each subtask
-   - Moves subtasks to Shovel Ready
+   - Sets the assigned agent on each subtask
+   - Moves subtasks to ready
 
 3. SCRUMMASTER
-   - Receives Shovel Ready webhook from Jira
-   - Fetches full ticket context from Jira API
+   - Receives the canonical work-item event from `core` on its events stream
+   - Reads the work item's full context from `core` — it never calls Jira;
+     Django/`core` is the platform's only Jira client (V5.1 REQ-01)
    - Constructs prompt including agent definition path
    - Durably dispatches to the agent's Redis Stream (aigang:agent:{project}:{suffix})
 
@@ -305,17 +322,18 @@ Promotion below for the full flow.
 
 6. HUMAN REVIEW
    - Human reviews the change on the Beta VM
-   - If satisfied: moves Jira ticket to Done — this means "accepted on beta,"
+   - If satisfied: moves the work item to done — this means "accepted on beta,"
      full stop. It does not trigger production promotion.
 
 7. CUTTING A RELEASE (batched, deliberate)
-   - When enough has accumulated on beta, a human creates a Jira Release
-     ticket (Target Project required)
-   - ScrumMaster checks beta's queue is clean, then triggers the
-     release-candidate Jenkins job
+   - When enough has accumulated on beta, a human creates a Release work
+     item in `core` (Target Project required)
+   - `core` confirms beta's queue is clean and publishes the release event;
+     ScrumMaster then triggers the release-candidate Jenkins job with the
+     Release's canonical work item id
    - Jenkins pins beta's SHA, cuts release/<sha>, opens the frozen
      release/<sha> → prod PR, deploys a private SHA-pinned preview to the
-     Beta VM, and posts the preview link back to the Release ticket
+     Beta VM, and posts the preview link back to the Release
 
 8. PROMOTION TO PRODUCTION (Release ticket Done — the only approval gate)
    - Human opens the preview, reviews the exact candidate that would ship
@@ -342,21 +360,21 @@ release/<sha>  ← cut from beta's HEAD when a Release ticket is created;
                  its PR merges to prod
 ```
 
-Feature branches are short-lived and trace to a Jira ticket. They are deleted after merge to `dev`. The `dev`, `beta`, and `prod` branches are permanent and never deleted.
+Feature branches are short-lived and trace to a work item. They are deleted after merge to `dev`. The `dev`, `beta`, and `prod` branches are permanent and never deleted.
 
 ### Jenkinsfile Branch Gates
 
 Jenkins pipeline behavior differs by trigger source. The first row runs
 inside each project's own Jenkinsfile; the other two are the centrally
-defined jobs in `jenkins/jenkins.yaml`, triggered by ScrumMaster from a Jira
-Release ticket, not by any branch event:
+defined jobs in `jenkins/jenkins.yaml`, triggered by ScrumMaster from a
+canonical Release work item's release event, not by any branch event:
 
 | Trigger | Pipeline | On Success | On Failure |
 |---|---|---|---|
 | PR opened/updated against `dev` | Install, Test, Build, then queue auto-merge to `dev` | GitHub merges once the build's status lands; ticket stays In Progress | Comment on Jira ticket, `pipeline_retry` to ScrumMaster |
 | Push to `dev` (the merge above) | Install, Test, Build, then promote to beta + deploy | Comment Beta URL + SHA on each merged ticket, move Jira → In Review | Comment on each affected ticket, `pipeline_retry` to ScrumMaster |
-| Release ticket created (`release-candidate` job) | Pin SHA, cut `release/<sha>`, open frozen PR, deploy preview | Comment preview link + SHA, move Release ticket → In Review | Comment failure on Release ticket |
-| Release ticket → Done (`production-promote` job) | Merge frozen PR, redeploy same artifact, teardown preview | Comment confirmation on Release ticket | Comment failure — frozen PR stays open for manual merge |
+| Release requested (`release-candidate` job) | Pin SHA, cut `release/<sha>`, open frozen PR, deploy preview | Comment preview link + SHA on the Release work item in `core` | Comment failure on the Release work item |
+| Release → done (`production-promote` job) | Merge frozen PR, redeploy same artifact, teardown preview | Comment confirmation on the Release work item | Comment failure — frozen PR stays open for manual merge |
 
 Nothing here re-tests: the dev pipeline is the only quality gate. What
 reaches the Beta VM, the preview, and production is exactly the artifact
@@ -366,25 +384,25 @@ that passed there — built once, never rebuilt.
 
 ## Production Promotion
 
-### Release-Ticket Promotion (beta → release/<sha> → prod)
+### Release Promotion (beta → release/<sha> → prod)
 
-The release-ticket promotion flow:
+The release promotion flow:
 
-1. Human creates a Jira Release ticket (Target Project required) once enough
-   has landed on beta
+1. Human creates a Release work item in `core` (Target Project required) once
+   enough has landed on beta
 2. Jenkins' `release-candidate` job checks beta's queue is clean, pins
    beta's HEAD as the candidate SHA, cuts `release/<sha>`, opens the
    `release/<sha> → prod` PR, and deploys a private SHA-pinned preview to
-   the Beta VM — link posted back to the ticket
+   the Beta VM — link posted back to the Release work item
 3. Human opens the preview, reviews the exact candidate, and moves the
-   Release ticket to **Done**
+   Release work item to **done**
 4. Jenkins' `production-promote` job merges the frozen PR (squash — no merge
    commit pulling in unrelated history) and redeploys that same
    already-built artifact to production, never rebuilding
 
 No test gate is applied at promotion time — the dev pipeline already
 validated this exact artifact. Production promotion is a deliberate human
-decision, executed entirely through Jira; the frozen PR stays open and
+decision, executed entirely through `core`'s work items; the frozen PR stays open and
 mergeable the whole time in case a human wants to inspect or merge it
 manually instead.
 
@@ -410,7 +428,7 @@ Roll back production when a deployment causes an incident and a forward fix cann
 `prod`'s branch protection (see `setup/JenkinsConfig.md` §7) requires every
 change to go through a PR merged by Jenkins' own credential — there is no
 path for a direct `git push origin prod`, on purpose, so rollback goes
-through the same Release-ticket mechanism as any other promotion, not around it:
+through the same Release work item mechanism as any other promotion, not around it:
 
 ```bash
 # Identify the bad commit and revert it on beta (or dev, if beta has already
@@ -420,15 +438,15 @@ git revert <bad-commit-hash>
 git push origin beta
 ```
 
-Then create a new Jira Release ticket as usual. Its candidate SHA will
-include the revert; review the preview, move it to Done, and
+Then create a new Release work item as usual. Its candidate SHA will
+include the revert; review the preview, move it to done, and
 `production-promote` ships the reverted state — no manual Jenkins step,
 no direct push to `prod`.
 
 ### Emergency Rollback: Redeploy a Previous `release/<sha>`
 
 If you need to restore production immediately without waiting for a new
-Release ticket to work through the normal flow, redeploy a previous
+Release work item to work through the normal flow, redeploy a previous
 candidate directly using the same restricted deploy path production-promote
 uses — this still goes to the Beta VM remote-deploy mechanism
 (`beta-vm/deploy/deploy.sh`), not a raw push to `prod`:
@@ -449,7 +467,7 @@ service first; it does not rewrite branch history. Do not force-push `prod`.
 ### After Any Rollback
 
 1. Confirm production is healthy
-2. Open a Jira bug ticket documenting what failed and why
+2. Open a bug work item documenting what failed and why
 3. Assign to the relevant agent for a proper fix
 4. Do not re-promote staging to production until the fix has been validated on staging
 
