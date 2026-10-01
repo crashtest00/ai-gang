@@ -33,7 +33,7 @@ Each project runs on its own droplet with its own Jenkins instance. There is no 
 Work originates as a canonical work item in Django/`core`, the platform's record of all work. The Refinement Agent interprets work items and breaks them into subtasks. Nothing gets built that doesn't trace back to a work item.
 
 **3. Build Once, Promote**
-Artifacts built in a project container are promoted through environments (dev → staging → production), never rebuilt. What passes tests is exactly what gets deployed.
+Artifacts built in a project container are promoted through environments (beta → production), never rebuilt. What passes tests is exactly what gets deployed.
 
 **4. Humans Gate Quality, Jenkins Gates Correctness**
 Tests are an automated gate — Jenkins enforces them without exception. Human review happens on the Beta VM, where a merge to `dev` is deployed, not in the PR. When the human marks a work item Done, they are saying "this is correct" — Jenkins then promotes it. Production promotion is always a deliberate human action.
@@ -390,7 +390,8 @@ The release promotion flow:
 
 1. Human creates a Release work item in `core` (Target Project required) once
    enough has landed on beta
-2. Jenkins' `release-candidate` job checks beta's queue is clean, pins
+2. `core` confirms beta's queue is clean and publishes the release event;
+   ScrumMaster triggers Jenkins' `release-candidate` job, which pins
    beta's HEAD as the candidate SHA, cuts `release/<sha>`, opens the
    `release/<sha> → prod` PR, and deploys a private SHA-pinned preview to
    the Beta VM — link posted back to the Release work item
@@ -469,7 +470,7 @@ service first; it does not rewrite branch history. Do not force-push `prod`.
 1. Confirm production is healthy
 2. Open a bug work item documenting what failed and why
 3. Assign to the relevant agent for a proper fix
-4. Do not re-promote staging to production until the fix has been validated on staging
+4. Do not re-promote beta to production until the fix has been validated on beta
 
 ---
 

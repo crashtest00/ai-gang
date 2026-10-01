@@ -833,7 +833,7 @@ test('an invalid submission (bad state) is dropped without writing anything', as
 // rule are unchanged, so it is still accepted rather than dead-lettered.
 
 test('a pipeline_retry message is logged as unresolved, dispatches nobody and derives no Redis key', async (t) => {
-  t.mock.method(redis, 'acquireOnce', async () => { throw new Error('no Redis key may be derived from a tracker key'); });
+  assert.equal(redis.acquireOnce, undefined, 'acquireOnce must not exist; no Redis key may be derived from a tracker key');
   t.mock.method(redis, 'getClient', () => ({}));
   let publishCalled = false;
   t.mock.method(streams, 'publish', async () => { publishCalled = true; });
@@ -857,7 +857,7 @@ test('a pipeline_retry message is logged as unresolved, dispatches nobody and de
 });
 
 test('a pipeline_retry message with no ticket_key is dropped', async (t) => {
-  t.mock.method(redis, 'acquireOnce', async () => { throw new Error('must not be called'); });
+  assert.equal(redis.acquireOnce, undefined, 'acquireOnce must not exist; no Redis key may be derived from a tracker key');
 
   const result = await handlePipelineRetry({ build_url: 'https://jenkins.example.com/job/hello-world/17/' }, PROJECT_NAME);
 

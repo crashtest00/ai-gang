@@ -22,14 +22,4 @@ function getClient() {
   return client;
 }
 
-// Claim a one-time dedup key. Returns true the first time a given key is
-// seen within ttlSeconds, false on every subsequent call — used for
-// domain-level dedup (e.g. "have I already dispatched a retry for this
-// (ticket, build) pair") that is independent of any single envelope's
-// messageId. See idempotency.js for the envelope-messageId-keyed variant.
-async function acquireOnce(key, ttlSeconds) {
-  const result = await getClient().set(key, '1', { NX: true, EX: ttlSeconds });
-  return result === 'OK';
-}
-
-module.exports = { connect, getClient, acquireOnce };
+module.exports = { connect, getClient };

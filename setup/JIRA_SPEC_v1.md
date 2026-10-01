@@ -155,7 +155,7 @@ themselves are `backlog`, `ready`, `in-progress`, `in-review` and `done`.
 | `Shovel Ready` | Refined, subtasks assigned, ready for dev |
 | `In Progress` | Agent actively working |
 | `In Review` | PR open, pipeline running |
-| `Done` | Merged and deployed to staging |
+| `Done` | Merged and deployed to beta |
 
 `Blocked` is a field state (the Blocked custom field set to `Yes`), not a standalone workflow status. A ticket can be `In Progress` and blocked simultaneously.
 
