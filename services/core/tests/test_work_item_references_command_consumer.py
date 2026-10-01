@@ -9,7 +9,6 @@ build brief names explicitly for REQ-03/REQ-04.
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from django.urls import Resolver404, resolve
@@ -22,6 +21,7 @@ from workitems.stream_topology import COMMAND_GROUP, command_stream_name
 from workitems.streams import dead_letter_stream_name, health, publish
 
 from tests.test_work_item_references_store import make_artifact
+from tests.wait_support import wait_for
 
 PROJECT = 'test-project'
 
@@ -29,15 +29,6 @@ PROJECT = 'test-project'
 def publish_command(redis_client, payload):
     envelope = build_envelope(Kind.WORK_ITEM_COMMAND, PROJECT, payload=payload)
     return publish(redis_client, command_stream_name(PROJECT), envelope)
-
-
-def wait_for(predicate, timeout_s=5.0, interval_s=0.03):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if predicate():
-            return
-        time.sleep(interval_s)
-    raise TimeoutError('wait_for timed out')
 
 
 def test_req03_record_specification_link_command_over_streams_is_durably_applied(clean_db, redis_client, redis_factory):
@@ -52,7 +43,9 @@ def test_req03_record_specification_link_command_over_streams_is_durably_applied
             'command': 'recordSpecificationLink', 'actor': 'refinement-agent',
             'workItemId': str(item_id), 'artifactId': str(artifact.id), 'requirementId': 'REQ-18',
         })
-        wait_for(lambda: readstore.get_specification_link(item_id) is not None)
+        wait_for(lambda: readstore.get_specification_link(item_id) is not None,
+                 expected='the recordSpecificationLink command to be applied — a specification link on the work item',
+                 observed=lambda: f'get_specification_link is {readstore.get_specification_link(item_id)!r}')
     finally:
         consumer.stop()
 
@@ -80,14 +73,20 @@ def test_req03_record_specification_link_redelivery_over_streams_is_a_noop(clean
             'workItemId': str(item_id), 'artifactId': str(artifact.id), 'requirementId': 'REQ-18',
         }
         publish_command(redis_client, command)
-        wait_for(lambda: readstore.get_specification_link(item_id) is not None)
+        wait_for(lambda: readstore.get_specification_link(item_id) is not None,
+                 expected='the recordSpecificationLink command to be applied — a specification link on the work item',
+                 observed=lambda: f'get_specification_link is {readstore.get_specification_link(item_id)!r}')
 
         publish_command(redis_client, command)
-        wait_for(lambda: redis_client.xlen(stream) == 2)
+        wait_for(lambda: redis_client.xlen(stream) == 2,
+                 expected=f'both deliveries of the same command to be on {stream} — 2 entries',
+                 observed=lambda: f'{redis_client.xlen(stream)} entry/entries')
         # Both entries fully processed (acked, none pending) before we
         # inspect the durable outcome of the second, no-observable-effect
         # delivery.
-        wait_for(lambda: health(redis_client, stream, COMMAND_GROUP)['pending'] == 0)
+        wait_for(lambda: health(redis_client, stream, COMMAND_GROUP)['pending'] == 0,
+                 expected='both entries to be acked before the durable outcome is inspected — 0 pending',
+                 observed=lambda: f"{health(redis_client, stream, COMMAND_GROUP)['pending']} pending")
     finally:
         consumer.stop()
 
@@ -111,7 +110,9 @@ def test_req03_add_artifact_link_command_over_streams_preserves_order(clean_db, 
                 'command': 'addArtifactLink', 'actor': 'refinement-agent',
                 'workItemId': str(item_id), 'artifactId': str(artifact.id),
             })
-        wait_for(lambda: len(readstore.list_artifact_links(item_id)) == 3)
+        wait_for(lambda: len(readstore.list_artifact_links(item_id)) == 3,
+                 expected='all three addArtifactLink commands to be applied — 3 artifact links',
+                 observed=lambda: f'{len(readstore.list_artifact_links(item_id))}/3 artifact link(s)')
     finally:
         consumer.stop()
 
@@ -130,7 +131,9 @@ def test_req04_record_specification_link_over_streams_with_unresolved_artifact_i
             'command': 'recordSpecificationLink', 'actor': 'refinement-agent',
             'workItemId': str(item_id), 'artifactId': str(uuid.uuid4()), 'requirementId': 'REQ-18',
         })
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
+                 expected='the unresolved-artifact rejection to be dead-lettered — 1 entry on the dead-letter stream',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -148,7 +151,9 @@ def test_req04_add_artifact_link_over_streams_with_unresolved_artifact_is_dead_l
             'command': 'addArtifactLink', 'actor': 'refinement-agent',
             'workItemId': str(item_id), 'artifactId': str(uuid.uuid4()),
         })
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1)
+        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
+                 expected='the unresolved-artifact rejection to be dead-lettered — 1 entry on the dead-letter stream',
+                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
     finally:
         consumer.stop()
 
@@ -173,8 +178,12 @@ def test_req03_create_command_with_inline_references_over_streams(clean_db, redi
                 'artifactLinks': [str(other_artifact.id)],
             },
         })
-        wait_for(lambda: store.get_work_item(item_id) is not None)
-        wait_for(lambda: readstore.get_specification_link(item_id) is not None)
+        wait_for(lambda: store.get_work_item(item_id) is not None,
+                 expected=f'the create command to be applied — work item {item_id} readable from the store',
+                 observed=lambda: f'get_work_item({item_id}) is {store.get_work_item(item_id)!r}')
+        wait_for(lambda: readstore.get_specification_link(item_id) is not None,
+                 expected='the recordSpecificationLink command to be applied — a specification link on the work item',
+                 observed=lambda: f'get_specification_link is {readstore.get_specification_link(item_id)!r}')
     finally:
         consumer.stop()
 

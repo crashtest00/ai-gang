@@ -83,6 +83,70 @@ EOF
   exit 78
 fi
 
+# --- the npm packages this suite's requires resolve to ----------------------
+#
+# Three of the four test files, and the tools they run as child processes,
+# `require('redis')` — not a builtin and not relative, so it resolves through
+# NODE_PATH above, to a global npm install. When it is not there, `node --test`
+# reports MODULE_NOT_FOUND as `failureType: testCodeFailure`: three failures
+# that look exactly like test failures and are not, with the real cause buried
+# in a require stack above them (V5.1 audit rows 31 and 49). Reproduced rather
+# than inferred — `NODE_PATH=/an/empty/dir setup/commons/tools/test.sh` returns
+# `# fail 3`.
+#
+# The set is read out of the files rather than restated here, so a module added
+# to any of them is covered without this check having to be remembered into.
+missing="$(node <<'JS'
+const fs = require('node:fs');
+const path = require('node:path');
+const { isBuiltin } = require('node:module');
+
+// Exactly the files this suite loads: every .js in this directory (the three
+// test files and the tools they run as child processes), plus the fourth test
+// file and its module, which live in setup/. Not all of setup/ — subscriber.js
+// is the container runtime's and nothing here loads it, so a dependency of its
+// own must not be able to refuse this suite.
+const files = fs.readdirSync('.').filter((entry) => entry.endsWith('.js'))
+  .concat([path.join('..', '..', 'dispatch-snapshot.js'), path.join('..', '..', 'dispatch-snapshot.test.js')]);
+
+const names = new Set();
+for (const entry of files) {
+  const source = fs.readFileSync(entry, 'utf8');
+  for (const m of source.matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)) {
+    const name = m[2];
+    if (name.startsWith('.') || name.startsWith('/') || isBuiltin(name)) continue;
+    names.add(name.split('/')[0]);   // the package, not the subpath
+  }
+}
+
+const missing = [...names].sort().filter((name) => {
+  try { require.resolve(name); return false; } catch { return true; }
+});
+process.stdout.write(missing.join(' '));
+JS
+)"
+
+if [ -n "$missing" ]; then
+  cat >&2 <<EOF
+
+$(basename "$0"): refusing to run. These npm package(s) the suite requires do not
+resolve under NODE_PATH=$NODE_PATH:
+
+    $missing
+
+node --test would report that as failures of type testCodeFailure, which is what
+it is not: no test ran. Install them the way the project containers do (Docker
+Templates/Dockerfile-node.template), then re-run this script:
+
+    sudo npm install -g $missing
+    setup/commons/tools/test.sh
+
+If they are installed somewhere else, point NODE_PATH at that directory instead;
+unset, this script uses the output of \`npm root -g\`.
+EOF
+  exit 78
+fi
+
 flock "$LOCK_FILE" node --test \
   request-artifact.test.js \
   a2a-validate.test.js \
