@@ -36,7 +36,7 @@ Work originates as a canonical work item in Django/`core`, the platform's record
 Artifacts built in a project container are promoted through environments (dev → staging → production), never rebuilt. What passes tests is exactly what gets deployed.
 
 **4. Humans Gate Quality, Jenkins Gates Correctness**
-Tests are an automated gate — Jenkins enforces them without exception. Human review happens in the dev environment, not in the PR. When the human moves a ticket to Done, they are saying "this is correct" — Jenkins then promotes it. Production promotion is always a deliberate human action.
+Tests are an automated gate — Jenkins enforces them without exception. Human review happens on the Beta VM, where a merge to `dev` is deployed, not in the PR. When the human marks a work item Done, they are saying "this is correct" — Jenkins then promotes it. Production promotion is always a deliberate human action.
 
 ---
 
@@ -350,7 +350,7 @@ Each project maintains three long-lived branches:
 ```
 prod       ← production, advanced only by merging a frozen release/<sha> PR
 beta       ← beta environment, fast-forwarded from dev on every merge
-dev        ← dev environment, auto-deployed on test pass
+dev        ← integration branch; a merge here promotes to beta and deploys
   └── feature/GANG-42-password-reset   ← one branch per ticket
   └── bugfix/GANG-99-fix-login         ← bug fixes same pattern
   └── chore/GANG-7-deps-update         ← maintenance work
