@@ -360,7 +360,7 @@ def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work
         )
 
 
-def _materialize_release(project: str, issue: dict, issue_key: str) -> WorkItem:
+def _materialize_release(project: str, issue: dict, issue_key: str, envelope: dict) -> Optional[WorkItem]:
     """Creates the canonical `release` work item and its
     `work_item_release_detail` row from a Release ticket's current field
     snapshot, if one doesn't already exist for `issue_key` — idempotent on
@@ -385,14 +385,32 @@ def _materialize_release(project: str, issue: dict, issue_key: str) -> WorkItem:
     )
 
     item = WorkItem.objects.filter(external_key=issue_key).first()
-    if item is None:
-        item = store.create_work_item(
-            {
-                'id': uuid.uuid4(), 'project': target_project, 'type': 'release',
-                'displayName': display_name, 'status': 'proposed', 'externalKey': issue_key,
-            },
-            actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
-        )
+    if item is not None:
+        # REQ-10: the ticket already resolves to a work item — a Release
+        # filed under a local-mode Target Project before this mode check
+        # existed, or one whose Target Project was switched to local
+        # since. Its own project's mode governs, not the envelope's:
+        # ignored like the entry-level check, not a failure.
+        if project_config.get_mode(item.project)['mode'] != project_config.JIRA:
+            _record_generic_event(project, item.id, issue_key, envelope,
+                                   {'event': 'release_materialize', 'ignored': 'resolved work item project not in Jira mode'})
+            return None
+        _sync_release_detail(item, fields)
+        return item
+
+    # REQ-10: a Jira Release is never filed under a Target Project not in
+    # Jira mode.
+    if project_config.get_mode(target_project)['mode'] != project_config.JIRA:
+        record_failure(target_project, None, issue_key, 'release target project not in Jira mode', fields)
+        return None
+
+    item = store.create_work_item(
+        {
+            'id': uuid.uuid4(), 'project': target_project, 'type': 'release',
+            'displayName': display_name, 'status': 'proposed', 'externalKey': issue_key,
+        },
+        actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
+    )
     _sync_release_detail(item, fields)
     return item
 
@@ -410,7 +428,9 @@ def _handle_release_requested(project: str, issue: dict, issue_key: str, envelop
     payload or `workItemId`; the beta-queue check and Jenkins trigger it
     does next are still out of scope here (see module docstring)."""
     with transaction.atomic():
-        _materialize_release(project, issue, issue_key)
+        item = _materialize_release(project, issue, issue_key, envelope)
+        if item is None:
+            return
 
         store.write_outbox_event(
             project=project, event_type='work_item.jira_release_event', work_item_id=None,
@@ -454,6 +474,14 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
     issuetype = _issuetype_of(issue)
     item = store.get_work_item(work_item_id) if work_item_id is not None else None
 
+    # REQ-10: the ticket may resolve (via `default_resolve_work_item_id`)
+    # to an existing work item whose own project isn't in Jira mode —
+    # ignored like the entry-level check, applying nothing to that item.
+    if item is not None and project_config.get_mode(item.project)['mode'] != project_config.JIRA:
+        _record_generic_event(project, work_item_id, issue_key, envelope,
+                               {'field': field, 'ignored': 'work item project not in Jira mode'})
+        return
+
     if issuetype == 'Release' and item is None:
         # An update webhook for a Release ticket that was never
         # materialized — e.g. one created before BF-01 shipped, whose
@@ -465,8 +493,8 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         # `_materialize_release` is idempotent on `external_key`, the same
         # helper `_handle_release_requested` uses for the create path.
         with transaction.atomic():
-            item = _materialize_release(project, issue, issue_key)
-        work_item_id = item.id
+            item = _materialize_release(project, issue, issue_key, envelope)
+        work_item_id = item.id if item is not None else None
     elif issuetype == 'Release' and item is not None and item.type == 'release':
         # The webhook's `issue` snapshot always carries the ticket's FULL
         # current field values, not just the one `change` names — re-sync
@@ -526,6 +554,12 @@ def handle_webhook_envelope(envelope: dict[str, Any], *,
         return  # not a shape this consumer understands — ignore, not a failure.
 
     project = envelope['project']  # a required envelope field (envelope.py's own validation) — always the normalized project name the ingestion view resolved from issue.fields.project.
+
+    # REQ-10: a project not in Jira mode ignores every Jira webhook —
+    # recorded, not applied, and not a failure.
+    if project_config.get_mode(project)['mode'] != project_config.JIRA:
+        _record_generic_event(project, None, issue_key, envelope, {'event': event, 'ignored': 'project not in Jira mode'})
+        return
 
     if event == 'jira:issue_created':
         _handle_issue_created(project, issue, issue_key, envelope)

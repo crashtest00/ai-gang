@@ -264,10 +264,11 @@ test('the end-to-end leg uses the work-item type and status the service actually
 test('every variable the .env.example declares is one settings.py reads, or a documented os.environ reader names directly', () => {
   const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
   const settings = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'settings.py'));
-  // The Jira custom-field ids (JIRA_*_FIELD_ID) and WEBHOOK_SECRET are the
-  // documented exceptions to "settings.py reads it": jira_interpret.py,
-  // webhook_consumer.py and views.py read them directly via os.environ,
-  // never through settings.py (see .env.example's own header and
+  // The Jira custom-field ids (JIRA_*_FIELD_ID), WEBHOOK_SECRET and, since
+  // V5.1's Jira client, the three Jira credentials are the documented
+  // exceptions to "settings.py reads it": jira_interpret.py,
+  // webhook_consumer.py, views.py and jira_client.py read them directly via
+  // os.environ, never through settings.py (see .env.example's own header and
   // scripts/startup/derive-env.sh's comment on the same variables). An
   // explicit list of reader files, not a wildcard over the package, so a
   // var declared in .env.example still has to name a real reader, not
@@ -276,6 +277,7 @@ test('every variable the .env.example declares is one settings.py reads, or a do
     path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_interpret.py'),
     path.join(REPO_ROOT, 'services', 'core', 'workitems', 'webhook_consumer.py'),
     path.join(REPO_ROOT, 'services', 'core', 'workitems', 'views.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_client.py'),
   ].map(read);
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
@@ -283,7 +285,7 @@ test('every variable the .env.example declares is one settings.py reads, or a do
     const readsIt = settings.includes(`'${name}'`) || directReaders.some((source) => source.includes(`'${name}'`));
     assert.ok(
       readsIt,
-      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py/views.py reads it`
+      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py/views.py/jira_client.py reads it`
     );
   }
 });

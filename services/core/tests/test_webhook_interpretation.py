@@ -81,6 +81,7 @@ def envelope_for(issue_key, event, issue_fields, *, body_extra=None, project=PRO
 
 def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(clean_db, monkeypatch):
     _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
     handle_webhook_envelope(envelope_for('TP-1', 'jira:issue_created', _story_fields(complete=True)))
 
     item = WorkItem.objects.get(external_key='TP-1')
@@ -98,6 +99,7 @@ def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(cle
 
 def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_db, monkeypatch):
     _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
     handle_webhook_envelope(envelope_for('TP-2', 'jira:issue_created', _story_fields(complete=False)))
 
     item = WorkItem.objects.get(external_key='TP-2')
@@ -112,6 +114,7 @@ def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_
 
 def test_story_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
     _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
     env = envelope_for('TP-3', 'jira:issue_created', _story_fields(complete=True))
     handle_webhook_envelope(env)
     handle_webhook_envelope(env)  # redelivery — must not create a second work item.
@@ -120,6 +123,7 @@ def test_story_created_is_idempotent_against_webhook_redelivery(clean_db, monkey
 
 
 def test_issue_created_of_an_unhandled_issuetype_is_recorded_not_dropped(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
     fields = {'summary': 'A bug', 'issuetype': {'name': 'Bug'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     handle_webhook_envelope(envelope_for('TP-4', 'jira:issue_created', fields))
 
@@ -142,6 +146,7 @@ def _blocked_change(from_val, to_val):
 def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_full_context(clean_db, monkeypatch):
     _set_story_field_env(monkeypatch)
     monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    project_config.set_mode(PROJECT, 'jira')
 
     handle_webhook_envelope(envelope_for('TP-5', 'jira:issue_created', _story_fields(complete=False)))
     item = WorkItem.objects.get(external_key='TP-5')
@@ -166,6 +171,7 @@ def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_ful
 def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, monkeypatch):
     _set_story_field_env(monkeypatch)
     monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    project_config.set_mode(PROJECT, 'jira')
 
     handle_webhook_envelope(envelope_for('TP-6', 'jira:issue_created', _story_fields(complete=False)))
     item = WorkItem.objects.get(external_key='TP-6')
@@ -193,6 +199,10 @@ def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Implement thing',
                              'status': 'in-progress', 'assigneeAgentId': 'backend-agent', 'externalKey': 'TP-7'})
+    # REQ-10: the project connects to Jira (with an item already on it)
+    # only after that item exists — connect_jira's own ordering — then the
+    # webhook delivers.
+    project_config.set_mode(PROJECT, 'jira')
 
     fields = {'summary': 'Implement thing', 'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-7', 'fields': fields},
@@ -216,6 +226,7 @@ def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals
 def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(clean_db):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-8'})
+    project_config.set_mode(PROJECT, 'jira')
 
     body = {
         'webhookEvent': 'comment_created',
@@ -238,6 +249,7 @@ def test_comment_created_webhook_is_projected_into_the_canonical_comment_thread(
 
 
 def test_comment_on_an_untracked_issue_is_recorded_generically_not_dropped(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
     body = {'webhookEvent': 'comment_created', 'issue': {'key': 'TP-99', 'fields': {}},
             'comment': {'id': '1', 'author': {'displayName': 'X'}, 'body': _adf('hi')}}
     env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
@@ -281,6 +293,8 @@ def _release_fields(summary='Release it', project=PROJECT, target_project=('ENG'
 
 def test_release_ticket_created_materializes_a_canonical_release_work_item(clean_db, monkeypatch):
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     fields = _release_fields()
     handle_webhook_envelope(envelope_for('TP-10', 'jira:issue_created', fields))
 
@@ -302,6 +316,7 @@ def test_release_ticket_created_materializes_a_canonical_release_work_item(clean
 
 def test_release_ticket_created_without_target_project_field_falls_back_to_the_containing_jira_project(clean_db, monkeypatch):
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
     fields = _release_fields(target_project=None)
     handle_webhook_envelope(envelope_for('TP-14', 'jira:issue_created', fields))
 
@@ -311,6 +326,8 @@ def test_release_ticket_created_without_target_project_field_falls_back_to_the_c
 
 def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     env = envelope_for('TP-15', 'jira:issue_created', _release_fields())
     handle_webhook_envelope(env)
     handle_webhook_envelope(env)  # redelivery — must not create a second work item.
@@ -321,6 +338,8 @@ def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_d
 
 def test_release_ticket_update_resyncs_candidate_fields_written_back_by_jenkins(clean_db, monkeypatch):
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     handle_webhook_envelope(envelope_for('TP-16', 'jira:issue_created', _release_fields()))
     item = WorkItem.objects.get(external_key='TP-16')
 
@@ -352,6 +371,8 @@ def test_release_ticket_update_with_no_prior_create_materializes_the_canonical_w
     — only its later `jira:issue_updated` webhooks are still arriving.
     REQ-01 says "create OR update webhook" must materialize it."""
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
     fields = _release_fields(release_notes='Fixes the login bug.', candidate_sha='abc1234')
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-17', 'fields': fields},
             'changelog': {'items': [{'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha',
@@ -377,6 +398,8 @@ def test_release_ticket_update_with_no_prior_create_materializes_the_canonical_w
 
 def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_second_update(clean_db, monkeypatch):
     _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
 
     def _update_envelope(candidate_sha):
         fields = _release_fields(candidate_sha=candidate_sha)
@@ -397,6 +420,7 @@ def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_seco
 
 
 def test_release_abandoned_is_recorded_and_republished(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
     fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-11', 'fields': fields},
             'changelog': {'items': [{'field': 'resolution', 'toString': 'Abandoned'}]}}
@@ -410,6 +434,7 @@ def test_release_abandoned_is_recorded_and_republished(clean_db):
 
 
 def test_release_done_is_recorded_and_republished(clean_db):
+    project_config.set_mode(PROJECT, 'jira')
     fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-12', 'fields': fields},
             'changelog': {'items': [{'field': 'status', 'toString': 'Done'}]}}
@@ -430,6 +455,7 @@ def test_release_done_is_recorded_and_republished(clean_db):
 def test_issue_link_changelog_entry_is_recorded_not_dropped(clean_db):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-13'})
+    project_config.set_mode(PROJECT, 'jira')
 
     fields = {'issuetype': {'name': 'Task'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-13', 'fields': fields},

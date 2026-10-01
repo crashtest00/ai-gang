@@ -95,7 +95,10 @@ def test_req12_jira_mode_project_feeds_existing_scrummaster_webhook_group_unchan
     # Publish once; both this service's group AND a stand-in for
     # ScrumMaster's own "scrummaster" group must each independently see the
     # entry — proving this is additive fan-out on the same durable stream,
-    # not a takeover.
+    # not a takeover. REQ-10: this project must be in Jira mode for the
+    # entry to be applied rather than ignored — not what this test is
+    # about, but the pending-count assertions below hold either way.
+    project_config.set_mode(PROJECT, 'jira')
     stream = registry.webhook_stream_name(PROJECT)
     ensure_group(redis_client, stream, registry.WEBHOOK_GROUP)  # simulates server.js's existing group
     publish(redis_client, stream, jira_webhook_envelope('TP-3', 'Done'))
