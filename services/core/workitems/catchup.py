@@ -17,8 +17,6 @@ to local mode.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from django.db import transaction
 from django.utils import timezone
 

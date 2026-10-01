@@ -10,6 +10,7 @@ the HTTP surface.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import signal
@@ -19,6 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 from django.test import Client
 from django.db import connection
 
@@ -292,7 +294,29 @@ def _consumer_env(**overrides):
     return env
 
 
-def spawn_consumers(**extra_env):
+# Linux PR_SET_PDEATHSIG. The `spawn_consumers` fixture below reaps a
+# consumer when the test body raises or fails an assertion, but no
+# Python-level teardown — fixture, `try/finally` or `atexit` — runs when the
+# suite process itself is SIGKILLed, or SIGTERMed by a `timeout` bound
+# expiring. That is exactly how one of these consumers once survived a
+# killed run for 3h37m, reparented to PID 1, and kept reading the shared
+# test Redis. Asking the kernel to kill the child when its parent dies is
+# the only reap that covers that path.
+_PR_SET_PDEATHSIG = 1
+try:
+    _libc = ctypes.CDLL('libc.so.6', use_errno=True)
+except OSError:  # pragma: no cover — non-glibc host; the fixture teardown still reaps.
+    _libc = None
+
+
+def _die_with_parent():
+    # Runs in the forked child, before exec. libc is loaded at import time,
+    # above, so the only thing happening after the fork is the prctl call.
+    if _libc is not None:
+        _libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+
+
+def _spawn_consumers(**extra_env):
     env = _consumer_env(
         # A dead consumer's pending (unacked) entries are only picked up by
         # the reclaim loop once idle past retry_delay_ms — production
@@ -305,7 +329,36 @@ def spawn_consumers(**extra_env):
         [sys.executable, str(MANAGE_PY), 'run_consumers', '--consumer-id', 'kill-mid-ingest'],
         cwd=str(REPO_ROOT), env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        preexec_fn=_die_with_parent,
     )
+
+
+@pytest.fixture
+def spawn_consumers():
+    """Hands a test a spawner whose every child is reaped on the abnormal
+    path as well as the normal one. These consumers join a group on the
+    shared test Redis, so one that outlives its test steals the deliveries a
+    later test is waiting for; a leaked one here corrupted several hours of
+    suite runs. The teardown runs whether the test body returns, raises or
+    fails an assertion — a `wait_for` timeout before the SIGKILL line can no
+    longer leave a consumer live. For the one case no teardown can reach,
+    the suite process being killed outright, see `_die_with_parent` above."""
+    started = []
+
+    def _spawn(**extra_env):
+        proc = _spawn_consumers(**extra_env)
+        started.append(proc)
+        return proc
+
+    yield _spawn
+
+    for proc in started:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGKILL)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover — SIGKILLed and unreaped is not a state Linux offers.
+            pass
 
 
 def wait_for(predicate, timeout_s=20.0, interval_s=0.1):
@@ -322,7 +375,7 @@ def _created_count(project):
 
 
 def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_each_event_exactly_once(
-    clean_db, redis_client, monkeypatch,
+    clean_db, redis_client, monkeypatch, spawn_consumers,
 ):
     monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
     # Must be a project the fixture catalog (services/scrummaster/test/fixtures/
@@ -350,24 +403,24 @@ def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_e
 
     # First consumer instance: an artificial per-event delay makes this
     # batch slow enough to reliably SIGKILL partway through.
+    # No local try/finally: the `spawn_consumers` fixture owns the reap. The
+    # one this replaced ran `first.wait(timeout=10)` on a child it had not
+    # signalled whenever `wait_for` timed out, so it raised TimeoutExpired
+    # over the real failure and left the consumer running.
     first = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='700')
-    try:
-        wait_for(lambda: _created_count(project) >= 1)
-        mid_run_count = _created_count(project)
-        assert mid_run_count < total, f'expected a partial batch at kill time, got {mid_run_count}/{total} already processed'
-        first.send_signal(signal.SIGKILL)
-    finally:
-        first.wait(timeout=10)
+    wait_for(lambda: _created_count(project) >= 1)
+    mid_run_count = _created_count(project)
+    assert mid_run_count < total, f'expected a partial batch at kill time, got {mid_run_count}/{total} already processed'
+    first.send_signal(signal.SIGKILL)
+    first.wait(timeout=10)
 
     # Restart with no artificial delay — drains the remainder quickly, with
     # no Jira redelivery involved (the events are still sitting, durably,
     # on the Streams entry this consumer never acked).
     second = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='0')
-    try:
-        wait_for(lambda: _created_count(project) == total, timeout_s=20.0)
-    finally:
-        second.send_signal(signal.SIGKILL)
-        second.wait(timeout=10)
+    wait_for(lambda: _created_count(project) == total, timeout_s=20.0)
+    second.send_signal(signal.SIGKILL)
+    second.wait(timeout=10)
 
     # Exactly once: no duplicate Story rows for the same Jira issue key.
     external_keys = list(WorkItem.objects.filter(project=project).values_list('external_key', flat=True))

@@ -359,6 +359,17 @@ def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work
         _record_generic_event(project, None, issue_key, envelope, {'event': 'comment', 'author': author, 'body': text})
         return
 
+    # REQ-10: the comment's ticket may resolve (via
+    # `default_resolve_work_item_id`) to an existing work item whose own
+    # project isn't in Jira mode — ignored like the entry-level check,
+    # applying nothing to that item.
+    item = store.get_work_item(work_item_id)
+    if item is not None and project_config.get_mode(item.project)['mode'] != project_config.JIRA:
+        _record_generic_event(project, work_item_id, issue_key, envelope,
+                               {'event': 'comment', 'author': author, 'body': text,
+                                'ignored': 'work item project not in Jira mode'})
+        return
+
     with transaction.atomic():
         store.append_comment(
             work_item_id, author, text,
