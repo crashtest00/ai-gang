@@ -4,16 +4,17 @@ webhook payload lives entirely here (and in webhook_consumer.py, which
 calls these functions), never in ScrumMaster or any other Streams client.
 
 Pure functions only: no Django ORM, no Redis, no I/O — everything here is
-unit-testable with a plain dict. Mirrors the field-parsing half of
-services/scrummaster/src/jira.js's `getIssue`/`adfToText` (the ADF-to-plain-text
-conversion and the custom-field-ID-driven story/release field extraction),
-applied to a webhook's `issue.fields` payload instead of a live GET
-response — the two are the same JSON shape, since Jira's webhook payload
-embeds the issue's current field values at delivery time.
+unit-testable with a plain dict. Mirrors the field-parsing half of a port of
+the ADF-to-plain-text conversion and custom-field-ID-driven story/release
+field extraction ScrumMaster's since-retired Jira client used to perform
+(V5.1 REQ-01, REQ-06), applied to a webhook's `issue.fields` payload instead
+of a live GET response — the two are the same JSON shape, since Jira's
+webhook payload embeds the issue's current field values at delivery time.
 
-Reuses the SAME env var names services/scrummaster/src/jira.js already reads
-(JIRA_AGENT_FIELD_ID, JIRA_BLOCKED_FIELD_ID, JIRA_BEHAVIOR_FIELD_ID, ...)
-so one .env can configure both services' custom-field ids identically.
+Reads its custom-field-id env vars under the platform `.env`'s own names
+(JIRA_AGENT_FIELD_ID, JIRA_BLOCKED_FIELD_ID, JIRA_BEHAVIOR_FIELD_ID, ...);
+`core` is their only reader, same as the Jira credentials REQ-01's client
+authenticates with.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ from typing import Any, Optional
 
 def adf_to_text(node: Any) -> str:
     """Extract plain text from Atlassian Document Format — a direct port
-    of jira.js's adfToText."""
+    of the adfToText function ScrumMaster's since-retired Jira client
+    (`jira.js`) used to export."""
     if not node:
         return ''
     if isinstance(node, str):
@@ -55,10 +57,10 @@ def _text_field(fields: dict, env_name: str) -> Optional[str]:
     return value or None
 
 
-# The same five fields handlers.js's REQUIRED_STORY_FIELDS gates,
-# with the same human-readable labels (used verbatim in the Jira comment
-# ScrumMaster's Jira-effects consumer posts, so the operator-facing text is
-# byte-for-byte the same as V1).
+# The same five fields V1's handlers.js REQUIRED_STORY_FIELDS gated, with
+# the same human-readable labels — used verbatim in the missing-fields
+# comment v5.2's outbound writer will post, not one ScrumMaster posts: no
+# AI Gang component posts that comment from v5.1 (REQ-04, REQ-08).
 REQUIRED_STORY_FIELDS = (
     ('behavior', 'Behavior'),
     ('acceptanceCriteria', 'Acceptance Criteria'),

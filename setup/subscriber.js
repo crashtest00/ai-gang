@@ -127,8 +127,10 @@ async function publishTaskStatus(client, envelope, statusPayload) {
     contextId: envelope.contextId,
     correlationId: envelope.messageId,
     payload: {
-      // taskId is the Jira issue key itself (one
-      // Task per ticket for its whole lifecycle).
+      // taskId is the work item's own canonical id in both modes (one
+      // Task per work item for its whole lifecycle). `ticket_key` is a
+      // generic field name that stays; it carries that canonical id, never
+      // a Jira issue key (V5.1 REQ-06).
       ticket_key: envelope.taskId,
       agent_name: AGENT_DISPLAY_NAME,
       ...statusPayload,

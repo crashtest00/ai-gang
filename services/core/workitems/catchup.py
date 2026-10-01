@@ -2,6 +2,11 @@
 What remains of connecting a project to Jira: recording an external key
 against a work item, and the mode flip itself.
 
+Django/`core` holds the running platform's only Jira client
+(`workitems/jira_client.py`, V5.1 REQ-01); nothing calls it until v5.2's
+outbound writer, besides `ensure_jira_webhook.py`'s webhook registration
+(BF-02).
+
 The catch-up push that used to live here is gone (v5.1): its Jira-facing half
 was ScrumMaster's jiraCatchupConsumer.js, which no longer exists, and pushing
 a project's existing work items into Jira returns with the outbound writer in

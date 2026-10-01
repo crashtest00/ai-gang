@@ -66,13 +66,15 @@ nodes:
       (Jira Settings -> User Management -> Invite Users) with a Member
       (not Admin) project role. Log in as the service account and create an
       API token named ai-gang-hq (Manage Account -> Security -> Create and
-      manage API tokens). Add JIRA_USER_EMAIL/JIRA_API_TOKEN to
-      services/scrummaster/.env and JIRA_EMAIL/JIRA_TOKEN/JIRA_URL to
-      ~/ai-gang/.env. Verify with:
+      manage API tokens). Add JIRA_EMAIL/JIRA_TOKEN/JIRA_URL to
+      ~/ai-gang/.env, the platform .env — the only home of these
+      credentials; scripts/startup/derive-env.sh copies them into
+      services/core/.env for Django/core, the platform's only Jira client
+      (V5.1 REQ-01, REQ-06). Verify with:
       `curl -u "$JIRA_EMAIL:$JIRA_TOKEN" "$JIRA_URL/rest/api/3/myself"`
       returning the service account's own info as JSON.
     writes:
-      files: ["services/scrummaster/.env", "~/ai-gang/.env"]
+      files: ["~/ai-gang/.env"]
       services: []
     next: create-jira-custom-fields
 

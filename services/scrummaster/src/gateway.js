@@ -168,7 +168,7 @@ async function handleMaterializeDecomposition(msg, projectName) {
 // summary. A 'failed' status (retry exhaustion, timeout, or an invalid
 // message) has no such comment, so ScrumMaster must post one itself and
 // surface the ticket as needing attention rather than leaving it silently
-// stuck "In Progress". Also mirrors the outcome into the A2A Task record
+// stuck `in-progress`. Also mirrors the outcome into the A2A Task record
 // where one exists — best-effort: a process restart or a race with the
 // agent's own completion report can mean there's nothing (or an
 // already-terminal record) to update, which is not itself an error.

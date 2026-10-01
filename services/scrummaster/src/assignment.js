@@ -2,9 +2,10 @@
 
 // Catalog-backed agent-assignment validation — the sole acceptance boundary
 // for agent responsibility. Every path that creates or changes agent
-// responsibility (initial refinement/decomposition, Shovel Ready dispatch,
-// blocked-clear redispatch, reassignment) MUST call this module rather than
-// writing a literal agent id to Jira or dispatching an agent directly.
+// responsibility (initial refinement/decomposition, dispatch on a
+// dispatch-eligible work item, blocked-clear redispatch, reassignment)
+// MUST call this module rather than writing a literal agent id to the
+// canonical store or dispatching an agent directly.
 //
 // Pure and transport-agnostic: no Jira or Redis calls, so callers on any
 // transport (pub/sub today, Redis Streams elsewhere) can use it identically.

@@ -148,9 +148,11 @@ Build stages and the Beta URL/SHA comment step do not.
 
 ### beta → release candidate (`release-candidate` job)
 
-ScrumMaster's `handleReleaseRequested` (fired on `jira:issue_created` when
-`issuetype === 'Release'`) runs the beta-queue-clean check itself, then
-triggers this job:
+`core` runs the beta-queue-clean check itself (`store.py`'s
+`transition_status`) before publishing a local-mode release's `requested`
+event; ScrumMaster's `handleReleaseRequested` reacts to that event and
+triggers this job. A Jira-mode release event triggers nothing until v5.2
+(V5.1 REQ-04):
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-candidate

@@ -8,7 +8,7 @@ services:
     # still listens on 9000 for /health, reachable only from other
     # containers on the `ai-gang` network (e.g. `docker exec ... curl
     # localhost:9000/health`), never published to the host or beyond.
-    # Previously bound to 127.0.0.1:9000 for cloudflared's Jira-webhook
+    # Previously bound to 127.0.0.1:9000 for cloudflared's webhook
     # forwarding; that forwarding target moves to core:9100
     # (see that service's own docker-compose.yml) — updating
     # scripts/setup-cloudflare-tunnel.sh's/init-project.sh's webhook-URL
