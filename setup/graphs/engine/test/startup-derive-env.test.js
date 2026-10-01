@@ -247,10 +247,16 @@ test('both derived files are written owner-readable only', () => {
 });
 
 test('no secret reaches the step output', () => {
-  const root = makeRoot();
+  // JIRA_TOKEN is added to this root's platform .env rather than to
+  // PLATFORM_ENV, which the Jira-credential test above needs to stay free of
+  // them. It belongs here because derivation carries it like any other
+  // credential, so it is leakable like any other, and it is the one this stage
+  // introduced (V5.1 audit row 54).
+  const root = makeRoot({ platformEnv: PLATFORM_ENV + 'JIRA_TOKEN=a-test-only-jira-token\n' });
   const result = run(root);
   const output = `${result.stdout}${result.stderr}`;
-  for (const secret of ['a-test-only-pg-password', 'a-test-only-django-key', 'github_pat_test_not_a_real_token']) {
+  for (const secret of ['a-test-only-pg-password', 'a-test-only-django-key', 'github_pat_test_not_a_real_token',
+    'a-test-only-jira-token']) {
     assert.equal(output.includes(secret), false);
   }
 });

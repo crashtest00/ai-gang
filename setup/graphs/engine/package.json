@@ -5,6 +5,7 @@
   "description": "Graph-based process engine (schema validation, addressing, walking) and parallel branch coordination for AI Gang V2 initialization/setup procedures.",
   "main": "lib/index.js",
   "scripts": {
+    "pretest": "node preflight.js",
     "test": "node --test"
   },
   "dependencies": {

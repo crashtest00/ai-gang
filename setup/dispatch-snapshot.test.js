@@ -633,6 +633,120 @@ test('the real setup/ tree snapshots exactly the four entries, and the state der
   assert.ok(fs.statSync(snapshot.stateDir).isDirectory());
 });
 
+// Every file and every directory under `dir`, as sorted slash-separated
+// relative paths. The same two sets dispatch-snapshot.js hashes
+// (`snapshotFiles` and `snapshotDirectories`, which is why an empty directory
+// counts), computed here independently of it so the gate below is a statement
+// about the tree rather than a restatement of the module.
+function treeOf(dir) {
+  const files = [];
+  const directories = [];
+  const walk = (at, prefix = '') => {
+    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        directories.push(rel);
+        walk(path.join(at, entry.name), rel);
+      } else {
+        files.push(rel);
+      }
+    }
+  };
+  walk(dir);
+  return { files: files.sort(), directories: directories.sort() };
+}
+
+// Everything the real setup/commons/ holds, to its full depth. Written out so
+// that a file appearing in it has to be put here deliberately — which is the
+// whole of the check below (V5.1 audit row 51).
+const REAL_COMMONS_TREE = {
+  files: [
+    'skills/a2a-submit/SKILL.md',
+    'tools/a2a-schema.js',
+    'tools/a2a-submit.js',
+    'tools/a2a-submit.test.js',
+    'tools/a2a-validate.js',
+    'tools/a2a-validate.test.js',
+    'tools/envelope.js',
+    'tools/gateway-publish.js',
+    'tools/request-artifact.js',
+    'tools/request-artifact.test.js',
+    'tools/streams.js',
+    'tools/test.sh',
+  ],
+  directories: ['skills', 'skills/a2a-submit', 'tools'],
+};
+
+test('the real commons/ is classified to its full depth, not just as a top-level entry', () => {
+  // The classification above is of setup/'s *top-level* entries, so a stray
+  // file one level inside an already-classified directory is invisible to it:
+  // that is exactly how an orphan `commons/package-lock.json` reached every
+  // dispatch, and moved AIGANG_COMMONS_VERSION, until pass 2 found it by
+  // reading (V5.1 audit rows 43 and 51).
+  //
+  // `commons/` is the entry that gets this treatment because of what it is:
+  // `markExecutables` chmods every file in it that opens with a shebang, and
+  // `tools/` goes first on the session's PATH — so a file that appears in it can
+  // be a command an agent runs by name. The argument does not reach the other
+  // three entries, and the test below says why instead of repeating this one.
+  const snapshot = createSnapshot({ source: __dirname, root: makeRoot() });
+
+  assert.deepStrictEqual(
+    treeOf(path.join(snapshot.dispatchDir, 'commons')),
+    REAL_COMMONS_TREE,
+    'setup/commons/ holds a file or directory this test does not enumerate — it is in every dispatch, '
+      + 'in AIGANG_COMMONS_VERSION, and if it is executable it is on the session PATH. Classify it here '
+      + 'deliberately, or delete it'
+  );
+  // The snapshot is the copy; the mount is the thing being described. They are
+  // the same tree, and the check is about both.
+  assert.deepStrictEqual(treeOf(path.join(__dirname, 'commons')), REAL_COMMONS_TREE);
+});
+
+test('a stray file one level inside commons/ is caught, and does move the version stamp', () => {
+  // Not vacuous: the same comparison over a mount carrying exactly the mistake
+  // row 43 found — an orphan package-lock.json in commons/ — sees it, where
+  // readdirSync of the mount's top level cannot. And the stamp it moves is why
+  // that matters: two sessions that ran the same commons would have recorded
+  // different versions of it.
+  const cleanSource = makeMount();
+  const clean = createSnapshot({ source: cleanSource, root: makeRoot() });
+  const cleanTree = treeOf(path.join(clean.dispatchDir, 'commons'));
+
+  const source = makeMount();
+  fs.writeFileSync(path.join(source, 'commons', 'package-lock.json'), '{"lockfileVersion": 3}\n');
+  const orphaned = createSnapshot({ source, root: makeRoot() });
+
+  // The gate as it stood: the two mounts are indistinguishable at setup/'s top
+  // level, which is the only level it looked at.
+  assert.deepStrictEqual(fs.readdirSync(source).sort(), fs.readdirSync(cleanSource).sort());
+  assert.deepStrictEqual(
+    treeOf(path.join(orphaned.dispatchDir, 'commons')).files,
+    [...cleanTree.files, 'package-lock.json'].sort()
+  );
+  assert.notStrictEqual(orphaned.version, clean.version);
+});
+
+test('the other three snapshotted entries are flat, which is what makes enumerating them once enough', () => {
+  // The scope decision for `agents/` and the two handbooks, asserted rather
+  // than assumed. A handbook is a regular file and has no inside to reach. The
+  // four role definitions are regular files too, so the readdirSync of
+  // `agents/` above *is* its full depth — and the only way that stops being
+  // true is a subdirectory appearing there, which this fails on. At that point
+  // `agents/` needs what `commons/` has above; until then it does not, because
+  // nothing in it is executable or on the session PATH.
+  const snapshot = createSnapshot({ source: __dirname, root: makeRoot() });
+
+  for (const rel of ['DESKTOP_HANDBOOK_v1.md', 'DEVOPS_HANDBOOK_v1.md']) {
+    assert.ok(fs.statSync(path.join(snapshot.dispatchDir, rel)).isFile(), `${rel} is a regular file`);
+  }
+  assert.deepStrictEqual(
+    treeOf(path.join(snapshot.dispatchDir, 'agents')).directories,
+    [],
+    'agents/ has a subdirectory, so the readdirSync enumeration of it is no longer its full depth'
+  );
+});
+
 test('no snapshotted markdown in the real setup/ tree still names a snapshotted entry under /agent-docs', () => {
   // The gate for a mention added later: a new role definition, a new handbook
   // section or a SKILL.md that hardcodes the mount fails here.
