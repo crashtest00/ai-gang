@@ -17,7 +17,7 @@
 3. [Architecture](#architecture)
 4. [Jira Configuration Dependencies](#jira-configuration-dependencies)
 5. [Inbound Webhook Handling](#inbound-webhook-handling)
-6. [Outbound Jira Operations](#outbound-jira-operations)
+6. [Outbound Canonical Operations](#outbound-canonical-operations)
 7. [Redis Message Contract](#redis-message-contract)
 8. [Prompt Construction](#prompt-construction)
 9. [Agent Catalog and Assignment Validation](#agent-catalog-and-assignment-validation)
@@ -255,28 +255,57 @@ record that a dev-agent ticket's block was lifted (`dispatchConsumer.js`'s
 
 ---
 
-## Outbound Jira Operations
+## Outbound Canonical Operations
 
 ScrumMaster runs one durable Streams consumer per project on that project's gateway stream (`aigang:gateway:{project-name}`, consumer group `scrummaster`) and processes outbound messages from that project's container(s). Project identity is derived from which stream a consumer is bound to — never from message content. All messages must conform to the message contract defined below, and each is processed at most once per messageId even if redelivered.
 
+Nothing here writes to Jira. Each operation below resolves to a canonical
+command ScrumMaster publishes to `core`, which applies it to the work item and
+is the sole authority on what the item then is (V5.1 REQ-01, REQ-04). From
+v5.2, `core`'s outbound writer mirrors what it applied onto the Jira ticket of
+a project in Jira mode; in v5.1 nothing is mirrored anywhere.
+
 ### Supported Operations
 
-**Post Comment**
-Posts a formatted comment to the specified ticket on behalf of the named agent.
+**Post Comment** — A2A operation `comment`, or any working-state submission
+carrying body text and no data part.
+Publishes an `appendComment` command naming the work item, the authoring agent
+and the formatted body. The gateway threads the submission's `messageId`
+through as the command's `sourceMessageId`, so a redelivered gateway entry
+cannot double-post it — `core`'s `append_comment` holds that guard.
 
-ScrumMaster enforces comment formatting before posting. See Agent Comment Standard below.
+ScrumMaster enforces comment formatting before publishing. See Agent Comment
+Standard below.
 
-**Set Blocked Field**
-Sets the Blocked field to true on the specified ticket. ScrumMaster also posts a system comment noting which agent set the field and at what time.
+**Report Blocked** — not an operation but a submission state: `input-required`
+or `auth-required`.
+Publishes a `transitionStatus` command moving the work item to
+`needs-clarification`, the minimum-vocabulary status meaning "blocked, needs
+input", and then an `appendComment` command whose body is labelled `BLOCKED`,
+or `AUTHORIZATION REQUIRED` for `auth-required`, naming the agent and its
+reason. There is no Blocked-field command and no Jira field write: the block
+is a canonical status plus a canonical comment.
 
-**Set Agent Field**
-Updates the Agent field on a ticket. Used by the Refinement Agent to assign subtasks to dev agents.
+**Reassign** — A2A operation `reassign`.
+Publishes an `assign` command carrying the requested agent id, once
+`src/assignment.js` has validated it against the agent catalog and the
+project's permitted set. Used by the Refinement Agent to put subtasks with dev
+agents. A request that fails validation publishes no `assign` command — it is
+reported as a comment naming the requested agent, the reason and the ids
+permitted for that project.
 
-**Create Subtask**
-Creates a subtask under a specified parent ticket. Used by the Refinement Agent to decompose stories. ScrumMaster enforces that the subtask is created within the same project as the parent ticket.
+**Create Subtask** — A2A operation `create_subtask`.
+Publishes a `materializeDecomposition` command carrying the parent's canonical
+id and a one-subtask list, the same command a full Refinement Agent
+decomposition sends. Used by the Refinement Agent to decompose stories. The
+subtask is created under the requesting Task's own work item, so it is in that
+item's project by construction; the new subtask's id is recorded against the
+submission's `messageId`, so a redelivery reuses it rather than creating a
+second subtask. ScrumMaster does not dispatch the subtask — that follows from
+its own `ready` event.
 
-All four operations above are now carried as canonical A2A envelopes rather
-than bare `{"type": ...}` messages — see [Redis Message
+Every operation above is carried as a canonical A2A envelope rather
+than a bare `{"type": ...}` message — see [Redis Message
 Contract](#redis-message-contract) below for the full contract.
 
 ### Agent Comment Standard
