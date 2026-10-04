@@ -570,6 +570,64 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
         _publish_side_effect(project, item.id, issue_key, 'blocked_cleared', {})
 
 
+def _handle_agent_field_change(project: str, issue: dict, issue_key: str, work_item_id, envelope: dict) -> None:
+    """canonical-delivery-state.md REQ-09, "An assignment -> `set_agent_field`":
+    an Agent-field changelog item is a validated assignment, origin
+    JIRA_WEBHOOK — `push_assignment`'s own write echoed back by Jira's
+    webhook, or a person reassigning the ticket in Jira directly, treated
+    the same way.
+
+    The value is read from the webhook's current field snapshot with
+    `jira_interpret.parse_agent_field`, not from the changelog item's
+    `to`/`toString` — the same "the issue snapshot carries the ticket's
+    FULL current field values" rule `_handle_blocked_flag_cleared_status`
+    and `_sync_story_detail` already follow for their own fields.
+
+    Validation reuses `store.assign_work_item`'s own rule
+    (`_assert_assignment_valid` -> `assignment.validate_assignment`, the
+    same catalog check `_subtask_assignee` runs for a mirrored Sub-task)
+    rather than calling `validate_assignment` a second time here: a value
+    outside the catalog surfaces as `AssignmentRejectedError`, caught below
+    and recorded as one webhook failure, not applied. A cleared field
+    (`parse_agent_field` returns falsy) is recorded as one webhook failure
+    and not applied. A value equal to the item's current assignee is the
+    push's own echo, or a no-op edit in Jira — nothing is recorded and
+    nothing fails."""
+    if work_item_id is None:
+        _record_generic_event(project, None, issue_key, envelope, {'field': 'agent'})
+        return
+
+    item = store.get_work_item(work_item_id)
+    if not item:
+        return
+
+    agent_id = jira_interpret.parse_agent_field(issue.get('fields') or {})
+
+    if not agent_id:
+        record_failure(
+            project, work_item_id, issue_key,
+            f'{issue_key}: the Agent field was cleared — assignment unchanged',
+            {'event': 'agent_field', 'envelopeId': envelope.get('messageId')},
+        )
+        return
+
+    if agent_id == item.assignee_agent_id:
+        return  # push_assignment's own write, echoed back, or a no-op edit.
+
+    try:
+        store.assign_work_item(work_item_id, agent_id, actor=f'jira-webhook:{issue_key}',
+                                origin=write_gate.Origins.JIRA_WEBHOOK)
+    except store.AssignmentRejectedError as err:
+        result = err.result
+        record_failure(
+            project, work_item_id, issue_key,
+            f'{issue_key}: Agent "{agent_id}" is not a valid assignee for this project ({result.get("code")})',
+            {'event': 'agent_field', 'requestedAgent': agent_id,
+             'permittedAgents': result.get('permittedAgents'),
+             'envelopeId': envelope.get('messageId')},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Comments and Release events — see module docstring for the
 # Release scope carve-out.
@@ -1320,6 +1378,11 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
     blocked_field_id = os.environ.get('JIRA_BLOCKED_FIELD_ID')
     if blocked_field_id and change.get('fieldId') == blocked_field_id:
         _handle_blocked_field_change(project, issue, issue_key, work_item_id, change, envelope)
+        return
+
+    agent_field_id = os.environ.get('JIRA_AGENT_FIELD_ID')
+    if agent_field_id and change.get('fieldId') == agent_field_id:
+        _handle_agent_field_change(project, issue, issue_key, work_item_id, envelope)
         return
 
     if field == 'resolution' and change.get('toString') == 'Abandoned' and issuetype == 'Release':
