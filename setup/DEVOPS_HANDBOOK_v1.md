@@ -149,7 +149,17 @@ Jenkins runs as its own persistent container on the project droplet, alongside t
     └── init-repo.sh          # Per-repo: branches, protection, webhook, Jenkinsfile
 ```
 
-Jenkins config is generated from the canonical template at `~/ai-gang/jenkins/` when `init-project.sh` runs. The template is never modified directly for a specific project — edit the template, re-run bootstrap to apply.
+Jenkins config is generated from the canonical template at `~/ai-gang/jenkins/`
+when `init-project.sh` runs — `Dockerfile`, `docker-compose.yml` and
+`plugins.txt` are copied as-is, with nothing project-specific to fill in.
+`jenkins.yaml` is loaded as-is too, not substituted: unlike those three
+files, its `jobs:` block is inherently project-specific (the per-project CI
+job's `multibranchPipelineJob`, naming that project's own repo, alongside
+the release jobs that are not), so it is edited by hand in the canonical
+template for the project being bootstrapped, before `init-project.sh` copies
+it in. `hello-world-pipeline` is not a placeholder template job waiting to
+be renamed — it is the hello-world test project's own job, added the same
+way (BF-07 decision 6.1).
 
 **Start Jenkins** (handled automatically by `init-project.sh`):
 ```bash

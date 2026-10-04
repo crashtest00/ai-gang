@@ -98,7 +98,7 @@ These fields are **instance-level** — created once for the whole Jira instance
 | Read by | `core`'s webhook interpretation, which carries the value onto the canonical work item |
 | Env var | `JIRA_AGENT_FIELD_ID` |
 
-**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`. See [Agent Roster](#agent-roster). Values must match the canonical agent catalog's entries exactly.
+**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`. See [Agent Roster](#agent-roster). Values must match the canonical agent catalog's entries exactly — all five, including `desktop-agent`, which no project's `projects.json` currently enables for dispatch but which the catalog still declares.
 
 ---
 

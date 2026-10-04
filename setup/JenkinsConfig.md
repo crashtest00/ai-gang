@@ -14,7 +14,6 @@ gives — not `DEVOPS_HANDBOOK_v1.md` beside this file on the mount.
 Handled by `scripts/init-jenkins.sh`. Prerequisites before running:
 
 - `GITHUB_TOKEN` set in `~/ai-gang/.env`
-- `VERCEL_TOKEN` set in `~/ai-gang/.env` (optional — can be added later)
 - Docker and `docker compose` installed on the droplet
 
 Jenkins itself holds no Jira credential (`canonical-delivery-state.md`
@@ -40,9 +39,14 @@ Installed plugins:
 - **Generic Webhook Trigger** — receives the release-job invocations ScrumMaster sends, carrying a canonical `workItemId`
 - **Docker Pipeline** — runs pipeline steps inside project containers
 - **GitHub** — PR webhook integration and status reporting
+- **GitHub Branch Source** — required for `hello-world-pipeline`'s multibranch PR discovery and automatic webhook registration; not included in Workflow: Aggregator (`docs/ClaudeInstructions.md` §2.2)
 - **Credentials Binding** — injects secrets into pipeline steps
 - **Configuration as Code** — JCasC config applied on container start
 - **Job DSL** — `release-candidate`, `production-promote`, and `release-preview-teardown` jobs created on first boot (see §6); `jenkins-cache-retention-nightly` and `jenkins-disk-usage-sweep` jobs also created on first boot (see §10)
+
+Also installed, as pipeline prerequisites rather than AI-Gang-specific
+configuration: Git, Pipeline: Model Definition, Pipeline: Workflow
+Aggregator. See `jenkins/plugins.txt` for the exact, versioned list.
 
 No Jira plugin: Jenkins makes no Jira write in any mode — `core`'s outbound
 writer does, through v5.1's client (`canonical-delivery-state.md` REQ-06).
@@ -56,6 +60,7 @@ Injected automatically via JCasC (`jenkins/jenkins.yaml`) from environment varia
 | Credential ID | Env var | Purpose |
 |---|---|---|
 | `github-token` | `GITHUB_TOKEN` | PR auto-merge (`gh pr merge`), release/prod PRs |
+| `github-api-token` | `GITHUB_TOKEN` | Same PAT, bound as Secret Text: the classic GitHub plugin's webhook/status-check management only accepts that credential kind, not Username/Password (`jenkins.yaml`'s `gitHubPluginConfig`) |
 
 Deploy credentials will be added here once deployment targets are decided.
 

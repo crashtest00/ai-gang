@@ -307,7 +307,7 @@ cd ~/ai-gang && ./scripts/create-jira-fields.sh && ./scripts/create-release-fiel
 ```
 
 This creates:
-- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`)
+- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
 - The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) and its Abandoned resolution
