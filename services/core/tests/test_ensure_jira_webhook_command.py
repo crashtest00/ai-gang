@@ -80,15 +80,16 @@ def test_registers_the_live_plural_webhooks_route_when_none_exists(monkeypatch):
     assert calls[0][3] == 'token-123'
 
 
-def test_is_idempotent_and_skips_the_post_when_already_registered(monkeypatch):
+def test_is_idempotent_and_skips_the_write_when_already_registered_with_every_event(monkeypatch):
     _set_required_env(monkeypatch)
     calls = []
 
     def fake_request(method, url, email, token, body=None):
         calls.append(method)
         if method == 'GET':
-            return [{'url': WEBHOOK_URL, 'self': 'https://example.atlassian.net/.../1'}]
-        raise AssertionError('POST must not be called when the webhook already exists')
+            return [{'url': WEBHOOK_URL, 'self': 'https://example.atlassian.net/.../1',
+                     'events': list(command_module.WEBHOOK_EVENTS)}]
+        raise AssertionError('no write may be made when the webhook already has every event')
 
     monkeypatch.setattr(command_module, '_jira_request', fake_request)
 
@@ -96,6 +97,47 @@ def test_is_idempotent_and_skips_the_post_when_already_registered(monkeypatch):
 
     assert 'already registered' in output
     assert calls == ['GET']
+
+
+def test_an_existing_registration_missing_an_event_is_updated_not_returned_from(monkeypatch):
+    """canonical-delivery-state.md REQ-09, "Jira's comment and link events
+    reach `core`" — up to v5.1 this returned on a URL match alone, so a
+    deployment registered before `comment_created` joined WEBHOOK_EVENTS
+    stayed subscribed to the old set for ever, and `webhook_consumer.py`'s
+    comment branch was never reached. The registration is now PUT to its own
+    `self` link with the full event list."""
+    _set_required_env(monkeypatch)
+    calls = []
+    self_link = 'https://example.atlassian.net/rest/webhooks/1.0/webhook/7'
+
+    def fake_request(method, url, email, token, body=None):
+        calls.append((method, url, body))
+        if method == 'GET':
+            return [{'url': WEBHOOK_URL, 'self': self_link,
+                     'events': ['jira:issue_created', 'jira:issue_updated']}]
+        return {'self': self_link}
+
+    monkeypatch.setattr(command_module, '_jira_request', fake_request)
+
+    output = _run_command()
+
+    assert [c[0] for c in calls] == ['GET', 'PUT']
+    assert calls[1][1] == self_link, 'the existing registration is addressed by its own self link'
+    assert calls[1][2]['events'] == command_module.WEBHOOK_EVENTS
+    assert 'comment_created' in calls[1][2]['events']
+    assert 'comment_updated' not in calls[1][2]['events'], \
+        'core records a comment once, keyed on its Jira id; an edit is not mirrored'
+    assert 'updated' in output
+
+
+def test_the_subscribed_event_list_is_what_the_webhook_consumer_dispatches_on():
+    """REQ-09 — the registration and the consumer have to agree: an event
+    `webhook_consumer.handle_webhook_envelope` branches on but nobody
+    subscribes is a branch that never runs, which is exactly what
+    `comment_created` was before v5.2."""
+    assert command_module.WEBHOOK_EVENTS == [
+        'jira:issue_created', 'jira:issue_updated', 'comment_created',
+    ]
 
 
 def test_registration_is_attempted_even_when_the_existence_check_fails(monkeypatch):

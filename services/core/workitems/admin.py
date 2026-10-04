@@ -58,7 +58,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import HttpResponseRedirect
 from django.utils import timezone
 
-from . import project_config, store, write_gate
+from . import store, write_gate
 from .models import (
     AccessLog, OutboxEvent, ProjectConfig, ProjectStatusConfig, WebhookFailure, WorkItem, WorkItemArtifact,
     WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink, WorkItemReleaseDetail,
@@ -69,6 +69,89 @@ from .models import (
 def _actor(request) -> str:
     username = getattr(request.user, 'get_username', lambda: None)()
     return username or 'admin-ui'
+
+
+class GatedAdminMixin:
+    """canonical-delivery-state.md REQ-09, "The admin is a person's edit
+    interface, so in Jira mode it changes nothing".
+
+    Two things every admin over a work item or one of its children needs,
+    and only `WorkItemAdmin` had either of them before v5.2:
+
+    1. **Error on save.** Django's admin machinery has no handling for an
+       exception raised out of `save_model`/`save_formset`:
+       `ModelAdmin._changeform_view` calls them with no surrounding
+       try/except, so a refusal from any admin but `WorkItemAdmin` was an
+       unhandled server error — a bare 500, and with DEBUG off, no
+       traceback either.
+    2. **Error on delete.** A refused delete must show the refusal on the
+       delete page or the change list and delete nothing, single or bulk.
+       A bulk delete that selects any Jira-mode row is refused WHOLE, its
+       local rows included: a half-applied bulk delete is worse than a
+       refused one, and the operator can narrow the selection.
+
+    Both are implemented by raising Django's own `ValidationError` from the
+    write and catching it in the view that wraps it — `changeform_view`,
+    `delete_view` and `changelist_view` (which is where the `delete_selected`
+    action runs). Each of those views wraps its call in `transaction.atomic`,
+    so by the time the message is flashed nothing has been written.
+
+    The admin reads no mode: `write_gate.route` answers, and in local mode
+    every one of these paths saves or deletes exactly as it did (Pass 4
+    decision 5.2 — the fields look editable and the refusal comes on
+    save; the read-only display is parked)."""
+
+    def gated_project(self, obj) -> str | None:
+        """The project whose mode governs this row. Overridden where the
+        row reaches its work item by another name."""
+        work_item = getattr(obj, 'work_item', None)
+        if work_item is not None:
+            return work_item.project
+        return getattr(obj, 'project', None)
+
+    def _refuse_if_not_recorded(self, obj, what: str) -> None:
+        project = self.gated_project(obj)
+        if project is None:
+            return
+        if write_gate.route(project, write_gate.Origins.ADMIN_UI) != write_gate.RECORD:
+            try:
+                write_gate.refuse(write_gate.Origins.ADMIN_UI, what)
+            except Exception as err:  # noqa: BLE001 - re-raised as the form error the views catch
+                _raise_as_form_error(err)
+
+    def _flash(self, request, err: DjangoValidationError, destination: str):
+        for message in err.messages:
+            messages.error(request, message)
+        return HttpResponseRedirect(destination)
+
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        try:
+            return super().changeform_view(request, object_id, form_url, extra_context)
+        except DjangoValidationError as err:
+            return self._flash(request, err, request.path)
+
+    def delete_view(self, request, object_id, extra_context=None):
+        try:
+            return super().delete_view(request, object_id, extra_context)
+        except DjangoValidationError as err:
+            return self._flash(request, err, request.path)
+
+    def changelist_view(self, request, extra_context=None):
+        # Where `delete_selected` runs (ModelAdmin.response_action), so where
+        # a refused BULK delete has to surface.
+        try:
+            return super().changelist_view(request, extra_context)
+        except DjangoValidationError as err:
+            return self._flash(request, err, request.get_full_path())
+
+    def delete_model(self, request, obj):
+        self._refuse_if_not_recorded(obj, 'deleting this row')
+        super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        for obj in queryset:
+            self._refuse_if_not_recorded(obj, 'deleting the selected rows (the whole selection is refused)')
+        super().delete_queryset(request, queryset)
 
 
 def _raise_as_form_error(err: Exception):
@@ -133,22 +216,34 @@ class WorkItemReleaseDetailInline(admin.StackedInline):
     extra = 0
 
 
-class WorkItemLinkFromInline(admin.TabularInline):
+class _ReadOnlyLinkInline(admin.TabularInline):
+    """canonical-delivery-state.md REQ-09 — read-only, in EVERY mode. These
+    two inlines saved through the ORM and so bypassed `store.create_link`
+    entirely: no write gate, no history row, no outbound event, local mode
+    included. That is the same reasoning `WorkItemCommentInline` and
+    `WorkItemArtifactInline` already carried, applied to links; an operator
+    adds a link from the link page instead (RELEASE §6)."""
+
     model = WorkItemLink
-    fk_name = 'from_work_item'
     extra = 0
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class WorkItemLinkFromInline(_ReadOnlyLinkInline):
+    fk_name = 'from_work_item'
     fields = ('to_work_item', 'link_type', 'created_at')
-    readonly_fields = ('created_at',)
+    readonly_fields = fields
     verbose_name = 'Outgoing link (this item blocks / relates to)'
     verbose_name_plural = 'Outgoing links'
 
 
-class WorkItemLinkToInline(admin.TabularInline):
-    model = WorkItemLink
+class WorkItemLinkToInline(_ReadOnlyLinkInline):
     fk_name = 'to_work_item'
-    extra = 0
     fields = ('from_work_item', 'link_type', 'created_at')
-    readonly_fields = ('created_at',)
+    readonly_fields = fields
     verbose_name = 'Incoming link (this item is blocked by / related from)'
     verbose_name_plural = 'Incoming links'
 
@@ -223,7 +318,7 @@ class WorkItemArtifactLinkInline(admin.TabularInline):
 
 
 @admin.register(WorkItem)
-class WorkItemAdmin(admin.ModelAdmin):
+class WorkItemAdmin(GatedAdminMixin, admin.ModelAdmin):
     list_display = ('display_name', 'type', 'project', 'status', 'assignee_agent_id', 'priority', 'external_key', 'updated_at')
     list_filter = ('project', 'type', 'status')
     search_fields = ('=id', 'external_key', 'display_name', 'description')
@@ -234,24 +329,6 @@ class WorkItemAdmin(admin.ModelAdmin):
                WorkItemSpecificationLinkInline, WorkItemArtifactLinkInline]
     fields = ('id', 'project', 'type', 'display_name', 'description', 'status', 'assignee_agent_id',
                'priority', 'writes_files', 'writes_services', 'parent', 'external_key', 'created_at', 'updated_at')
-
-    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
-        """Catches the DjangoValidationError save_model (below) raises for
-        a rejected gated write. Nothing upstream in Django's admin does:
-        ModelAdmin._changeform_view calls self.save_model(...) with no
-        surrounding try/except of its own, so left uncaught this would
-        propagate all the way out as an unhandled exception. Converts it
-        into a flashed error message and a redirect back to the same page
-        instead — the transaction save_model ran inside has already been
-        rolled back by this point (changeform_view's own
-        transaction.atomic(), which wraps the call this method's super()
-        makes), so nothing was actually written."""
-        try:
-            return super().changeform_view(request, object_id, form_url, extra_context)
-        except DjangoValidationError as err:
-            for message in err.messages:
-                messages.error(request, message)
-            return HttpResponseRedirect(request.path)
 
     def get_inlines(self, request, obj):
         """WorkItemStoryDetail/WorkItemReleaseDetail are 1:1 child tables
@@ -281,17 +358,20 @@ class WorkItemAdmin(admin.ModelAdmin):
         return self.inlines
 
     def get_readonly_fields(self, request, obj=None):
+        """canonical-delivery-state.md REQ-09 — the 2026-09-07 Jira-mode
+        rule that rendered `status` and `assignee_agent_id` read-only is
+        GONE, with the `get_mode` call behind it. The admin reads no mode:
+        in Jira mode every change is refused on save, not hidden before it
+        (Pass 4 decision 5.2), and showing a subset of the fields read-only
+        while every other field is refused anyway was the worse of the two
+        (showing them all read-only up front is parked:
+        `parking-lot/remote-mode-admin-read-only-display.md`). This also
+        supersedes `internal-work-item-service.md` REQ-08's "render
+        read-only in Jira mode"."""
         ro = list(self.readonly_fields)
         if obj is not None:
             # Canonical identity is never reissued once created.
             ro = ['id'] + ro
-            mode = project_config.get_mode(obj.project)
-            if mode['mode'] == 'jira':
-                # The 2026-09-07 Jira-mode restriction: status,
-                # assignment, and dependency fields render read-only in
-                # Jira mode. (Dependency links are managed via the
-                # WorkItemLink admin, which applies the same gate itself.)
-                ro += ['status', 'assignee_agent_id']
         return ro
 
     def save_model(self, request, obj, form, change):
@@ -303,6 +383,15 @@ class WorkItemAdmin(admin.ModelAdmin):
 
         changed = set(form.changed_data)
         try:
+            # Every other admin write to a Jira-mode work item is refused
+            # too, not only the gated fields (REQ-09): `transition_status`
+            # and `assign_work_item` ask the router themselves, but the
+            # non-gated edit below is a raw ORM save with no handler to ask
+            # for it.
+            non_gated_changed = changed.intersection(NON_GATED_FIELDS + ('parent',))
+            if non_gated_changed:
+                self._refuse_if_not_recorded(obj, 'editing a work item')
+
             if 'status' in changed:
                 updated = store.transition_status(obj.pk, obj.status, actor=actor, origin=write_gate.Origins.ADMIN_UI)
                 self._copy_fields(obj, updated)
@@ -310,13 +399,20 @@ class WorkItemAdmin(admin.ModelAdmin):
                 updated = store.assign_work_item(obj.pk, obj.assignee_agent_id, actor=actor, origin=write_gate.Origins.ADMIN_UI)
                 self._copy_fields(obj, updated)
 
-            non_gated_changed = changed.intersection(NON_GATED_FIELDS + ('parent',))
             if non_gated_changed:
                 self._apply_non_gated_edit(obj, non_gated_changed, actor)
         except DjangoValidationError:
             raise
         except Exception as err:
             _raise_as_form_error(err)
+
+    def save_formset(self, request, form, formset, change):
+        """The story- and release-detail inlines are edited through here,
+        and they are plain ORM saves. REQ-09 refuses them in Jira mode like
+        any other admin write to the item (no inline on this page offers
+        delete any more, now that the two link inlines are read-only)."""
+        self._refuse_if_not_recorded(form.instance, 'editing a work item\'s detail')
+        super().save_formset(request, form, formset, change)
 
     def _create(self, request, obj, form, actor):
         payload = {
@@ -373,19 +469,24 @@ class WorkItemAdmin(admin.ModelAdmin):
 
 
 @admin.register(WorkItemLink)
-class WorkItemLinkAdmin(admin.ModelAdmin):
+class WorkItemLinkAdmin(GatedAdminMixin, admin.ModelAdmin):
     list_display = ('from_work_item', 'link_type', 'to_work_item', 'created_at')
     autocomplete_fields = ('from_work_item', 'to_work_item')
     readonly_fields = ('created_at',)
 
+    def gated_project(self, obj):
+        return obj.from_work_item.project if obj.from_work_item_id else None
+
+    def has_change_permission(self, request, obj=None):
+        """canonical-delivery-state.md REQ-09 — an edit is refused, in
+        every mode. The dependency graph's contract has no "edit a link"
+        concept: a link is created or it isn't, `create_link` is store.py's
+        only mutator, and the change form here saved through the ORM past
+        it. So a link is created only through `save_model`'s add path, and
+        this page is add/delete/view."""
+        return False
+
     def save_model(self, request, obj, form, change):
-        if change:
-            # The dependency graph's contract has no "edit a link" concept
-            # — a link is created or it isn't (createLink is the only
-            # mutator in store.py). Editing an existing row here is not a
-            # gated write this service's contract defines.
-            obj.save()
-            return
         try:
             result = store.create_link(obj.from_work_item_id, obj.to_work_item_id, obj.link_type,
                                         actor=_actor(request), origin=write_gate.Origins.ADMIN_UI)
@@ -398,12 +499,17 @@ class WorkItemLinkAdmin(admin.ModelAdmin):
 
 
 @admin.register(WorkItemArtifact)
-class WorkItemArtifactAdmin(admin.ModelAdmin):
+class WorkItemArtifactAdmin(GatedAdminMixin, admin.ModelAdmin):
     list_display = ('work_item', 'artifact_type', 'reference', 'created_at')
     autocomplete_fields = ('work_item',)
     readonly_fields = ('created_at',)
 
     def save_model(self, request, obj, form, change):
+        # An association is not one of the router's five kinds of write
+        # (Jira carries no field for one), so there is no handler to ask
+        # for it — REQ-09 refuses it here instead, as it does every other
+        # admin write to a Jira-mode work item.
+        self._refuse_if_not_recorded(obj, 'attaching an artifact association')
         if change:
             obj.save()
             return
@@ -419,7 +525,7 @@ class WorkItemArtifactAdmin(admin.ModelAdmin):
 
 
 @admin.register(WorkItemSpecificationLink)
-class WorkItemSpecificationLinkAdmin(admin.ModelAdmin):
+class WorkItemSpecificationLinkAdmin(GatedAdminMixin, admin.ModelAdmin):
     """work-items.md REQ-01/REQ-03 — where a human links a story (or any
     work item) to the requirement it was created to satisfy. A direct
     write, same as WorkItemArtifactAdmin/WorkItemCommentAdmin just above:
@@ -445,6 +551,7 @@ class WorkItemSpecificationLinkAdmin(admin.ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
     def save_model(self, request, obj, form, change):
+        self._refuse_if_not_recorded(obj, 'recording a specification link')
         try:
             store.record_specification_link(obj.work_item_id, obj.artifact_id, obj.requirement_id, actor=_actor(request))
         except Exception as err:
@@ -452,7 +559,7 @@ class WorkItemSpecificationLinkAdmin(admin.ModelAdmin):
 
 
 @admin.register(WorkItemArtifactLink)
-class WorkItemArtifactLinkAdmin(admin.ModelAdmin):
+class WorkItemArtifactLinkAdmin(GatedAdminMixin, admin.ModelAdmin):
     """work-items.md REQ-02/REQ-03 — where a human links an artifact that
     informs a work item. Same direct-write pattern and same REQ-03/REQ-08
     reasoning as WorkItemSpecificationLinkAdmin above.
@@ -473,6 +580,7 @@ class WorkItemArtifactLinkAdmin(admin.ModelAdmin):
     readonly_fields = ('position', 'created_at')
 
     def save_model(self, request, obj, form, change):
+        self._refuse_if_not_recorded(obj, 'adding an artifact link')
         if change:
             obj.save()
             return
@@ -489,7 +597,7 @@ class WorkItemArtifactLinkAdmin(admin.ModelAdmin):
 
 
 @admin.register(WorkItemComment)
-class WorkItemCommentAdmin(admin.ModelAdmin):
+class WorkItemCommentAdmin(GatedAdminMixin, admin.ModelAdmin):
     list_display = ('work_item', 'author', 'created_at')
     autocomplete_fields = ('work_item',)
     readonly_fields = ('created_at', 'source_message_id')
@@ -499,9 +607,15 @@ class WorkItemCommentAdmin(admin.ModelAdmin):
             obj.save()
             return
         try:
+            # REQ-09 — `ADMIN_UI`, which this admin did not pass before
+            # v5.2. The comment path is the one place a comment's write
+            # differs by mode, and without the origin it could not tell a
+            # person's comment from a machine's: in a Jira-mode project a
+            # person comments in Jira, so `route` refuses this one.
             comment = store.append_comment(
                 obj.work_item_id, obj.author or _actor(request), obj.body,
                 reference_file=obj.reference_file, reference_function=obj.reference_function,
+                origin=write_gate.Origins.ADMIN_UI,
             )
         except Exception as err:
             _raise_as_form_error(err)

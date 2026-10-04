@@ -23,27 +23,34 @@
 //   2. dev build (BRANCH_NAME = dev), triggered by the push that merge makes
 //      Install -> Test -> Build again on the merged tip (the only build that
 //      ever sees the real post-merge `dev`), then fast-forward `beta` to
-//      exactly this commit, deploy it to the Beta VM, post the beta URL /
-//      SHA / build identifier to every ticket whose PR landed since `beta`
-//      was last promoted, and move each of those tickets to In Review.
+//      exactly this commit, deploy it to the Beta VM, and publish ONE
+//      canonical `beta_deployed` event naming the pull requests that landed
+//      since `beta` was last promoted. The platform decides what follows
+//      from it -- the evidence comment and the move into review are made by
+//      the core service, not here.
 //
-// Ticket keys for the dev build come from GitHub's own commit -> pull-request
-// association (the squash commit's merged PR, then its head branch and
-// title), falling back to the commit subject. That covers agent merges,
-// merges a human makes from the GitHub UI, and several PRs landing before
-// one dev build gets an executor -- `origin/beta..dev` is the unit of work,
-// so nothing is skipped or double-counted.
+// This pipeline identifies work by **pull request**, never by a tracker key.
+// GitHub's own commit -> pull-request association gives the merged PR for
+// each first-parent commit `beta` does not have yet, and its `html_url` is
+// the reference the platform resolves (V5.2 Canonical Delivery State REQ-01,
+// REQ-02); an agent records the same url when it opens the PR, which is what
+// makes it resolvable. `origin/beta..dev` is the unit of work, so nothing is
+// skipped or double-counted, and a promoted commit with no merged PR is
+// carried as its SHA and resolves to nothing, which the platform records
+// rather than drops.
 //
-// On failure of either build, Jenkins posts attributable evidence to the
-// affected ticket(s) and publishes a `pipeline_retry` message to ScrumMaster
-// over the same durable gateway Streams transport agents use, through the raw
-// file/stdin entry point of the commons publish tool -- the entry point for a
-// producer that already holds a message, which is Jenkins' case; an agent names
-// an operation and its fields to a2a-submit.js instead. The tool validates the
-// payload before it writes, so a malformed pipeline_retry fails this step
-// rather than being dropped server-side (Streams-based delivery only -- no
-// PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It never
-// names an agent; ScrumMaster looks up the ticket's recorded owner.
+// On failure of either build, Jenkins publishes one `pipeline_retry` message
+// naming the same pull requests, to ScrumMaster, over the same durable
+// gateway Streams transport agents use, through the raw file/stdin entry
+// point of the commons publish tool -- the entry point for a producer that
+// already holds a message, which is Jenkins' case; an agent names an
+// operation and its fields to a2a-submit.js instead. The tool validates the
+// payload before it writes, so a malformed message fails this step rather
+// than being dropped server-side (Streams-based delivery only -- no
+// PUBLISH/SUBSCRIBE/PSUBSCRIBE in normal operation). It names no agent and
+// no ticket: the platform resolves each pull request to a work item, appends
+// the failure comment itself, and asks ScrumMaster to redispatch that work
+// item's recorded owner.
 //
 // Release preview and production promotion are NOT handled here -- they're
 // separate, centrally-defined Jenkins jobs (release-candidate,
@@ -90,12 +97,12 @@ pipeline {
         script {
           if (env.CHANGE_ID) {
             env.PIPELINE_KIND = 'pr'
-            // feature/GANG-42-password-reset -> GANG-42. CHANGE_BRANCH is the
-            // real head branch; BRANCH_NAME is only the PR-N pseudo-branch.
-            env.JIRA_TICKET = sh(returnStdout: true, script: '''
-              printf %s "$CHANGE_BRANCH" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true
-            ''').trim()
-            echo "PR #${env.CHANGE_ID}: ${env.CHANGE_BRANCH} -> ${env.CHANGE_TARGET}, ticket ${env.JIRA_TICKET ?: '(none)'}"
+            // A PR build carries its own pull request. CHANGE_URL is the
+            // multibranch plugin's own url for it, the same identifier the
+            // dev build takes from GitHub's commit -> PR association, so
+            // both builds name work the same way.
+            env.PROMOTE_PRS = env.CHANGE_URL ?: ''
+            echo "PR #${env.CHANGE_ID}: ${env.CHANGE_BRANCH} -> ${env.CHANGE_TARGET}, ${env.PROMOTE_PRS ?: '(no PR url)'}"
           } else if (env.BRANCH_NAME == 'dev') {
             env.PIPELINE_KIND = 'dev'
             // Multibranch checkouts fetch only their own branch, so bring in
@@ -109,27 +116,31 @@ pipeline {
             env.BETA_SHA = sh(returnStdout: true, script: 'git rev-parse origin/beta').trim()
             // Every first-parent commit beta doesn't have yet -> its merged
             // PR (GitHub associates squash *and* merge commits with the PR
-            // that produced them) -> ticket key from the PR's head branch,
-            // else its title, else the commit subject. Deduplicated, space-
-            // separated. Direct commits with no PR and no key are simply
-            // promoted without a ticket.
-            env.PROMOTE_TICKETS = sh(returnStdout: true, script: '''
+            // that produced them) -> that PR's web url, which is the form
+            // `gh pr create` prints, an agent passes as --pull-request, and
+            // the platform resolves (V5.2 REQ-01: "The reference is the pull
+            // request's web URL"). Deduplicated, space-separated.
+            //
+            // A commit with no merged PR, or whose lookup failed, is carried
+            // as its own SHA: the platform resolves it to nothing and
+            // records it as unresolved, which is strictly better than
+            // dropping the commit from the event. Nothing here greps for a
+            // tracker key -- that regex, and the key it found, are gone.
+            env.PROMOTE_PRS = sh(returnStdout: true, script: '''
               for sha in $(git rev-list --first-parent --reverse "origin/beta..$PROMOTE_SHA"); do
-                key=$(
-                  {
-                    gh api "repos/{owner}/{repo}/commits/$sha/pulls" \
-                      --jq '.[] | select(.merged_at != null and .base.ref == "dev") | .head.ref, .title' \
-                      || echo "WARN: PR lookup failed for $sha, falling back to its commit subject" >&2
-                    git log -1 --format=%s "$sha"
-                  } | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true
+                url=$(
+                  gh api "repos/{owner}/{repo}/commits/$sha/pulls" \
+                    --jq '.[] | select(.merged_at != null and .base.ref == "dev") | .html_url' \
+                    2>/dev/null | head -1 \
+                  || { echo "WARN: PR lookup failed for $sha, carrying its SHA instead" >&2; true; }
                 )
-                if [ -n "$key" ]; then echo "$key"; fi
+                if [ -n "$url" ]; then echo "$url"; else echo "$sha"; fi
               done | awk '!seen[$0]++' | tr '\\n' ' '
             ''').trim()
             if (env.PROMOTE_SHA == env.BETA_SHA) {
               echo "beta is already at ${env.PROMOTE_SHA} -- nothing to promote"
             } else {
-              echo "Promoting origin/beta..${env.PROMOTE_SHA} (tickets: ${env.PROMOTE_TICKETS ?: '(none)'})"
+              echo "Promoting origin/beta..${env.PROMOTE_SHA} (pull requests: ${env.PROMOTE_PRS ?: '(none)'})"
             }
           } else {
             // beta / prod / anything else: build-verify only.
@@ -239,45 +250,59 @@ pipeline {
       }
     }
 
-    stage('Post evidence and move to In Review') {
-      when { expression { env.PIPELINE_KIND == 'dev' && env.PROMOTE_SHA != env.BETA_SHA && env.PROMOTE_TICKETS } }
+    stage('Publish the beta deployment') {
+      when { expression { env.PIPELINE_KIND == 'dev' && env.PROMOTE_SHA != env.BETA_SHA } }
       steps {
-        // Beta URL is <project>.<BETA_DOMAIN> -- deploy.sh routes it through
-        // Traefik on the Beta VM under that same hostname (beta-vm/README.md).
+        // ONE canonical event describing the deployment (V5.2 Canonical
+        // Delivery State REQ-01): the promoted pull requests, the deployed
+        // SHA, the build identifier, the build url and the beta url -- which
+        // Jenkins builds from the project name and the platform cannot
+        // derive. Nothing tracker-shaped is in it, and nothing here writes
+        // to a tracker: the evidence comment and the move into review are
+        // the platform's, made in one handler, evidence first (REQ-04,
+        // REQ-05).
+        //
         // TODO: replace yourdomain.com with this project's actual BETA_DOMAIN
         //
-        // jira:3.21's jiraComment step reports "[Jira] Failed to connect to
-        // Jira" from here even though Jira is reachable, and the plugin has
-        // no transition step at all -- go through Jira's REST API directly,
-        // the same way jira.js's postComment() and transitionIssue() do.
+        // Built with `jq` and published through the raw entry point of the
+        // commons publish tool, which validates it before the write -- so a
+        // malformed event fails this step rather than being dropped
+        // server-side. The event is a gateway payload of its own `type`, not
+        // an A2A message: Jenkins is not an agent, and A2A is the protocol
+        // agents speak to each other.
         //
-        // Evidence first, then -- and only then -- In Review: this is the
-        // single place a ticket leaves In Progress on the happy path.
-        // A ticket with no In Review transition available (e.g.
-        // already reviewed or Done) keeps its evidence and its status.
-        sh '''
-          for ticket in $PROMOTE_TICKETS; do
-            COMMENT_TEXT=$(printf 'Deployed to beta.\\n\\nBeta URL: https://%s.beta.yourdomain.com\\nSHA: %s\\nBuild: %s\\nBuild log: %s' \
-                "$PROJECT_NAME" "$DEPLOYED_SHA" "$BUILD_IDENTIFIER" "$BUILD_URL")
-            curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
-                -H 'Content-Type: application/json' \
-                -d "$(jq -n --arg text "$COMMENT_TEXT" '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')" \
-                "$JIRA_URL/rest/api/3/issue/$ticket/comment" > /dev/null
-
-            TRANSITION_ID=$(curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" \
-                "$JIRA_URL/rest/api/3/issue/$ticket/transitions" \
-              | jq -r '.transitions[] | select(.to.name=="In Review") | .id')
-            if [ -z "$TRANSITION_ID" ]; then
-              echo "WARN: $ticket has no In Review transition from its current status -- evidence posted, status left as-is" >&2
-              continue
-            fi
-            curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
-                -H 'Content-Type: application/json' \
-                -d "$(jq -n --arg id "$TRANSITION_ID" '{transition:{id:$id}}')" \
-                "$JIRA_URL/rest/api/3/issue/$ticket/transitions"
-            echo "$ticket -> In Review"
-          done
-        '''
+        // A failed publish marks the build UNSTABLE, not FAILURE. The
+        // non-zero exit is caught in the shell, the way the failure handler
+        // below catches its own, and the script block then sets UNSTABLE --
+        // which a not-yet-failed build accepts. So a failed publish never
+        // reaches the failure handler below, and never asks for a retry of a
+        // build that passed.
+        script {
+          withEnv([
+            "BETA_URL=https://${env.PROJECT_NAME}.beta.yourdomain.com",
+            "PUBLISH_FAILURE_MARKER=.beta-deployed-publish-failure"
+          ]) {
+            sh '''
+              rm -f "$PUBLISH_FAILURE_MARKER"
+              PR_JSON=$(printf '%s\\n' $PROMOTE_PRS | jq -Rsc 'split("\\n") | map(select(length > 0))')
+              jq -nc \
+                  --argjson prs "$PR_JSON" \
+                  --arg sha "$DEPLOYED_SHA" \
+                  --arg build "$BUILD_IDENTIFIER" \
+                  --arg url "$BUILD_URL" \
+                  --arg beta "$BETA_URL" \
+                  '{type:"beta_deployed",pull_requests:$prs,deployed_sha:$sha,build_identifier:$build,build_url:$url,beta_url:$beta}' \
+                | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
+                || { echo "WARN: could not publish beta_deployed for $DEPLOYED_SHA" >&2; echo "$DEPLOYED_SHA" >> "$PUBLISH_FAILURE_MARKER"; }
+            '''
+            if (fileExists(env.PUBLISH_FAILURE_MARKER)) {
+              echo "beta_deployed could not be published for ${env.DEPLOYED_SHA} -- " +
+                   "the publish tool's own error is in this step's output above. " +
+                   "beta carries the deployment; the platform has not been told about it."
+              currentBuild.result = 'UNSTABLE'
+            }
+          }
+        }
       }
     }
   }
@@ -285,64 +310,63 @@ pipeline {
   post {
     failure {
       script {
-        // PR build: the one ticket this PR is for. dev build: every ticket
-        // whose merge this build was supposed to promote (resolved up front,
-        // so even a test failure on the merged tip is attributed). Other
-        // builds (beta/prod verification) have nobody to tell.
-        def tickets = (env.PIPELINE_KIND == 'pr' ? [env.JIRA_TICKET] : (env.PROMOTE_TICKETS ?: '').tokenize(' ')).findAll { it }
-        if (tickets) {
+        // PR build: this PR. dev build: every pull request whose merge this
+        // build was supposed to promote (resolved up front, so even a test
+        // failure on the merged tip is attributed). Other builds (beta/prod
+        // verification) have nobody to tell.
+        def promotedPrs = (env.PROMOTE_PRS ?: '').tokenize(' ').findAll { it }
+        if (promotedPrs) {
           def what = "Pipeline failed on the post-merge dev build (beta promotion / deploy for ${env.PROMOTE_SHA})."
           if (env.PIPELINE_KIND == 'pr') {
             what = "Pipeline failed on the PR build (PR #${env.CHANGE_ID}, ${env.CHANGE_BRANCH})."
           }
-          // Ticket never left In Progress on this run, so there's nothing to
-          // transition back -- just post attributable evidence and ask
-          // ScrumMaster to redispatch the ticket's own recorded owner. The
-          // message never names an agent -- ScrumMaster is the only
-          // thing allowed to decide who that is. A failed comment must not
-          // swallow the retry signal, so each step is best-effort.
-          // RETRY_FAILURE_MARKER is how a construction failure inside the shell
-          // loop reaches the build's status: the loop cannot set a Groovy build
-          // result itself, and must not abort on one ticket's failure, so it
-          // records the ticket and carries on. The script block below reads the
-          // marker and marks the build UNSTABLE -- error() is deliberately not
-          // used anywhere in here, because aborting would swallow the retry
-          // signal for every ticket after the failing one.
+          // Jenkins looks nothing up here and writes to no tracker. It
+          // publishes ONE message naming the pull requests it promoted, and
+          // the platform does the rest: it resolves each reference to a work
+          // item, appends the failure comment there (the same comment this
+          // handler used to post to each ticket itself -- it survives, in
+          // core), and publishes a retry carrying the canonical work-item id
+          // so ScrumMaster can redispatch that item's recorded owner. The
+          // message names no agent and no ticket.
+          //
+          // RETRY_FAILURE_MARKER is how a construction failure inside the
+          // shell reaches the build's status: the shell cannot set a Groovy
+          // build result itself, so it records the failure and carries on.
+          // The script block below reads the marker and marks the build
+          // UNSTABLE -- error() is deliberately not used anywhere in here,
+          // because aborting would swallow the retry signal.
           // The whole handler is bounded. gateway-publish.js gives up on an
           // unreachable Redis in seconds of its own accord, but nothing else in
-          // here does: a hung `curl` to Jira, or a Redis host that blackholes
-          // instead of refusing, would leave this step running for the build's
-          // life -- and `disableConcurrentBuilds()` above then queues every
-          // later dev build behind it. `options` sets no global timeout, so
-          // this step is the only bound (V5.0 audit row 9). If it fires, the
-          // handler is cut short and the build stays FAILURE, which is what it
-          // already was on entry -- nothing that has published so far is
-          // undone.
+          // here does: a Redis host that blackholes instead of refusing would
+          // leave this step running for the build's life -- and
+          // `disableConcurrentBuilds()` above then queues every later dev
+          // build behind it. `options` sets no global timeout, so this step
+          // is the only bound (V5.0 audit row 9). If it fires, the handler is
+          // cut short and the build stays FAILURE, which is what it already
+          // was on entry -- nothing that has published so far is undone.
           timeout(time: 5, unit: 'MINUTES') {
             withEnv([
-              "FAILED_TICKETS=${tickets.join(' ')}",
+              "FAILED_PRS=${promotedPrs.join(' ')}",
               "FAILURE_TEXT=${what}",
               "RETRY_FAILURE_MARKER=.pipeline-retry-failures"
             ]) {
               sh '''
                 rm -f "$RETRY_FAILURE_MARKER"
-                for ticket in $FAILED_TICKETS; do
-                  COMMENT_TEXT=$(printf '%s\\n\\nBuild log: %s\\n\\nPlease review and fix.' "$FAILURE_TEXT" "$BUILD_URL")
-                  curl -sS --fail-with-body -u "$JIRA_EMAIL:$JIRA_TOKEN" -X POST \
-                      -H 'Content-Type: application/json' \
-                      -d "$(jq -n --arg text "$COMMENT_TEXT" '{body:{type:"doc",version:1,content:[{type:"paragraph",content:[{type:"text",text:$text}]}]}}')" \
-                      "$JIRA_URL/rest/api/3/issue/$ticket/comment" > /dev/null \
-                    || echo "WARN: could not post failure comment to $ticket" >&2
-                  echo "$(jq -nc --arg t "$ticket" --arg u "$BUILD_URL" --arg n "$BUILD_NUMBER" '{type:"pipeline_retry",ticket_key:$t,build_url:$u,build_number:$n}')" \
-                      | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
-                    || { echo "WARN: could not publish pipeline_retry for $ticket" >&2; echo "$ticket" >> "$RETRY_FAILURE_MARKER"; }
-                done
+                PR_JSON=$(printf '%s\\n' $FAILED_PRS | jq -Rsc 'split("\\n") | map(select(length > 0))')
+                jq -nc \
+                    --argjson prs "$PR_JSON" \
+                    --arg t "$FAILURE_TEXT" \
+                    --arg u "$BUILD_URL" \
+                    --arg n "$BUILD_NUMBER" \
+                    '{type:"pipeline_retry",pull_requests:$prs,failure_text:$t,build_url:$u,build_number:$n}' \
+                  | node /agent-docs/commons/tools/gateway-publish.js "$PROJECT_NAME" - \
+                  || { echo "WARN: could not publish pipeline_retry for $FAILED_PRS" >&2; echo "$FAILED_PRS" >> "$RETRY_FAILURE_MARKER"; }
               '''
               if (fileExists(env.RETRY_FAILURE_MARKER)) {
                 def unpublished = readFile(env.RETRY_FAILURE_MARKER).split('\n').findAll { it }
                 echo "pipeline_retry could not be published for: ${unpublished.join(', ')} -- " +
                      "the publish tool's own error is in this step's output above. " +
-                     "Every other ticket's retry signal was published."
+                     "No work item has been told, and nobody will be redispatched for this build."
                 currentBuild.result = 'UNSTABLE'
               }
             }

@@ -7,8 +7,8 @@ equivalent, exercised by an automated test against a fixture Jira API" —
 not "X happens in the real dispatch or production path" (there is no
 running consumer in v5.1; v5.2's writer is this client's first caller), so
 the enforcement-point rule does not apply here. Every test below drives
-`jira_client` through a real HTTP round trip against `_FixtureJiraServer`,
-a minimal stand-in Jira instance defined in this file and bound to
+`jira_client` through a real HTTP round trip against the fixture Jira API in
+`tests/jira_fixture.py`, a minimal stand-in Jira instance bound to
 `JIRA_URL` for the duration of the test — never by monkeypatching
 `jira_client`'s own request function, so the base URL, Basic Auth header
 and JSON (de)serialization are all genuinely exercised, not doubled.
@@ -16,103 +16,21 @@ and JSON (de)serialization are all genuinely exercised, not doubled.
 
 from __future__ import annotations
 
-import base64
-import json as json_module
-import threading
-import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
-
 import pytest
 import requests
 
 from workitems import jira_client
 
-RouteHandler = Callable[[dict[str, list[str]], Any], tuple[int, Any]]
+from tests.jira_fixture import basic_auth as _basic_auth
+from tests.jira_fixture import fixture_jira  # noqa: F401 - a pytest fixture, used by name
 
-
-class _FixtureJiraHandler(BaseHTTPRequestHandler):
-    """Routes registered per-test via `fixture_jira.routes[(method, path)]
-    = handler`, where `handler(query, body) -> (status, json_body)`.
-    Every received request is recorded in `fixture_jira.received` so tests
-    can assert on the auth header, the query string or the request body
-    `jira_client` actually sent."""
-
-    routes: dict[tuple[str, str], RouteHandler] = {}
-    received: list[dict[str, Any]] = []
-
-    def _handle(self, method: str) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(parsed.query)
-        length = int(self.headers.get('Content-Length') or 0)
-        raw_body = self.rfile.read(length) if length else b''
-        body = json_module.loads(raw_body) if raw_body else None
-
-        type(self).received.append({
-            'method': method,
-            'path': parsed.path,
-            'query': query,
-            'body': body,
-            'authorization': self.headers.get('Authorization'),
-        })
-
-        handler = type(self).routes.get((method, parsed.path))
-        if handler is None:
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        status, payload = handler(query, body)
-        data = json_module.dumps(payload).encode('utf-8') if payload is not None else b''
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        if data:
-            self.wfile.write(data)
-
-    def do_GET(self) -> None:
-        self._handle('GET')
-
-    def do_POST(self) -> None:
-        self._handle('POST')
-
-    def do_PUT(self) -> None:
-        self._handle('PUT')
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - matches base signature
-        pass  # silence BaseHTTPRequestHandler's default stderr access log
-
-
-def _basic_auth(email: str, token: str) -> str:
-    return 'Basic ' + base64.b64encode(f'{email}:{token}'.encode('utf-8')).decode('ascii')
-
-
-@pytest.fixture
-def fixture_jira(monkeypatch):
-    """Starts the fixture Jira API on an ephemeral local port, points
-    JIRA_URL/JIRA_EMAIL/JIRA_TOKEN at it, and clears jira_client's
-    process-lifetime link-type-id cache so tests don't leak into each
-    other."""
-    _FixtureJiraHandler.routes = {}
-    _FixtureJiraHandler.received = []
-
-    server = ThreadingHTTPServer(('127.0.0.1', 0), _FixtureJiraHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    monkeypatch.setenv('JIRA_URL', f'http://127.0.0.1:{server.server_port}')
-    monkeypatch.setenv('JIRA_EMAIL', 'bot@example.com')
-    monkeypatch.setenv('JIRA_TOKEN', 'token-123')
-    monkeypatch.setenv('JIRA_AGENT_FIELD_ID', 'customfield_10050')
-
-    jira_client._link_type_cache.clear()
-
-    try:
-        yield _FixtureJiraHandler
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
+# The fixture Jira API moved to tests/jira_fixture.py when v5.2's outbound
+# writer became a second caller that needs it (canonical-delivery-state.md
+# REQ-09): the webhook-interpretation and store tests that put a project into
+# Jira mode now make real Jira calls too, and one stand-in instance keeps
+# "against a fixture Jira API" meaning the same thing everywhere. `routes`,
+# `received` and the `fixture_jira` fixture are unchanged, so every test below
+# reads as it did.
 
 
 # --- isConfigured -----------------------------------------------------------

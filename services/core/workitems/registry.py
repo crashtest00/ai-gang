@@ -190,3 +190,14 @@ WEBHOOK_GROUP = 'scrummaster'
 
 def webhook_stream_name(project_name: str) -> str:
     return f'aigang:webhooks:{normalize_project_name(project_name)}'
+
+
+def gateway_stream_name(project_name: str) -> str:
+    """ScrumMaster's own gateway stream, named verbatim as
+    `services/scrummaster/src/registry.js`'s `gatewayStreamName` names it —
+    the same reuse-not-reinvent rule `webhook_stream_name` above follows.
+
+    `core` publishes onto it for one reason: REQ-01's `recordPipelineFailure`
+    publishes the retry for ScrumMaster with the canonical `workItemId`
+    Jenkins has no way to know (canonical-delivery-state.md REQ-01)."""
+    return f'aigang:gateway:{normalize_project_name(project_name)}'

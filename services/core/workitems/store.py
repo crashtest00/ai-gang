@@ -10,11 +10,35 @@ onto Django's ORM + transaction.atomic(). Every mutating function:
  1. Opens one transaction (transaction.atomic()) covering the datastore
     change, its WorkItemHistory row(s), and its OutboxEvent row(s), which
     are therefore always atomic with the change itself.
- 2. Applies the write-gate before touching a gated field (status,
-    assignment, dependency link).
+ 2. Asks write_gate.route() what to do with the write, BEFORE it opens that
+    transaction or takes a lock, and acts on the answer.
  3. Recomputes the parent rollup synchronously, in the same
     transaction, when a status transition lands on a work item with a
-    non-null parent_id.
+    non-null parent_id — in local mode. In Jira mode the rollup and the
+    dependent unblock are pushed to Jira instead and reach this store only
+    from Jira's webhook.
+
+**From v5.2 the write gate is a router** (canonical-delivery-state.md REQ-09,
+"The routing layer"). The four functions that used to call
+`write_gate.assert_gated_write_allowed(mode, origin)` after reading the
+project's mode themselves now call `write_gate.route(project, origin)`, which
+reads the mode for them and answers `record`, `push` or `refuse`:
+
+  record  today's atomic code, unchanged;
+  push    every validation this module runs in local mode apart from the
+          gate, then jira_writer.py makes the equivalent Jira write and
+          NOTHING is recorded — the change arrives later, as a Jira webhook;
+  refuse  WriteGateRejectedError, and nothing is written.
+
+So no function here reads a project's mode, and none branches a write on it:
+`append_comment` is the one comment path in every mode, `transition_status`,
+`assign_work_item` and `create_link` are the other three routing handlers
+(`materialize.materialize_decomposition` is the fifth), and the two derived
+writes — `_recompute_parent_rollup` and `_unblock_dependents` — call `route`
+themselves with origin ROLLUP rather than going through `transition_status`.
+`create_work_item` is deliberately NOT routed: a Jira-mode work item is
+created in Jira, so it refuses every origin but JIRA_WEBHOOK, `push`
+included.
 
 Catalog-backed assignment validation is reused via workitems/assignment.py
 — a Python reimplementation of services/scrummaster/src/assignment.js reading the
@@ -25,19 +49,32 @@ for the full tradeoff.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from django.db import transaction
 from django.utils import timezone
 
 from artifacts.models import Artifact
 
-from . import assignment, project_config, status_vocabulary, write_gate
+from . import assignment, jira_writer, project_config, status_vocabulary, write_gate
 from .models import (
     OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink,
     WorkItemReleaseDetail, WorkItemSpecificationLink, WorkItemStoryDetail,
 )
+
+logger = logging.getLogger(__name__)
+
+# canonical-delivery-state.md REQ-02 — the association kinds
+# `models.py`'s WorkItemArtifact documents ("'commit', 'pull_request',
+# 'ci_build', 'deployment' at minimum"). The same column also carries
+# `canonical-work-model.md` REQ-19's durable per-item completion markers,
+# whose value is a STEP KEY rather than an artifact kind, so the resolver
+# below matches only these four and `record_completion_marker` refuses a
+# step key equal to any of them — no marker can ever answer the resolver.
+ASSOCIATION_KINDS = ('commit', 'pull_request', 'ci_build', 'deployment')
 
 
 class DependencyGateError(Exception):
@@ -206,8 +243,14 @@ def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = 
 
     status = input.get('status') or 'proposed'
 
-    mode = project_config.get_mode(input['project'])
-    write_gate.assert_gated_write_allowed(mode['mode'], origin)
+    # NOT routed (REQ-09, "The routing layer"): in Jira mode a work item is
+    # created in Jira — by story intake, REQ-10's push or REQ-11's mirror —
+    # so a create is refused on `push` as well as on `refuse`, leaving
+    # JIRA_WEBHOOK as the one origin that creates one there. That is
+    # `canonical-work-model.md` REQ-10's single write path. (Before v5.2 the
+    # gate also let ROLLUP through, and nothing ever created with it.)
+    if write_gate.route(input['project'], origin) != write_gate.RECORD:
+        write_gate.refuse(origin, 'creating a work item')
 
     custom_statuses = project_config.get_custom_statuses(input['project'])
     validity = status_vocabulary.validate_status(status, custom_statuses)
@@ -270,21 +313,46 @@ def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = 
 # Canonical assignment authority
 # ---------------------------------------------------------------------------
 
-@transaction.atomic
-def assign_work_item(work_item_id, agent_id: str, *, actor: Optional[str] = None,
-                      origin: str = write_gate.Origins.DIRECT) -> WorkItem:
-    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
-    if not item:
-        raise ValidationError(f'assignWorkItem: no work item {work_item_id}')
-
-    mode = project_config.get_mode(item.project)
-    write_gate.assert_gated_write_allowed(mode['mode'], origin)
-
+def _assert_assignment_valid(item: WorkItem, agent_id: str, work_item_id) -> None:
     result = assignment.validate_assignment(item.project, agent_id)
     if not result['ok']:
         raise AssignmentRejectedError(
             f'assignment of "{agent_id}" to {work_item_id} rejected: {result["code"]}', result,
         )
+
+
+def assign_work_item(work_item_id, agent_id: str, *, actor: Optional[str] = None,
+                      origin: str = write_gate.Origins.DIRECT,
+                      completion_key: Optional[str] = None):
+    """REQ-09's assignment handler. The `route` call moved out of the
+    `@transaction.atomic` function into this undecorated entry — the shape
+    `transition_status` already had over `_transition_status_core` — because
+    a handler must ask the router before it opens a transaction or takes a
+    lock, and because the Jira call a `push` makes must not run inside
+    one."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'assignWorkItem: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'changing a work item\'s assignment')
+    if verdict == write_gate.PUSH:
+        # Every validation local mode runs apart from the gate, with no row
+        # locked and nothing written, and then the Jira write.
+        _assert_assignment_valid(item, agent_id, work_item_id)
+        return jira_writer.push_assignment(item, agent_id, completion_key=completion_key)
+
+    return _assign_work_item_core(work_item_id, agent_id, actor=actor)
+
+
+@transaction.atomic
+def _assign_work_item_core(work_item_id, agent_id: str, *, actor: Optional[str] = None) -> WorkItem:
+    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
+    if not item:
+        raise ValidationError(f'assignWorkItem: no work item {work_item_id}')
+
+    _assert_assignment_valid(item, agent_id, work_item_id)
 
     old_value = item.assignee_agent_id
     item.assignee_agent_id = agent_id
@@ -310,11 +378,18 @@ def _blockers_of(work_item_id) -> list[dict]:
     return [{'blocker_id': r['from_work_item_id'], 'blocker_status': r['from_work_item__status']} for r in rows]
 
 
-def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str]) -> Optional[dict]:
+def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str],
+                          origin: str = write_gate.Origins.DIRECT) -> Optional[dict]:
     """Internal: applies a status transition with no gating/validation of
     its own — caller has already validated. Used both by the public
     transition_status and by the rollup recomputation below, inside the
-    SAME transaction."""
+    SAME transaction.
+
+    `origin` is carried onto the `work_item.status_changed` event
+    (canonical-delivery-state.md REQ-09, "Canonical events with a Jira side
+    effect": "Every `work_item.status_changed` MUST still carry its write's
+    `origin`"). Before v5.2 the event carried none, so a derived write was
+    indistinguishable from the transition that triggered it."""
     old_status = item.status
     if old_status == new_status:
         return None  # no-op: if there's no change, nothing to record or publish.
@@ -325,7 +400,7 @@ def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str]) 
     _append_history(item.id, 'status', old_status, new_status, actor)
     _write_outbox_event(
         project=item.project, event_type='work_item.status_changed', work_item_id=item.id,
-        payload={'id': str(item.id), 'status': new_status, 'previous': old_status},
+        payload={'id': str(item.id), 'status': new_status, 'previous': old_status, 'origin': origin},
     )
     return {'id': item.id, 'status': new_status, 'previous': old_status}
 
@@ -337,9 +412,20 @@ def _recompute_parent_rollup(parent_id, actor: Optional[str]) -> None:
     parent done. Any child cancelled/failed => parent holds its last
     non-terminal status (no automatic resolution). Recurses if the parent
     itself has a parent."""
-    parent = WorkItem.objects.select_for_update().filter(id=parent_id).first()
+    parent = WorkItem.objects.filter(id=parent_id).first()
     if not parent:
         return
+
+    # REQ-09, "Derived writes go through the router too": this is a write
+    # like any other, so it asks the router rather than writing past the
+    # gate through `_apply_status_change` as it did up to v5.1. It does NOT
+    # call `transition_status` — the rollup is not a caller's transition and
+    # must not re-run its release gate or its release event.
+    verdict = write_gate.route(parent.project, write_gate.Origins.ROLLUP)
+    if verdict == write_gate.RECORD:
+        parent = WorkItem.objects.select_for_update().filter(id=parent_id).first()
+        if not parent:
+            return
 
     custom_statuses = project_config.get_custom_statuses(parent.project)
     children = list(WorkItem.objects.filter(parent_id=parent_id))
@@ -358,7 +444,16 @@ def _recompute_parent_rollup(parent_id, actor: Optional[str]) -> None:
         target = None  # "the parent holds at its last non-terminal status" — no change.
 
     if target and target != parent.status:
-        changed = _apply_status_change(parent, target, actor or 'system:rollup')
+        if verdict == write_gate.PUSH:
+            # No canonical change: the writer's `transition_issue` is
+            # registered with `transaction.on_commit`, and `core` records the
+            # parent's `done` from that issue's own webhook. A grandparent's
+            # rollup runs then, not now. §4 states the cost: the chain is one
+            # webhook round trip longer, and a lost webhook or a failed push
+            # stalls it.
+            jira_writer.register_derived_status_push(parent, target)
+            return
+        changed = _apply_status_change(parent, target, 'system:rollup', write_gate.Origins.ROLLUP)
         if changed and parent.parent_id:
             _recompute_parent_rollup(parent.parent_id, actor)
 
@@ -387,7 +482,8 @@ def _publish_release_event(item: WorkItem, kind: str) -> None:
 
 
 def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = None,
-                       origin: str = write_gate.Origins.DIRECT) -> WorkItem:
+                       origin: str = write_gate.Origins.DIRECT,
+                       completion_key: Optional[str] = None):
     """`origin` per write_gate.Origins — webhook_consumer.py passes
     JIRA_WEBHOOK after its own pre-validation; direct callers
     (Streams commands, admin UI in local mode) pass DIRECT/ADMIN_UI.
@@ -400,11 +496,21 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     as a subsequent raise would roll back along with it; this way the
     rejection comment survives even though the transition itself doesn't.
     Every internal-API surface (Django Admin, external HTTP API, Streams
-    command) reaches this same gate, since all three call this function
-    rather than the atomic core directly."""
+    command) reaches this same router, since all three call this function
+    rather than the atomic core directly.
+
+    `completion_key`, when given, is the command or event's `messageId`
+    (REQ-09, step 5): on `push` the writer skips any step its completion
+    record already shows done, and the release gate's comment is keyed
+    `<completion_key>:release-gate` so a redelivered command adds none. The
+    admin and the external API pass none."""
     item = get_work_item(work_item_id)
     if not item:
         raise ValidationError(f'transitionStatus: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'changing a work item\'s status')
 
     if item.type == 'release' and item.status == 'proposed' and new_status == 'in-review':
         outstanding = _release_beta_queue_outstanding(item.project)
@@ -415,6 +521,7 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
                 'Cannot cut a release candidate — the following work items are still '
                 f'awaiting tester acceptance on beta: {names}. Resolve these (move to '
                 '\'done\' or otherwise off the beta queue) and retry.',
+                source_message_id=f'{completion_key}:release-gate' if completion_key else None,
             )
             raise ReleaseGateError(
                 f'{work_item_id} cannot cut a release candidate — {len(outstanding)} '
@@ -422,26 +529,31 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
                 [str(o.id) for o in outstanding],
             )
 
+    if verdict == write_gate.PUSH:
+        # Every validation local mode runs apart from the gate (the release
+        # gate above included), with no row locked and nothing written, then
+        # the Jira write. The change reaches this store only from Jira's own
+        # webhook, so nothing is recorded here.
+        _validate_transition(item, new_status)
+        return jira_writer.push_status(item, new_status, completion_key=completion_key)
+
     return _transition_status_core(work_item_id, new_status, actor=actor, origin=origin)
 
 
-@transaction.atomic
-def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[str] = None,
-                             origin: str = write_gate.Origins.DIRECT) -> WorkItem:
-    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
-    if not item:
-        raise ValidationError(f'transitionStatus: no work item {work_item_id}')
-
-    mode = project_config.get_mode(item.project)
-    write_gate.assert_gated_write_allowed(mode['mode'], origin)
-
+def _validate_transition(item: WorkItem, new_status: str) -> dict:
+    """Every validation a status transition runs apart from the gate
+    itself: the status vocabulary, a story's required fields, and the
+    dependency gate. Shared by the recording path (inside its transaction,
+    under its row lock) and the pushing path (which locks nothing and
+    writes nothing), so a Jira-mode push is refused by exactly what refuses
+    the same write in local mode."""
     custom_statuses = project_config.get_custom_statuses(item.project)
     validity = status_vocabulary.validate_status(new_status, custom_statuses)
     if not validity['ok']:
         raise ValidationError(f'transitionStatus: {validity["reason"]}')
 
     if item.type == 'story' and validity['baseline'] != 'proposed':
-        detail = WorkItemStoryDetail.objects.filter(work_item_id=work_item_id).first()
+        detail = WorkItemStoryDetail.objects.filter(work_item_id=item.id).first()
         _assert_story_fields_present(detail and {
             'behavior': detail.behavior,
             'acceptanceCriteria': detail.acceptance_criteria,
@@ -453,15 +565,27 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
     # A dependent MUST NOT reach 'ready' until every declared
     # blocker has reached 'done'.
     if validity['baseline'] == 'ready':
-        blockers = _blockers_of(work_item_id)
+        blockers = _blockers_of(item.id)
         incomplete = [b for b in blockers if b['blocker_status'] != 'done']
         if incomplete:
             raise DependencyGateError(
-                f'{work_item_id} cannot transition to "{new_status}" — {len(incomplete)} blocker(s) not yet done',
+                f'{item.id} cannot transition to "{new_status}" — {len(incomplete)} blocker(s) not yet done',
                 [b['blocker_id'] for b in incomplete],
             )
 
-    changed = _apply_status_change(item, new_status, actor or 'system')
+    return validity
+
+
+@transaction.atomic
+def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[str] = None,
+                             origin: str = write_gate.Origins.DIRECT) -> WorkItem:
+    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
+    if not item:
+        raise ValidationError(f'transitionStatus: no work item {work_item_id}')
+
+    validity = _validate_transition(item, new_status)
+
+    changed = _apply_status_change(item, new_status, actor or 'system', origin)
     if changed and item.parent_id:
         _recompute_parent_rollup(item.parent_id, actor)
     if changed and validity['baseline'] == 'done':
@@ -488,7 +612,6 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
 # Release-candidate writeback
 # ---------------------------------------------------------------------------
 
-@transaction.atomic
 def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifier: Optional[str] = None,
                               preview_url: Optional[str] = None, actor: Optional[str] = None) -> WorkItem:
     """Writes the release-candidate Jenkins job's results back onto a
@@ -496,7 +619,33 @@ def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
     posts a comment recording it — the local-mode equivalent of what
     Jenkins already does directly to a Jira Release ticket's custom fields
     today (`scripts/create-release-fields.sh`). Write-once-per-candidate: a
-    new candidate cut replaces these three fields, it does not append."""
+    new candidate cut replaces these three fields, it does not append.
+
+    The three field writes and their event are atomic; the note is appended
+    AFTER that block commits (REQ-09, "One comment path"), because in Jira
+    mode the comment path posts to Jira in-process and a Jira call must not
+    run inside an open transaction. Up to v5.1 this whole function was one
+    `@transaction.atomic`, which recorded the comment in the same
+    transaction — correct while the only destination was this database."""
+    item = _record_release_candidate_fields(
+        work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+        preview_url=preview_url,
+    )
+
+    note = f'Release candidate cut: {candidate_sha}'
+    if build_identifier:
+        note += f' (build {build_identifier})'
+    if preview_url:
+        note += f'\nPreview: {preview_url}'
+    append_comment(item.id, actor or 'jenkins', note)
+
+    return get_work_item(work_item_id)
+
+
+@transaction.atomic
+def _record_release_candidate_fields(work_item_id, *, candidate_sha: str,
+                                      build_identifier: Optional[str] = None,
+                                      preview_url: Optional[str] = None) -> WorkItem:
     item = get_work_item(work_item_id)
     if not item or item.type != 'release':
         raise ValidationError(f'recordReleaseCandidate: no release work item {work_item_id}')
@@ -513,14 +662,7 @@ def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
         payload={'id': str(item.id), 'candidateSha': candidate_sha, 'buildIdentifier': build_identifier,
                  'previewUrl': preview_url},
     )
-    note = f'Release candidate cut: {candidate_sha}'
-    if build_identifier:
-        note += f' (build {build_identifier})'
-    if preview_url:
-        note += f'\nPreview: {preview_url}'
-    append_comment(work_item_id, actor or 'jenkins', note)
-
-    return get_work_item(work_item_id)
+    return item
 
 
 def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
@@ -534,8 +676,18 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
     ).values_list('to_work_item_id', flat=True)
 
     for dependent_id in dependent_ids:
-        dependent = WorkItem.objects.select_for_update().filter(id=dependent_id).first()
-        if not dependent or dependent.status != 'waiting-on-dependency':
+        dependent = WorkItem.objects.filter(id=dependent_id).first()
+        if not dependent:
+            continue
+
+        # REQ-09, "Derived writes go through the router too" — the same rule
+        # the parent rollup follows, for the same reason.
+        verdict = write_gate.route(dependent.project, write_gate.Origins.ROLLUP)
+        if verdict == write_gate.RECORD:
+            dependent = WorkItem.objects.select_for_update().filter(id=dependent_id).first()
+            if not dependent:
+                continue
+        if dependent.status != 'waiting-on-dependency':
             continue
 
         blockers = _blockers_of(dependent_id)
@@ -543,7 +695,18 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
         if not all_done:
             continue
 
-        changed = _apply_status_change(dependent, 'ready', actor or 'system:unblock')
+        if verdict == write_gate.PUSH:
+            # No canonical change: `core` records the dependent's `ready`
+            # from its own Jira webhook. One webhook can register two
+            # pushes of the same status for one dependent (this unblock and
+            # REQ-11's link reconciliation); the second is harmless —
+            # either Jira re-applies a transition whose webhook changes
+            # nothing here, or the writer finds the issue already there
+            # with its Blocked flag clear and counts it done.
+            jira_writer.register_derived_status_push(dependent, 'ready')
+            continue
+
+        changed = _apply_status_change(dependent, 'ready', 'system:unblock', write_gate.Origins.ROLLUP)
         if changed and dependent.parent_id:
             _recompute_parent_rollup(dependent.parent_id, actor)
 
@@ -552,11 +715,100 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
 # Artifact association (not subject to the write-gate)
 # ---------------------------------------------------------------------------
 
+def normalize_reference(reference: Optional[str]) -> Optional[str]:
+    """canonical-delivery-state.md REQ-01 — "REQ-02 and REQ-03 normalize a
+    reference the same way before matching or writing it: lower-case scheme,
+    host, owner and repository; no trailing slash, query or fragment."
+
+    A pull request is identified by its web URL,
+    `https://github.com/<owner>/<repo>/pull/<number>` — the form
+    `gh pr create` prints and an agent passes as `--pull-request`, and the
+    form Jenkins emits as a PR's `html_url` (or `CHANGE_URL`). The two
+    producers can differ in case or a trailing slash and mean the same pull
+    request, so both are normalized here, by one function, rather than at
+    each site.
+
+    A reference that is not a URL — a bare commit SHA — has no scheme or
+    host to lower-case and is returned stripped and unchanged, so the
+    completion-marker reuse of the same column (REQ-19) is unaffected."""
+    if reference is None:
+        return None
+    text = str(reference).strip()
+    if not text:
+        return text
+    parsed = urlsplit(text)
+    if not parsed.scheme or not parsed.netloc:
+        return text
+
+    segments = parsed.path.rstrip('/').split('/')
+    # '' / '<owner>' / '<repo>' / 'pull' / '<number>' — the owner and the
+    # repository are case-insensitive on GitHub; the rest of the path (a PR
+    # number, a ref name) is not and is left exactly as given.
+    for index in (1, 2):
+        if len(segments) > index:
+            segments[index] = segments[index].lower()
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), '/'.join(segments), '', ''))
+
+
+def resolve_work_items_for_reference(reference: str, *, message: Optional[str] = None) -> list[str]:
+    """canonical-delivery-state.md REQ-02 — the reverse lookup: a commit
+    SHA or pull-request reference to the work item(s) that recorded it.
+
+    Matches only `ASSOCIATION_KINDS`, never a completion marker's step key,
+    and matches the NORMALIZED reference, so an agent's `--pull-request`
+    URL and Jenkins' `html_url` for the same pull request resolve to each
+    other even when they differ only in case or a trailing slash.
+
+    Resolution is total in its failure handling: a reference with no
+    association is logged at error level, naming the reference and the
+    message that carried it, rather than dropped silently — a silently
+    dropped deployment is the class of defect V5 exists to remove. No table
+    holds it (Shovel Ready Pass 5, decision 5.3).
+
+    The query is answered by `idx_work_item_artifact_ref`, the
+    `(artifact_type, reference)` index this requirement's migration adds."""
+    normalized = normalize_reference(reference)
+    rows = WorkItemArtifact.objects.filter(
+        artifact_type__in=ASSOCIATION_KINDS, reference=normalized,
+    ).values_list('work_item_id', flat=True)
+    work_item_ids = list(dict.fromkeys(str(row) for row in rows))
+
+    if not work_item_ids:
+        logger.error(
+            '[store] Unresolved delivery reference "%s" (normalized "%s") carried by %s — '
+            'no work item recorded it, so nothing could be attributed to it',
+            reference, normalized, message or '(no message named)',
+        )
+    return work_item_ids
+
+
 @transaction.atomic
 def attach_artifact(work_item_id, artifact_type: str, reference: str, *, actor: Optional[str] = None) -> dict:
+    """Not routed by the write gate: an association is neither a status,
+    an assignment, a dependency link nor a comment, and Jira carries no
+    field for one (§4).
+
+    REQ-03 makes this idempotent for an association kind: ScrumMaster
+    records the `pull-request` Artifact's URL on every completion, and
+    `publishCommand`'s `dedupeKey` expires, so a repeated completion must
+    not leave a second row. The reference is normalized first (REQ-01), so
+    the same pull request under a different case or a trailing slash is the
+    same row. A completion marker (REQ-19), whose `artifact_type` is a step
+    key rather than an association kind, is unaffected — `record_completion_marker`
+    has its own marker check and refuses a step key that collides with these
+    kinds."""
     item = get_work_item(work_item_id)
     if not item:
         raise ValidationError(f'attachArtifact: no work item {work_item_id}')
+
+    if artifact_type in ASSOCIATION_KINDS:
+        reference = normalize_reference(reference)
+        existing = WorkItemArtifact.objects.filter(
+            work_item=item, artifact_type=artifact_type, reference=reference,
+        ).first()
+        if existing:
+            return {'id': str(existing.id), 'workItemId': str(work_item_id),
+                    'artifactType': artifact_type, 'reference': reference, 'deduped': True}
 
     artifact = WorkItemArtifact.objects.create(
         work_item=item, artifact_type=artifact_type, reference=reference, created_at=timezone.now(),
@@ -611,6 +863,19 @@ def has_completion_marker(work_item_id, step_key: str) -> bool:
 
 
 def record_completion_marker(work_item_id, step_key: str, reference: str, *, actor: Optional[str] = None) -> dict:
+    """canonical-delivery-state.md REQ-02 — a step key equal to one of the
+    association kinds is refused, and no row is written. The marker reuses
+    `work_item_artifact.artifact_type` for a value that is a step key rather
+    than an artifact kind, and REQ-02's resolver queries that same column:
+    were a marker allowed to use one of the four kinds as its step key, the
+    resolver would resolve a deployment to whatever work item happened to
+    carry that marker."""
+    if step_key in ASSOCIATION_KINDS:
+        raise ValidationError(
+            f'recordCompletionMarker: "{step_key}" is one of the delivery-association kinds '
+            f'({", ".join(ASSOCIATION_KINDS)}) and cannot be used as a completion-marker step key — '
+            'it would be matched by the commit/pull-request resolver'
+        )
     if has_completion_marker(work_item_id, step_key):
         return {'alreadyMarked': True}
     artifact = attach_artifact(work_item_id, step_key, reference, actor=actor)
@@ -628,9 +893,55 @@ def _row_to_comment(row: WorkItemComment) -> dict:
     }
 
 
-@transaction.atomic
 def append_comment(work_item_id, author: str, body: str, *, reference_file: Optional[str] = None,
-                    reference_function: Optional[str] = None, source_message_id: Optional[str] = None) -> dict:
+                    reference_function: Optional[str] = None, source_message_id: Optional[str] = None,
+                    origin: str = write_gate.Origins.DIRECT) -> dict:
+    """**The one comment path, in every mode** (REQ-09, "One comment path,
+    in every mode"). Every comment on a work item from any caller — the
+    `appendComment` command, the admin, the external API, and `core`'s own
+    logic (REQ-01's failure comment, REQ-05's evidence,
+    `record_release_candidate`'s note, story intake's comments, REQ-08's
+    release rejection, and the rejection comments) — comes through here.
+
+    It is the only code on a caller's path whose comment write differs by
+    mode, and it reads no mode: `write_gate.route` decides.
+
+      record  the comment is recorded atomically, as today, deduplicated on
+              `source_message_id`;
+      push    the writer posts `[<author>] <body>` to Jira and NOTHING is
+              recorded — the comment reaches `core` on its `comment_created`
+              webhook, origin JIRA_WEBHOOK, which `_handle_comment_event`
+              records through this same function. `source_message_id` is
+              then the completion record's key instead of the row's dedupe
+              key, because there is no row;
+      refuse  origin ADMIN_UI only, because in a Jira-mode project a person
+              comments in Jira.
+
+    On `push` this function opens NO transaction. It posts, or — when its
+    caller already holds one (`connection.in_atomic_block`) — registers the
+    post with `transaction.on_commit` and returns at once, so the caller
+    keeps its own ordering (REQ-05's evidence-before-transition) and no Jira
+    call is ever made inside an open transaction."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'appendComment: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'commenting on a work item')
+    if verdict == write_gate.PUSH:
+        return jira_writer.push_comment(item, author, body, completion_key=source_message_id)
+
+    return _append_comment_core(
+        work_item_id, author, body, reference_file=reference_file,
+        reference_function=reference_function, source_message_id=source_message_id,
+    )
+
+
+@transaction.atomic
+def _append_comment_core(work_item_id, author: str, body: str, *, reference_file: Optional[str] = None,
+                          reference_function: Optional[str] = None,
+                          source_message_id: Optional[str] = None) -> dict:
     item = get_work_item(work_item_id)
     if not item:
         raise ValidationError(f'appendComment: no work item {work_item_id}')
@@ -657,9 +968,13 @@ def append_comment(work_item_id, author: str, body: str, *, reference_file: Opti
 # Dependency graph (link create) — gated by the write-gate like status/assignment.
 # ---------------------------------------------------------------------------
 
-@transaction.atomic
 def create_link(from_work_item_id, to_work_item_id, link_type: str, *, actor: Optional[str] = None,
-                 origin: str = write_gate.Origins.DIRECT) -> dict:
+                 origin: str = write_gate.Origins.DIRECT,
+                 completion_key: Optional[str] = None) -> dict:
+    """REQ-09's link handler. Like `assign_work_item`, the `route` call
+    moved out of the `@transaction.atomic` function into this undecorated
+    entry. On `push` the result names the DEPENDENT (`to_work_item_id`) —
+    the item whose history records a link in local mode."""
     from_item = get_work_item(from_work_item_id)
     to_item = get_work_item(to_work_item_id)
     if not from_item or not to_item:
@@ -667,8 +982,22 @@ def create_link(from_work_item_id, to_work_item_id, link_type: str, *, actor: Op
     if from_item.project != to_item.project:
         raise ValidationError('createLink: work items must belong to the same project')
 
-    mode = project_config.get_mode(from_item.project)
-    write_gate.assert_gated_write_allowed(mode['mode'], origin)
+    verdict = write_gate.route(from_item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'creating a dependency link')
+    if verdict == write_gate.PUSH:
+        return jira_writer.push_link(from_item, to_item, completion_key=completion_key)
+
+    return _create_link_core(from_work_item_id, to_work_item_id, link_type, actor=actor)
+
+
+@transaction.atomic
+def _create_link_core(from_work_item_id, to_work_item_id, link_type: str, *,
+                       actor: Optional[str] = None) -> dict:
+    from_item = get_work_item(from_work_item_id)
+    to_item = get_work_item(to_work_item_id)
+    if not from_item or not to_item:
+        raise ValidationError('createLink: both work items must exist')
 
     existing = WorkItemLink.objects.filter(
         from_work_item_id=from_work_item_id, to_work_item_id=to_work_item_id, link_type=link_type,

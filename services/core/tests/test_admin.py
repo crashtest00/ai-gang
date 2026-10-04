@@ -28,6 +28,42 @@ def _admin_client(db_dep) -> Client:
     return client
 
 
+_INLINE_PREFIXES = (
+    ('story_detail', '1'), ('release_detail', '1'), ('links_from', '1000'), ('links_to', '1000'),
+    ('artifacts', '1000'), ('comments', '1000'), ('history', '1000'),
+    ('specification_link', '1'), ('artifact_links', '1000'),
+)
+
+
+def _work_item_form(item_id, overrides=None) -> dict:
+    """The work-item change form's full POST body for an existing item,
+    with `overrides` applied — every field the form renders plus each
+    inline's management form, which Django requires on POST whether or not
+    the inline accepts input."""
+    item = WorkItem.objects.get(id=item_id)
+    data = {
+        'id': str(item.id),
+        'project': item.project,
+        'type': item.type,
+        'display_name': item.display_name,
+        'description': item.description or '',
+        'status': item.status,
+        'assignee_agent_id': item.assignee_agent_id or '',
+        'priority': str(item.priority),
+        'writes_files': item.writes_files or '',
+        'writes_services': item.writes_services or '',
+        'parent': str(item.parent_id) if item.parent_id else '',
+        'external_key': item.external_key or '',
+    }
+    for prefix, max_num in _INLINE_PREFIXES:
+        data.update({
+            f'{prefix}-TOTAL_FORMS': '0', f'{prefix}-INITIAL_FORMS': '0',
+            f'{prefix}-MIN_NUM_FORMS': '0', f'{prefix}-MAX_NUM_FORMS': max_num,
+        })
+    data.update(overrides or {})
+    return data
+
+
 def test_admin_login_and_changelist_render(clean_db):
     client = _admin_client(clean_db)
     resp = client.get('/django-admin/workitems/workitem/')
@@ -328,19 +364,217 @@ def test_admin_rejected_status_transition_redisplays_form_instead_of_500(clean_d
     assert b'is not one of the minimum canonical statuses' in followed.content
 
 
-def test_admin_status_transition_on_jira_mode_project_is_rejected(clean_db):
+def test_admin_status_transition_on_jira_mode_project_is_refused_on_save(clean_db):
+    """canonical-delivery-state.md REQ-09 — the fields look editable and
+    the refusal comes on SAVE (Pass 4 decision 5.2). v5.1's
+    `get_readonly_fields` rendered `status` and `assignee_agent_id`
+    read-only in Jira mode, which is the rule REQ-09 removes: showing two
+    fields read-only while every other field on the page is refused anyway
+    told an operator less than one clear refusal does, and it cost the
+    admin a `get_mode` call outside the mode layer."""
     client = _admin_client(clean_db)
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
     project_config.set_mode(PROJECT, 'jira')
 
-    # Jira mode: status/assignee render read-only (get_readonly_fields), so
-    # the admin change form must not accept a status edit at all — confirm
-    # the field is excluded from the (successful) rendered form rather than
-    # silently applied.
     resp = client.get(f'/django-admin/workitems/workitem/{item_id}/change/')
     assert resp.status_code == 200
-    assert b'name="status"' not in resp.content, 'status must render read-only for a Jira-mode project'
+    assert b'name="status"' in resp.content, 'the field renders editable; the refusal comes on save'
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item_id}/change/', _work_item_form(
+        item_id, {'status': 'in-progress'},
+    ), follow=True)
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content, resp.content[-2000:]
 
     item = WorkItem.objects.get(id=item_id)
-    assert item.status == 'proposed', 'no write should have been possible through the read-only field'
+    assert item.status == 'proposed', 'the save was rolled back whole'
+
+
+# ---------------------------------------------------------------------------
+# v5.2 — canonical-delivery-state.md REQ-09, "The admin is a person's edit
+# interface, so in Jira mode it changes nothing". Driven through the real
+# admin views, so each assertion is about what an operator sees.
+# ---------------------------------------------------------------------------
+
+def _make_item(project=PROJECT, **extra):
+    item_id = uuid.uuid4()
+    payload = {'id': item_id, 'project': project, 'type': 'task', 'displayName': 'X'}
+    payload.update(extra)
+    store.create_work_item(payload)
+    return item_id
+
+
+def test_a_jira_mode_non_gated_edit_is_refused_too_not_only_status_and_assignment(clean_db):
+    """`NON_GATED_FIELDS` and `parent` are a raw ORM save with no handler to
+    ask the router for them, so REQ-09 refuses them in the admin itself."""
+    client = _admin_client(clean_db)
+    item_id = _make_item()
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item_id}/change/',
+                        _work_item_form(item_id, {'display_name': 'Renamed by hand'}), follow=True)
+
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content
+    assert WorkItem.objects.get(id=item_id).display_name == 'X'
+
+
+def test_a_jira_mode_work_item_delete_is_refused_and_deletes_nothing(clean_db):
+    client = _admin_client(clean_db)
+    item_id = _make_item()
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item_id}/delete/', {'post': 'yes'}, follow=True)
+
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content
+    assert WorkItem.objects.filter(id=item_id).exists()
+
+
+def test_a_bulk_delete_mixing_local_and_jira_mode_rows_is_refused_whole(clean_db):
+    """REQ-09 — "A bulk delete that selects any Jira-mode row is refused
+    whole": a half-applied bulk delete is worse than a refused one."""
+    client = _admin_client(clean_db)
+    local_id = _make_item(project='local-only-project')
+    jira_id = _make_item()
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post('/django-admin/workitems/workitem/', {
+        'action': 'delete_selected', '_selected_action': [str(local_id), str(jira_id)], 'post': 'yes',
+    }, follow=True)
+
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content
+    assert WorkItem.objects.filter(id=local_id).exists(), 'the local rows in the selection survive too'
+    assert WorkItem.objects.filter(id=jira_id).exists()
+
+
+def test_a_local_mode_bulk_delete_still_deletes(clean_db):
+    """The other half of the rule: in local mode a delete is unchanged.
+    Asserted on a child row rather than a work item, because a work item
+    always has at least one `work_item_history` row and that table's
+    foreign key refuses the delete regardless of mode — a pre-existing
+    property of the schema, not something this requirement changes."""
+    from workitems.models import WorkItemArtifact
+
+    client = _admin_client(clean_db)
+    item_id = _make_item()
+    artifact = store.attach_artifact(item_id, 'ci_build', 'build-1', actor='tester')
+
+    resp = client.post('/django-admin/workitems/workitemartifact/', {
+        'action': 'delete_selected', '_selected_action': [artifact['id']], 'post': 'yes',
+    }, follow=True)
+
+    assert resp.status_code == 200
+    assert not WorkItemArtifact.objects.filter(id=artifact['id']).exists()
+
+
+def test_a_jira_mode_child_rows_bulk_delete_is_refused(clean_db):
+    from workitems.models import WorkItemArtifact
+
+    client = _admin_client(clean_db)
+    item_id = _make_item(externalKey='AT-3')
+    artifact = store.attach_artifact(item_id, 'ci_build', 'build-2', actor='tester')
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post('/django-admin/workitems/workitemartifact/', {
+        'action': 'delete_selected', '_selected_action': [artifact['id']], 'post': 'yes',
+    }, follow=True)
+
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content
+    assert WorkItemArtifact.objects.filter(id=artifact['id']).exists()
+
+
+def test_the_work_item_pages_link_inlines_are_read_only_in_every_mode(clean_db):
+    """REQ-09 — these two inlines saved through the ORM and bypassed
+    `store.create_link` in EVERY mode: no gate, no history row, no outbound
+    event. This is a local-mode change too (RELEASE §6): an operator adds a
+    link only from the link page."""
+    for inline in (admin_module.WorkItemLinkFromInline, admin_module.WorkItemLinkToInline):
+        assert inline.can_delete is False
+        assert inline.has_add_permission(admin_module.WorkItemLinkFromInline, None) is False
+        assert set(inline.readonly_fields) == set(inline.fields)
+
+
+def test_the_work_item_link_admin_refuses_an_edit_in_every_mode(clean_db):
+    client = _admin_client(clean_db)
+    blocker_id = _make_item()
+    dependent_id = _make_item()
+    result = store.create_link(blocker_id, dependent_id, 'blocks', actor='tester')
+
+    assert admin_module.WorkItemLinkAdmin.has_change_permission(
+        admin_module.WorkItemLinkAdmin, None) is False
+
+    # Django renders the page read-only rather than 404ing when view
+    # permission remains, so the proof is that it offers no way to save.
+    resp = client.get(f'/django-admin/workitems/workitemlink/{result["id"]}/change/')
+    assert resp.status_code == 200
+    assert b'name="_save"' not in resp.content, 'no change form — a link is created or it is not'
+
+    # And a POST to it changes nothing.
+    client.post(f'/django-admin/workitems/workitemlink/{result["id"]}/change/', {
+        'from_work_item': str(dependent_id), 'to_work_item': str(blocker_id), 'link_type': 'relates-to',
+    })
+    from workitems.models import WorkItemLink
+    link = WorkItemLink.objects.get(id=result['id'])
+    assert link.link_type == 'blocks'
+    assert str(link.from_work_item_id) == str(blocker_id)
+
+
+def test_the_comment_admin_passes_admin_ui_origin_so_jira_mode_refuses_it(clean_db):
+    """REQ-09 — `WorkItemCommentAdmin.save_model` did not pass an origin
+    before v5.2, so the one comment path could not tell a person's comment
+    from a machine's. In a Jira-mode project a person comments in Jira."""
+    client = _admin_client(clean_db)
+    item_id = _make_item(externalKey='AT-1')
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post('/django-admin/workitems/workitemcomment/add/', {
+        'work_item': str(item_id), 'author': 'an-operator', 'body': 'by hand',
+        'reference_file': '', 'reference_function': '',
+    }, follow=True)
+
+    assert resp.status_code == 200
+    assert b'Jira mode' in resp.content, resp.content[-1500:]
+    from workitems.models import WorkItemComment
+    assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 0
+
+
+def test_the_artifact_admin_shows_a_jira_mode_refusal_as_an_error_not_a_server_error(clean_db):
+    """REQ-09 — "No other admin has that catch, so a rejection from its
+    `save_model` is an unhandled server error today": every admin that can
+    refuse now flashes the refusal instead of 500ing."""
+    client = _admin_client(clean_db)
+    item_id = _make_item(externalKey='AT-2')
+    project_config.set_mode(PROJECT, 'jira')
+
+    resp = client.post('/django-admin/workitems/workitemartifact/add/', {
+        'work_item': str(item_id), 'artifact_type': 'commit', 'reference': 'abc123',
+    }, follow=True)
+
+    assert resp.status_code == 200, 'not a 500'
+    assert b'Jira mode' in resp.content
+    from workitems.models import WorkItemArtifact
+    assert WorkItemArtifact.objects.filter(work_item_id=item_id).count() == 0
+
+
+def test_in_local_mode_the_admins_saves_are_otherwise_unchanged(clean_db):
+    client = _admin_client(clean_db)
+    item_id = _make_item()
+
+    resp = client.post('/django-admin/workitems/workitemartifact/add/', {
+        'work_item': str(item_id), 'artifact_type': 'ci_build', 'reference': 'build-7',
+    })
+    assert resp.status_code == 302, resp.content[-1500:]
+
+    resp = client.post('/django-admin/workitems/workitemcomment/add/', {
+        'work_item': str(item_id), 'author': 'an-operator', 'body': 'by hand',
+        'reference_file': '', 'reference_function': '',
+    })
+    assert resp.status_code == 302, resp.content[-1500:]
+
+    from workitems.models import WorkItemArtifact, WorkItemComment
+    assert WorkItemArtifact.objects.filter(work_item_id=item_id).count() == 1
+    assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 1

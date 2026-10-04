@@ -24,6 +24,8 @@ from workitems.envelope import Kind, build_envelope
 from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment, WorkItemReleaseDetail
 from workitems.webhook_consumer import handle_webhook_envelope
 
+from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
+
 PROJECT = 'test-project'
 TARGET_PROJECT = 'engineering-app'
 
@@ -92,7 +94,7 @@ def test_a_local_mode_project_ignores_a_jira_issue_updated_webhook(clean_db):
     assert generic.payload['detail']['ignored']
 
 
-def test_switching_the_project_to_jira_mode_applies_the_same_webhook_as_today(clean_db):
+def test_switching_the_project_to_jira_mode_applies_the_same_webhook_as_today(clean_db, permissive_jira):
     fields = _story_fields(PROJECT)
     env = _envelope(PROJECT, 'jira:issue_created', 'TP-102', fields)
 

@@ -89,6 +89,12 @@ _TABLES = [
     'work_item_comment', 'work_item_artifact', 'work_item_history', 'work_item_link',
     'work_item_story_detail', 'work_item_release_detail', 'outbox_event', 'webhook_failure', 'access_log',
     'work_item', 'project_status_config', 'project_config',
+    # v5.2 — the outbound writer's own operational tables
+    # (canonical-delivery-state.md REQ-01, REQ-09). Neither has a foreign
+    # key into work_item, so neither is reached by its CASCADE: a completion
+    # record or a deployment record left behind by one test would make the
+    # next test's redelivery skip a step it never ran.
+    'beta_deployment_record', 'jira_write_completion',
 ]
 
 

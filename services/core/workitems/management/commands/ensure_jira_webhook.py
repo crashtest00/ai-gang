@@ -57,7 +57,15 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 
 WEBHOOK_NAME = 'AI Gang'
-WEBHOOK_EVENTS = ['jira:issue_created', 'jira:issue_updated']
+
+# canonical-delivery-state.md REQ-09, "Jira's comment and link events reach
+# `core`": every Jira-mode comment depends on Jira sending comment webhooks,
+# and up to v5.1 this list subscribed none, so `webhook_consumer.py`'s
+# comment branch was never reached and a comment `core` posted never came
+# back with its author. `comment_updated` is deliberately NOT subscribed:
+# `core` records a comment once, keyed on its Jira id, and an edit is not
+# mirrored.
+WEBHOOK_EVENTS = ['jira:issue_created', 'jira:issue_updated', 'comment_created']
 
 
 class JiraWebhookError(RuntimeError):
@@ -83,31 +91,53 @@ def _jira_request(method: str, url: str, email: str, token: str, body: dict[str,
 
 
 def ensure_jira_webhook(*, jira_url: str, jira_email: str, jira_token: str, webhook_url: str) -> bool:
-    """Registers `webhook_url` with Jira unless it is already registered.
-    Returns True if this call registered it, False if it was already
-    present. Raises JiraWebhookError if registration was attempted and
+    """Registers `webhook_url` with Jira unless it is already registered
+    with every entry in `WEBHOOK_EVENTS`. Returns True if this call
+    registered or UPDATED it, False if it was already present with the full
+    event list. Raises JiraWebhookError if registration was attempted and
     failed. A failure to read the existing list is tolerated — the same
     best-effort behavior the deleted bash ensure_webhook() had (`|| true`
-    around its GET) — and registration is attempted anyway."""
+    around its GET) — and registration is attempted anyway.
+
+    canonical-delivery-state.md REQ-09: a registration whose URL matches but
+    whose events lack any entry is UPDATED, not returned from. Up to v5.1
+    this returned on a URL match alone, so every deployment registered
+    before an event was added to the list above stayed subscribed to the old
+    set for ever, with nothing to say so — and `comment_created` is exactly
+    such an addition."""
     endpoint = f'{jira_url}/rest/webhooks/1.0/webhook'
+    registration = {
+        'name': WEBHOOK_NAME,
+        'url': webhook_url,
+        'events': WEBHOOK_EVENTS,
+        'filters': {},
+        'excludeBody': False,
+    }
 
     try:
         existing = _jira_request('GET', endpoint, jira_email, jira_token)
     except Exception:
         existing = None
 
+    update_url = None
     for hook in existing if isinstance(existing, list) else []:
-        if isinstance(hook, dict) and hook.get('url') == webhook_url:
+        if not (isinstance(hook, dict) and hook.get('url') == webhook_url):
+            continue
+        missing = [event for event in WEBHOOK_EVENTS if event not in (hook.get('events') or [])]
+        if not missing:
             return False
+        # Jira's legacy webhook resource is addressed by its own `self`
+        # link, which the list entry carries; a PUT to it replaces the
+        # registration's events.
+        update_url = hook.get('self')
+        break
 
     try:
-        result = _jira_request('POST', endpoint, jira_email, jira_token, {
-            'name': WEBHOOK_NAME,
-            'url': webhook_url,
-            'events': WEBHOOK_EVENTS,
-            'filters': {},
-            'excludeBody': False,
-        })
+        result = _jira_request(
+            'PUT' if update_url else 'POST',
+            update_url or endpoint,
+            jira_email, jira_token, registration,
+        )
     except Exception as err:
         raise JiraWebhookError(str(err)) from err
 
@@ -167,6 +197,8 @@ class Command(BaseCommand):
             raise CommandError(f'Jira webhook registration failed: {err}') from err
 
         if registered:
-            self.stdout.write(f'Webhook registered: {webhook_url}')
+            self.stdout.write(
+                f'Webhook registered (or updated to {", ".join(WEBHOOK_EVENTS)}): {webhook_url}'
+            )
         else:
-            self.stdout.write('Webhook already registered — skipping.')
+            self.stdout.write('Webhook already registered with every required event — skipping.')

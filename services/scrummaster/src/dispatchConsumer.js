@@ -313,4 +313,12 @@ module.exports = {
   maybeRedispatchForRework,
   handleBlockedClearedSideEffect,
   issueLikeFromCanonical,
+  // Exported for gateway.js's restored pipeline-retry redispatch (V5.2
+  // Canonical Delivery State REQ-01), which "follows dispatchConsumer.js's
+  // canonical pattern". Exported rather than reimplemented so the ONE mode
+  // read this module keeps (line 112, the dispatch prompt's display line,
+  // REQ-09's kept exception) stays the only one: a second caller building
+  // its own issue-like object would need its own getMode call, which is
+  // exactly the mode leak REQ-09's search forbids.
+  issueLikeFor,
 };

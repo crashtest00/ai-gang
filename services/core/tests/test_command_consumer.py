@@ -12,11 +12,12 @@ from __future__ import annotations
 import uuid
 
 from workitems import project_config, store
-from workitems.command_consumer import create_command_consumer
+from workitems.command_consumer import create_command_consumer, handle_command
 from workitems.envelope import Kind, build_envelope
 from workitems.stream_topology import command_stream_name
 from workitems.streams import dead_letter_stream_name, publish
 
+from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
 from tests.wait_support import wait_for
 
 PROJECT = 'test-project'
@@ -90,24 +91,77 @@ def test_req03_unknown_command_is_dead_lettered(clean_db, redis_client, redis_fa
         consumer.stop()
 
 
-def test_status_change_against_jira_mode_project_is_dead_lettered(clean_db, redis_client, redis_factory):
+def test_status_change_against_jira_mode_project_is_pushed_to_jira_and_not_recorded(
+        clean_db, redis_client, redis_factory, permissive_jira):
+    """canonical-delivery-state.md REQ-09 — this command used to be
+    dead-lettered as WRITE_GATE_REJECTED, which is what "Jira mode is off"
+    meant in v5.1. From v5.2 the router PUSHES a machine write: the
+    equivalent Jira write is made, nothing is recorded, the command is
+    acknowledged rather than dead-lettered, and the canonical status moves
+    only when Jira's webhook returns.
+
+    Driven through the real command consumer against the fixture Jira API —
+    the enforcement point, not `store.transition_status` directly."""
     item_id = uuid.uuid4()
-    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'Gated'})
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'Gated', 'externalKey': 'TP-900'})
     project_config.set_mode(PROJECT, 'jira')
+
+    transitions = []
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-900/transitions')] = \
+        lambda query, body: (200, {'transitions': [{'id': '31', 'to': {'name': 'In Progress'}}]})
+
+    def post_transition(query, body):
+        transitions.append(body)
+        return 200, None
+
+    permissive_jira.routes[('POST', '/rest/api/3/issue/TP-900/transitions')] = post_transition
 
     consumer = create_command_consumer(redis_factory, PROJECT, consumer_name='test-4')
     consumer.start()
     try:
         publish_command(redis_client, {'command': 'transitionStatus', 'actor': 'tester', 'workItemId': str(item_id), 'status': 'in-progress'})
-        wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
-                 expected="the write gate's refusal to be dead-lettered — 1 entry on the dead-letter stream",
-                 observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')
+        wait_for(lambda: len(transitions) == 1,
+                 expected='the equivalent Jira transition to have been posted',
+                 observed=lambda: f'{len(transitions)} transition(s) posted')
     finally:
         consumer.stop()
         project_config.revert_to_local(PROJECT)
 
+    assert transitions == [{'transition': {'id': '31'}}]
+    assert redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 0, \
+        'a pushed write is not a rejection'
     item = store.get_work_item(item_id)
-    assert item.status == 'proposed', 'the gated write must never have been applied'
+    assert item.status == 'proposed', 'nothing is recorded until Jira\'s webhook returns'
+
+
+def test_a_redelivered_routed_command_makes_no_second_jira_write(
+        clean_db, redis_client, redis_factory, permissive_jira):
+    """REQ-09 step 5 — `handle_command` passes the envelope's `messageId`
+    to every routed handler as its `completion_key`, and the writer records
+    each step after the call succeeds, so a command redelivered under the
+    same `messageId` skips the step that is already done."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'Gated', 'externalKey': 'TP-901'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    posted = []
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-901/transitions')] = \
+        lambda query, body: (200, {'transitions': [{'id': '31', 'to': {'name': 'In Progress'}}]})
+    permissive_jira.routes[('POST', '/rest/api/3/issue/TP-901/transitions')] = \
+        lambda query, body: (posted.append(body), (200, None))[1]
+
+    envelope = build_envelope(Kind.WORK_ITEM_COMMAND, PROJECT, payload={
+        'command': 'transitionStatus', 'actor': 'tester', 'workItemId': str(item_id), 'status': 'in-progress',
+    })
+    try:
+        handle_command(envelope)
+        handle_command(envelope)  # redelivery of the SAME messageId.
+    finally:
+        project_config.revert_to_local(PROJECT)
+
+    assert len(posted) == 1, 'the completed step is skipped on redelivery'
 
 
 def test_release_candidate_cut_against_dirty_queue_is_dead_lettered(clean_db, redis_client, redis_factory):

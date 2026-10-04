@@ -11,12 +11,27 @@ from __future__ import annotations
 
 import uuid
 
-from workitems import project_config, registry, store, write_gate
+import pytest
+
+from workitems import jira_client, jira_writer, project_config, registry, store, write_gate
 from workitems.envelope import Kind, build_envelope
 from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment, WorkItemReleaseDetail
+from workitems import webhook_consumer
 from workitems.webhook_consumer import handle_webhook_envelope
 
+from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
+from tests.jira_fixture import posted_comment_texts
+
 PROJECT = 'test-project'
+
+# v5.2: a Jira-mode project's story intake now POSTS its acknowledgement and
+# missing-fields comments to Jira through the outbound writer, instead of
+# leaving them to a consumer that did not exist
+# (canonical-delivery-state.md REQ-09). Every test below whose subject is the
+# INBOUND interpretation but which now makes that outbound call takes
+# `permissive_jira`, the fixture Jira that accepts and records anything — the
+# posted text itself is asserted in test_jira_writer.py and in the two tests
+# at the end of this file.
 
 STORY_FIELD_IDS = {
     'JIRA_BEHAVIOR_FIELD_ID': 'customfield_behavior',
@@ -79,7 +94,7 @@ def envelope_for(issue_key, event, issue_fields, *, body_extra=None, project=PRO
 # Handler 1 — Story created (handlers.js `handleStoryCreated`)
 # ---------------------------------------------------------------------------
 
-def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(clean_db, monkeypatch):
+def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(clean_db, monkeypatch, permissive_jira):
     _set_story_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     handle_webhook_envelope(envelope_for('TP-1', 'jira:issue_created', _story_fields(complete=True)))
@@ -97,7 +112,7 @@ def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(cle
     assert created_event.payload['status'] == 'ready'
 
 
-def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_db, monkeypatch):
+def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_db, monkeypatch, permissive_jira):
     _set_story_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     handle_webhook_envelope(envelope_for('TP-2', 'jira:issue_created', _story_fields(complete=False)))
@@ -112,7 +127,7 @@ def test_story_created_missing_required_fields_stays_proposed_and_blocked(clean_
     assert detail['missing'] == ['Behavior', 'Acceptance Criteria', 'Constraints', 'Edge Cases', 'Out of Scope']
 
 
-def test_story_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
+def test_story_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch, permissive_jira):
     _set_story_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     env = envelope_for('TP-3', 'jira:issue_created', _story_fields(complete=True))
@@ -143,7 +158,7 @@ def _blocked_change(from_val, to_val):
     return {'field': 'Blocked', 'fieldId': 'customfield_blocked', 'from': from_val, 'to': to_val}
 
 
-def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_full_context(clean_db, monkeypatch):
+def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_full_context(clean_db, monkeypatch, permissive_jira):
     _set_story_field_env(monkeypatch)
     monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
     project_config.set_mode(PROJECT, 'jira')
@@ -168,7 +183,7 @@ def test_blocked_cleared_on_a_story_with_fields_now_complete_dispatches_with_ful
     assert WebhookFailure.objects.filter(work_item_id=item.id).count() == 0
 
 
-def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, monkeypatch):
+def test_blocked_cleared_on_a_story_still_missing_fields_re_blocks(clean_db, monkeypatch, permissive_jira):
     _set_story_field_env(monkeypatch)
     monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
     project_config.set_mode(PROJECT, 'jira')
@@ -467,3 +482,324 @@ def test_issue_link_changelog_entry_is_recorded_not_dropped(clean_db):
 
     event = OutboxEvent.objects.get(event_type='work_item.jira_event_received', work_item_id=item_id)
     assert event.payload['detail']['field'] == 'Link'
+
+
+# ---------------------------------------------------------------------------
+# v5.2 — story intake's comments, posted through the one comment path
+# (canonical-delivery-state.md REQ-09, "Canonical events with a Jira side
+# effect"). Driven through `handle_webhook_envelope`, the real webhook
+# consumer entry point, against the fixture Jira API — not by calling the
+# writer directly.
+# ---------------------------------------------------------------------------
+
+def test_story_intake_posts_v1s_acknowledgement_and_missing_fields_comments_to_jira(
+        clean_db, monkeypatch, permissive_jira):
+    """The accepted-with-missing-fields branch posts the acknowledgement
+    THEN the missing-fields comment, both to Jira, both carrying REQ-09's
+    `[<author>] ` prefix, and records neither in `core` — a Jira-mode
+    comment reaches `core` on its own `comment_created` webhook."""
+    _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+
+    handle_webhook_envelope(envelope_for('TP-50', 'jira:issue_created', _story_fields(complete=False)))
+
+    item = WorkItem.objects.get(external_key='TP-50')
+    texts = posted_comment_texts()
+    assert len(texts) == 2, texts
+    assert texts[0] == '[system] Ticket received. Assigned to Refinement Agent for decomposition.'
+    assert texts[1].startswith('[system] Story is missing required fields')
+    assert '  - Behavior' in texts[1]
+    assert 'move the ticket back to Backlog to retry' in texts[1]
+    assert WorkItemComment.objects.filter(work_item_id=item.id).count() == 0, \
+        'nothing is recorded in Jira mode — the comment returns on its own webhook'
+
+
+def test_a_story_intake_comment_whose_post_failed_is_posted_on_redelivery_and_the_other_is_not(
+        clean_db, monkeypatch, permissive_jira):
+    """REQ-09's "Redelivery": story intake's comment steps are registered
+    inside the handler's block and recorded complete only after they post,
+    so a redelivery of the same `messageId` runs only the step that did not.
+    `_handle_story_created`'s early return used to be a bare no-op."""
+    _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    env = envelope_for('TP-51', 'jira:issue_created', _story_fields(complete=False))
+
+    # Fail the SECOND comment post, so the first is recorded complete and
+    # the second stays registered.
+    calls = {'n': 0}
+    real_post = jira_client.post_comment
+
+    def flaky(key, text):
+        calls['n'] += 1
+        if calls['n'] == 2:
+            raise RuntimeError('Jira is briefly unavailable')
+        return real_post(key, text)
+
+    monkeypatch.setattr(jira_client, 'post_comment', flaky)
+    with pytest.raises(RuntimeError):
+        handle_webhook_envelope(env)
+
+    item = WorkItem.objects.get(external_key='TP-51')
+    assert jira_writer.is_step_complete(f'{env["messageId"]}:acknowledgement', item.id, jira_writer.STEP_COMMENT)
+    assert not jira_writer.is_step_complete(f'{env["messageId"]}:missing-fields', item.id, jira_writer.STEP_COMMENT)
+
+    monkeypatch.setattr(jira_client, 'post_comment', real_post)
+    handle_webhook_envelope(env)  # redelivery of the same messageId.
+
+    texts = posted_comment_texts()
+    acknowledgements = [t for t in texts if 'Ticket received' in t]
+    missing = [t for t in texts if 'missing required fields' in t]
+    assert len(acknowledgements) == 1, 'the completed step is skipped, not repeated'
+    assert len(missing) == 1, 'the incomplete step runs'
+
+
+def test_a_story_whose_key_already_has_a_row_posts_no_story_intake_comment(clean_db, monkeypatch, permissive_jira):
+    """REQ-09 — "A first delivery for a Story whose key already has a row
+    (a Story `connect_jira` pushed, REQ-10) registers none, so it posts no
+    story-intake comment." The row exists, this `messageId` registered
+    nothing, so there is nothing to resume."""
+    _set_story_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    store.create_work_item(
+        {'id': uuid.uuid4(), 'project': PROJECT, 'type': 'story', 'displayName': 'Pushed by connect_jira',
+         'externalKey': 'TP-52'},
+        actor='connect-jira', origin=write_gate.Origins.JIRA_WEBHOOK,
+    )
+
+    handle_webhook_envelope(envelope_for('TP-52', 'jira:issue_created', _story_fields(complete=False)))
+
+    assert posted_comment_texts() == []
+    assert WorkItem.objects.filter(external_key='TP-52').count() == 1
+
+
+def test_the_blocked_flag_becoming_set_records_needs_clarification(clean_db, monkeypatch, permissive_jira):
+    """REQ-09 — the Blocked field BECOMING SET is a validated transition to
+    `needs-clarification`, origin JIRA_WEBHOOK. Up to v5.1 nothing in the
+    platform set the flag, so there was no webhook to interpret; from v5.2
+    the writer sets it for every machine write of `needs-clarification`,
+    `failed` or `cancelled`, which is why all three come back as
+    `needs-clarification` (§4)."""
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'Implement thing', 'externalKey': 'TP-53',
+                             'status': 'in-progress', 'assigneeAgentId': 'backend-agent'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    body = {'webhookEvent': 'jira:issue_updated',
+            'issue': {'key': 'TP-53', 'fields': {'issuetype': {'name': 'Story'}}},
+            'changelog': {'items': [_blocked_change(None, '10001')]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    item = store.get_work_item(item_id)
+    assert item.status == 'needs-clarification'
+    assert WebhookFailure.objects.filter(work_item_id=item_id).count() == 0
+
+
+def test_the_blocked_flag_set_on_a_proposed_story_keeps_its_status(clean_db, monkeypatch, permissive_jira):
+    """The one exception REQ-09 names: a work item in `proposed` — story
+    intake's missing-fields block, which flags the ticket precisely so it
+    stays `proposed` — keeps its status."""
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'story',
+                             'displayName': 'Incomplete story', 'externalKey': 'TP-54'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    body = {'webhookEvent': 'jira:issue_updated',
+            'issue': {'key': 'TP-54', 'fields': {'issuetype': {'name': 'Story'}}},
+            'changelog': {'items': [_blocked_change(None, '10001')]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    assert store.get_work_item(item_id).status == 'proposed'
+
+
+def test_a_comment_core_posted_keeps_its_author_on_the_round_trip(clean_db, monkeypatch, permissive_jira):
+    """REQ-09, "The author survives the round trip": the writer posts
+    `[<author>] <body>`, and this consumer strips that prefix back off and
+    records it as the author — but only for a comment Jira says came from
+    the configured integration account."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'A task', 'externalKey': 'TP-55'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    def comment_envelope(author_name, author_email, text):
+        body = {'webhookEvent': 'comment_created', 'issue': {'key': 'TP-55'},
+                'comment': {'id': f'c-{author_email}', 'author': {'displayName': author_name,
+                                                                   'emailAddress': author_email},
+                            'body': _adf(text)}}
+        return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+            'event': 'comment_created', 'issue': body['issue'], 'body': body,
+        })
+
+    # The integration account's own comment: the prefix is the author.
+    handle_webhook_envelope(comment_envelope('AI Gang Bot', 'bot@example.com', '[backend-agent] Done.'))
+    recorded = WorkItemComment.objects.get(work_item_id=item_id, body='Done.')
+    assert recorded.author == 'backend-agent'
+
+    # A person's comment that happens to start with a bracketed word keeps
+    # their own author and their own text.
+    handle_webhook_envelope(comment_envelope('Jo Reviewer', 'jo@example.com', '[note] looks fine'))
+    person = WorkItemComment.objects.get(work_item_id=item_id, author='Jo Reviewer')
+    assert person.body == '[note] looks fine'
+
+
+# ---------------------------------------------------------------------------
+# v5.2 — the inbound status map is per project (canonical-delivery-state.md
+# REQ-09, "A status write to any other status"; Shovel Ready Pass 8, answer
+# 1.1). A project with `ProjectStatusConfig` rows is mapped by its rows
+# ALONE: `DEFAULT_JIRA_STATUS_MAP` does not apply to it, and there is no
+# passthrough of the raw Jira status name.
+# ---------------------------------------------------------------------------
+
+def _status_change_envelope(issue_key, to_status, *, issuetype='Story'):
+    body = {'webhookEvent': 'jira:issue_updated',
+            'issue': {'key': issue_key, 'fields': {'issuetype': {'name': issuetype},
+                                                    'status': {'name': to_status}}},
+            'changelog': {'items': [{'field': 'status', 'fromString': 'In Progress',
+                                      'toString': to_status}]}}
+    return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+
+
+def test_a_webhook_to_a_default_map_only_status_changes_no_canonical_status_for_a_project_with_rows(
+        clean_db, permissive_jira):
+    """REQ-09's Acceptance, the inbound half: "for the same project, a
+    Jira-mode webhook moving an issue to a Jira status that only
+    `DEFAULT_JIRA_STATUS_MAP` names changes no canonical status, and
+    `jira_status_to_canonical` maps that Jira status to no canonical
+    status".
+
+    Up to v5.1 this project would have inherited the whole default map
+    despite having declared its own rows, so this webhook moved the item to
+    `done`.
+    """
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'story',
+                             'displayName': 'A story', 'externalKey': 'TP-60',
+                             'status': 'in-progress', 'storyDetail': {
+                                 'behavior': 'b', 'acceptanceCriteria': 'ac', 'constraints': 'c',
+                                 'edgeCases': 'e', 'outOfScope': 'oos'}})
+    # This project declares its own rows, and 'Done' is not one of them —
+    # only DEFAULT_JIRA_STATUS_MAP names it.
+    project_config.declare_custom_status(PROJECT, 'in-review', 'in-review', 'Tester Acceptance')
+    project_config.set_mode(PROJECT, 'jira')
+
+    assert webhook_consumer.jira_status_to_canonical(PROJECT, 'Done') is None
+    assert webhook_consumer.DEFAULT_JIRA_STATUS_MAP['Done'] == 'done', \
+        'the default map does name it — it is the project that does not'
+
+    handle_webhook_envelope(_status_change_envelope('TP-60', 'Done'))
+
+    assert store.get_work_item(item_id).status == 'in-progress', 'no canonical status change'
+    failures = WebhookFailure.objects.filter(work_item_id=item_id)
+    assert failures.count() == 1
+    assert 'Done' in failures.first().reason
+    assert 'not mapped' in failures.first().reason
+
+
+def test_a_missing_transition_while_the_issue_sits_in_that_status_records_one_webhook_failure(
+        clean_db, permissive_jira):
+    """The other half of the same Acceptance clause: because
+    `jira_status_to_canonical` maps that Jira status to no canonical
+    status, the writer cannot count an issue sitting in it as "already in a
+    status that maps to the target", so a missing transition there records
+    one webhook failure rather than passing silently."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'A task', 'externalKey': 'TP-61'})
+    project_config.declare_custom_status(PROJECT, 'in-review', 'in-review', 'Tester Acceptance')
+    project_config.set_mode(PROJECT, 'jira')
+
+    # The issue offers no transition to the project's own In Review name,
+    # and is sitting in 'Done' — which this project's map does not name.
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-61/transitions')] = \
+        lambda q, b: (200, {'transitions': []})
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-61')] = lambda q, b: (
+        200, {'key': 'TP-61', 'fields': {'status': {'name': 'Done'}, 'customfield_10051': None}})
+
+    store.transition_status(item_id, 'in-review', actor='jenkins',
+                             origin=write_gate.Origins.DIRECT, completion_key='msg-map')
+
+    failures = WebhookFailure.objects.filter(work_item_id=item_id)
+    assert failures.count() == 1
+    assert 'offers no transition' in failures.first().reason
+    assert failures.first().payload['currentJiraStatus'] == 'Done'
+    assert jira_writer.is_step_complete('msg-map', item_id, jira_writer.STEP_STATUS), \
+        'recorded as an outcome, never retried'
+
+
+def test_a_project_with_no_rows_still_uses_the_default_map(clean_db, permissive_jira):
+    """The other side of the per-project rule, unchanged from v5.1: a
+    project that has declared nothing is mapped by `DEFAULT_JIRA_STATUS_MAP`
+    alone."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'A task', 'externalKey': 'TP-62',
+                             'status': 'in-progress'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    handle_webhook_envelope(_status_change_envelope('TP-62', 'Done', issuetype='Story'))
+
+    assert store.get_work_item(item_id).status == 'done'
+    assert WebhookFailure.objects.filter(work_item_id=item_id).count() == 0
+
+
+def test_a_jira_status_no_map_names_records_a_failure_and_no_status_for_a_project_with_no_rows(
+        clean_db, permissive_jira):
+    """A project with no rows and a Jira status the default map does not
+    name either. Up to v5.1 the raw name was passed through and
+    `status_vocabulary.validate_status` rejected it one layer later, which
+    also produced one failure row — so this is the same operator-visible
+    outcome, with a reason that now says what is actually wrong."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'A task', 'externalKey': 'TP-63',
+                             'status': 'in-progress'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    handle_webhook_envelope(_status_change_envelope('TP-63', 'Awaiting Legal'))
+
+    assert store.get_work_item(item_id).status == 'in-progress'
+    failures = WebhookFailure.objects.filter(work_item_id=item_id)
+    assert failures.count() == 1
+    assert 'Awaiting Legal' in failures.first().reason
+
+
+def test_clearing_the_blocked_flag_on_an_unmapped_jira_status_records_no_canonical_status(
+        clean_db, monkeypatch, permissive_jira):
+    """REQ-09's "When the flag is cleared, the work item first returns to
+    the status its current Jira status maps to" — for an issue whose
+    current Jira status the project's map does not name, there is no status
+    to return to, so none is recorded and the existing blocked-cleared
+    handling still runs (the side effect below)."""
+    monkeypatch.setenv('JIRA_BLOCKED_FIELD_ID', 'customfield_blocked')
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'Implement thing', 'externalKey': 'TP-64',
+                             'status': 'needs-clarification', 'assigneeAgentId': 'backend-agent'})
+    project_config.declare_custom_status(PROJECT, 'in-review', 'in-review', 'Tester Acceptance')
+    project_config.set_mode(PROJECT, 'jira')
+
+    body = {'webhookEvent': 'jira:issue_updated',
+            'issue': {'key': 'TP-64', 'fields': {'issuetype': {'name': 'Story'},
+                                                  'status': {'name': 'In Progress'}}},
+            'changelog': {'items': [_blocked_change('10001', None)]}}
+    env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+    handle_webhook_envelope(env)
+
+    assert store.get_work_item(item_id).status == 'needs-clarification', \
+        "'In Progress' is not one of this project's declared rows, so there is no status to return to"
+    side_effects = OutboxEvent.objects.filter(event_type='work_item.jira_side_effect', work_item_id=item_id)
+    assert [e.payload['kind'] for e in side_effects] == ['blocked_cleared'], \
+        'the existing blocked-cleared handling still runs'

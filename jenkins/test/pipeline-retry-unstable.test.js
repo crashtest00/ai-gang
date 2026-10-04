@@ -13,18 +13,26 @@
  *
  *  - the `script` block's half is asserted against the template's own text,
  *    which is all a Groovy build result can be checked against here;
- *  - the loop's half is *executed*. The `sh` script is extracted from
+ *  - the shell's half is *executed*. The `sh` script is extracted from
  *    setup/Jenkinsfile.template verbatim and run under `sh -xe`, the way
- *    Jenkins runs it, with only two substitutions: the `/agent-docs` bind mount
- *    becomes a temporary directory, and `curl` becomes a stub, since no Jira is
- *    reachable from a test.
+ *    Jenkins runs it, with one substitution: the `/agent-docs` bind mount
+ *    becomes a temporary directory.
  *
  * Run A uses the real publish tool, whose refusal path never opens a Redis
  * connection, so the real field-naming message and the real non-zero exit are
- * what the loop sees. Runs B and C stub the tool, because a *successful*
+ * what the shell sees. Runs B and C stub the tool, because a *successful*
  * publish needs a Redis this suite has none of; the tool's own accept/refuse
  * behaviour against real Redis is covered by
  * setup/commons/tools/a2a-validate.test.js.
+ *
+ * **From v5.2 the handler publishes one message, not one per ticket**
+ * (Canonical Delivery State REQ-01). The message carries the promoted pull
+ * requests in place of the tracker key the deleted Jira-key regex used to
+ * find; `core` resolves each reference to a work item, appends the failure
+ * comment there, and publishes a retry per work item with the canonical id.
+ * So there is no per-ticket loop left to prove visits every ticket, and no
+ * Jira `curl` left to stub — what remains is the construction, the marker,
+ * and the UNSTABLE result.
  *
  * The `timeout` step that bounds the whole handler (V5.0 audit row 9) is
  * asserted the same way the `script` block's half is — against the template's
@@ -113,30 +121,28 @@ function prepareRun({ realTool, stubExitsFor = [] }) {
   if (realTool) {
     fs.cpSync(TOOLS_DIR, toolsDir, { recursive: true, filter: src => !src.endsWith('.test.js') });
   } else {
-    // A stand-in for the durable write only: it refuses the tickets named in
-    // `stubExitsFor` the way the real tool refuses a malformed payload — a
-    // field-naming message on stderr and a non-zero exit — and records the rest
-    // as published.
+    // A stand-in for the durable write only: it refuses a payload naming any
+    // of the pull requests in `stubExitsFor` the way the real tool refuses a
+    // malformed payload — a field-naming message on stderr and a non-zero
+    // exit — and records the rest as published.
     fs.writeFileSync(path.join(toolsDir, 'gateway-publish.js'), [
       '#!/usr/bin/env node',
       "const fs = require('fs');",
       "const payload = JSON.parse(fs.readFileSync(0, 'utf8'));",
       `const refuse = ${JSON.stringify(stubExitsFor)};`,
-      'if (refuse.includes(payload.ticket_key)) {',
+      'if ((payload.pull_requests || []).some(r => refuse.includes(r))) {',
       "  console.error('[gateway-publish] Refused: this pipeline_retry payload is not valid, so nothing was published:');",
-      "  console.error('  - ticket_key must be a non-empty string for a \"pipeline_retry\" message');",
+      "  console.error('  - pull_requests must be an array of pull-request URLs for a \"pipeline_retry\" message');",
       '  process.exit(1);',
       '}',
-      "fs.appendFileSync(process.env.PUBLISH_LOG, payload.ticket_key + '\\n');",
-      "console.log('Accepted: ' + payload.ticket_key);",
+      "fs.appendFileSync(process.env.PUBLISH_LOG, JSON.stringify(payload.pull_requests) + '\\n');",
+      "console.log('Accepted: ' + (payload.pull_requests || []).join(' '));",
       '',
     ].join('\n'));
   }
 
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, 'curl'), '#!/bin/sh\nexit 0\n');
-  fs.chmodSync(path.join(bin, 'curl'), 0o755);
 
   const script = path.join(dir, 'post-failure.sh');
   fs.writeFileSync(script, postFailureShellScript().split('/agent-docs').join(agentDocs));
@@ -144,7 +150,7 @@ function prepareRun({ realTool, stubExitsFor = [] }) {
   return { dir, script, bin, publishLog: path.join(dir, 'published.txt'), marker: path.join(dir, 'marker') };
 }
 
-function runLoop(run, { tickets, buildUrl = 'https://ci.test/job/dev/42/' }) {
+function runLoop(run, { pullRequests, buildUrl = 'https://ci.test/job/dev/42/' }) {
   fs.writeFileSync(run.publishLog, '');
   const result = spawnSync('sh', ['-xe', run.script], {
     cwd: run.dir,
@@ -152,16 +158,13 @@ function runLoop(run, { tickets, buildUrl = 'https://ci.test/job/dev/42/' }) {
     env: {
       PATH: `${run.bin}:${process.env.PATH}`,
       NODE_PATH: redisModulePath(),
-      FAILED_TICKETS: tickets.join(' '),
+      FAILED_PRS: pullRequests.join(' '),
       FAILURE_TEXT: 'Pipeline failed on the post-merge dev build.',
       RETRY_FAILURE_MARKER: run.marker,
       PUBLISH_LOG: run.publishLog,
       PROJECT_NAME: 'hello-world',
       BUILD_URL: buildUrl,
       BUILD_NUMBER: '42',
-      JIRA_URL: 'https://jira.test',
-      JIRA_EMAIL: 'ci@test',
-      JIRA_TOKEN: 'token',
     },
   });
   return {
@@ -227,15 +230,52 @@ test('row 9: both commons publish entry points bound their own Redis connection'
   }
 });
 
-test('REQ-03: the failure handler never aborts — no error() and no exit in the per-ticket loop', () => {
+test('REQ-03: the failure handler never aborts — no error() and no exit in the shell', () => {
   assert.doesNotMatch(POST_BLOCK_CODE, /\berror\(/,
-    "error() would swallow every later ticket's retry signal (Jenkinsfile.template's own best-effort guarantee)");
+    "error() would swallow the retry signal (Jenkinsfile.template's own best-effort guarantee)");
   const script = postFailureShellScript();
-  assert.doesNotMatch(script, /\bexit\b/, 'the loop must not exit early on one ticket');
-  assert.match(script, /\|\| \{ echo "WARN: could not publish pipeline_retry for \$ticket" >&2; echo "\$ticket" >> "\$RETRY_FAILURE_MARKER"; \}/,
-    'a failed construction warns and records the ticket, then the loop continues');
+  assert.doesNotMatch(script, /\bexit\b/, 'the shell must not exit early');
+  assert.match(script, /\|\| \{ echo "WARN: could not publish pipeline_retry for \$FAILED_PRS" >&2; echo "\$FAILED_PRS" >> "\$RETRY_FAILURE_MARKER"; \}/,
+    'a failed construction warns and records the references, then the handler finishes');
   assert.match(script, /^\s*rm -f "\$RETRY_FAILURE_MARKER"/m,
-    'the marker is cleared before the loop, so it only ever describes this run');
+    'the marker is cleared first, so it only ever describes this run');
+});
+
+test('V5.2 REQ-01: the failure handler names pull requests and no tracker key', () => {
+  const script = postFailureShellScript();
+  assert.match(script, /pull_requests:\$prs/, 'the message carries the promoted pull requests');
+  assert.doesNotMatch(script, /ticket_key/, 'the tracker key is gone with the regex that found it');
+  assert.doesNotMatch(script, /\bcurl\b/,
+    'Jenkins writes to no tracker here — core appends the failure comment through its own comment path');
+  assert.doesNotMatch(TEMPLATE, /ticket_key/, 'nowhere in the template');
+  assert.doesNotMatch(TEMPLATE, /JIRA_TICKET|PROMOTE_TICKETS/,
+    "the ticket plumbing goes with REQ-01's regex");
+  assert.doesNotMatch(TEMPLATE, /\[A-Z\]\[A-Z0-9\]\+-\[0-9\]\+/,
+    'both Jira-key regex sites are removed, not relocated');
+});
+
+test('V5.2 REQ-01: the dev build publishes one beta_deployed event, and a failed publish marks it UNSTABLE', () => {
+  const stage = TEMPLATE.slice(TEMPLATE.indexOf("stage('Publish the beta deployment')"), TEMPLATE.indexOf('post {'));
+  assert.ok(stage.length > 0, 'the dev build must have a beta-deployment publish stage');
+
+  // REQ-01's payload: the promoted pull requests, the deployed SHA, the
+  // build identifier, the build url, and the beta url Jenkins builds from
+  // the project name and core cannot derive.
+  assert.match(stage, /type:"beta_deployed"/);
+  for (const field of ['pull_requests:\\$prs', 'deployed_sha:\\$sha', 'build_identifier:\\$build',
+                        'build_url:\\$url', 'beta_url:\\$beta']) {
+    assert.match(stage, new RegExp(field), `the event must carry ${field}`);
+  }
+  assert.match(stage, /node \/agent-docs\/commons\/tools\/gateway-publish\.js "\$PROJECT_NAME" -/,
+    'published through the commons raw entry point, which validates it before the write');
+
+  // The failed publish is caught in the shell and the stage then sets
+  // UNSTABLE, so it never triggers the failure handler's pipeline_retry.
+  assert.match(stage, /\|\| \{ echo "WARN: could not publish beta_deployed/);
+  assert.match(stage, /if \(fileExists\(env\.PUBLISH_FAILURE_MARKER\)\) \{/);
+  assert.match(stage, /currentBuild\.result = 'UNSTABLE'/);
+  assert.doesNotMatch(stage, /\berror\(/, 'a failed publish must not fail the build');
+  assert.doesNotMatch(stage, /\bcurl\b/, 'no tracker write survives in the dev build');
 });
 
 test('REQ-06: the loop still publishes through the commons raw entry point', () => {
@@ -247,46 +287,49 @@ test('REQ-06: the loop still publishes through the commons raw entry point', () 
 // The loop's half — executed
 // ---------------------------------------------------------------------------
 
-test('REQ-03: the real publish tool refuses every malformed payload, the loop visits every ticket, and the marker names them all', () => {
+const PR_1 = 'https://github.com/org/repo/pull/1';
+const PR_2 = 'https://github.com/org/repo/pull/2';
+
+test('REQ-03: the real publish tool refuses a malformed payload, the handler finishes, and the marker records it', () => {
   const run = prepareRun({ realTool: true });
   // An empty BUILD_URL is what a broken interpolation produces; the real tool
   // refuses the resulting payload before it opens any connection.
-  const result = runLoop(run, { tickets: ['HW-1', 'HW-2', 'HW-3'], buildUrl: '' });
+  const result = runLoop(run, { pullRequests: [PR_1, PR_2], buildUrl: '' });
 
-  assert.equal(result.status, 0, `the loop must finish: ${result.output}`);
+  assert.equal(result.status, 0, `the handler must finish: ${result.output}`);
   assert.match(result.output, /build_url must be a non-empty string when present on a "pipeline_retry" message/,
     "the tool's own field-naming message is in the build output");
-  assert.match(result.output, /WARN: could not publish pipeline_retry for HW-1/);
-  assert.deepEqual(result.marker, ['HW-1', 'HW-2', 'HW-3'],
-    'every ticket was attempted and every failure recorded — the loop did not stop at the first');
+  assert.match(result.output, /WARN: could not publish pipeline_retry/);
+  assert.deepEqual(result.marker, [`${PR_1} ${PR_2}`],
+    'the references that went unpublished are recorded, so the script block can name them');
 });
 
-test('REQ-03: one ticket\'s malformed payload does not cost the others their retry signal', () => {
-  const run = prepareRun({ realTool: false, stubExitsFor: ['HW-2'] });
-  const result = runLoop(run, { tickets: ['HW-1', 'HW-2', 'HW-3'] });
-
-  assert.equal(result.status, 0, `the loop must finish: ${result.output}`);
-  assert.deepEqual(result.marker, ['HW-2'], 'only the failing ticket is recorded');
-  assert.deepEqual(result.published, ['HW-1', 'HW-3'],
-    'the ticket after the failing one still had its pipeline_retry published');
-  assert.match(result.output, /ticket_key must be a non-empty string/);
-});
-
-test('REQ-03: a clean run leaves no marker, so the build is not marked UNSTABLE', () => {
+test('V5.2 REQ-01: the published message carries every promoted pull request in one payload', () => {
   const run = prepareRun({ realTool: false });
-  const result = runLoop(run, { tickets: ['HW-1', 'HW-2'] });
+  const result = runLoop(run, { pullRequests: [PR_1, PR_2] });
 
   assert.equal(result.status, 0, result.output);
   assert.equal(result.marker, null, 'no marker means the script block leaves the build result alone');
-  assert.deepEqual(result.published, ['HW-1', 'HW-2']);
+  assert.deepEqual(result.published, [JSON.stringify([PR_1, PR_2])],
+    'one message, naming both — core resolves each reference and publishes a retry per work item');
+});
+
+test("V5.2 REQ-01: a reference the tool refuses costs the whole message, and the marker says so", () => {
+  const run = prepareRun({ realTool: false, stubExitsFor: [PR_2] });
+  const result = runLoop(run, { pullRequests: [PR_1, PR_2] });
+
+  assert.equal(result.status, 0, `the handler must finish: ${result.output}`);
+  assert.deepEqual(result.marker, [`${PR_1} ${PR_2}`]);
+  assert.deepEqual(result.published, [], 'nothing was published');
+  assert.match(result.output, /pull_requests must be an array of pull-request URLs/);
 });
 
 test('REQ-03: a marker left behind by an earlier build does not make this one UNSTABLE', () => {
   const run = prepareRun({ realTool: false });
-  fs.writeFileSync(run.marker, 'HW-99\n');
-  const result = runLoop(run, { tickets: ['HW-1'] });
+  fs.writeFileSync(run.marker, 'https://github.com/org/repo/pull/99\n');
+  const result = runLoop(run, { pullRequests: [PR_1] });
 
   assert.equal(result.status, 0, result.output);
-  assert.equal(result.marker, null, "the loop's `rm -f` cleared the stale marker");
-  assert.deepEqual(result.published, ['HW-1']);
+  assert.equal(result.marker, null, "the handler's `rm -f` cleared the stale marker");
+  assert.deepEqual(result.published, [JSON.stringify([PR_1])]);
 });

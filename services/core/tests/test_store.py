@@ -13,6 +13,8 @@ import pytest
 from workitems import project_config, store, write_gate
 from workitems.models import OutboxEvent, WorkItemHistory
 
+from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
+
 PROJECT = 'test-project'
 
 
@@ -199,18 +201,51 @@ def test_append_comment_req18_idempotent_redelivery(clean_db):
     assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 1
 
 
-def test_req10_write_gate_rejects_direct_write_in_jira_mode(clean_db):
+def test_req09_the_router_pushes_a_machine_write_refuses_the_admin_and_records_a_webhook_in_jira_mode(
+        clean_db, permissive_jira):
+    """canonical-delivery-state.md REQ-09, "The routing layer" — what the
+    v5.1 gate called "a direct write" now has three outcomes rather than
+    two. A machine origin is PUSHED to Jira and records nothing; the Django
+    admin, a person's edit interface, is REFUSED; a validated
+    Jira-originated event is RECORDED, as before."""
     jira_project = 'jira-project'
     item_id = uuid.uuid4()
-    store.create_work_item({'id': item_id, 'project': jira_project, 'type': 'task', 'displayName': 'X'})
+    store.create_work_item({'id': item_id, 'project': jira_project, 'type': 'task',
+                             'displayName': 'X', 'externalKey': 'JP-1'})
     project_config.set_mode(jira_project, 'jira')
 
-    with pytest.raises(write_gate.WriteGateRejectedError):
-        store.transition_status(item_id, 'in-progress', actor='tester', origin=write_gate.Origins.DIRECT)
+    # A machine write: pushed, posted result, no canonical change.
+    result = store.transition_status(item_id, 'in-progress', actor='tester',
+                                      origin=write_gate.Origins.DIRECT)
+    assert result == {'posted': True, 'workItemId': str(item_id), 'deferred': False}
+    assert store.get_work_item(item_id).status == 'proposed', \
+        'nothing is recorded until Jira\'s webhook returns'
 
-    # The same change, arriving as a validated Jira-originated event, succeeds.
+    # The admin: refused.
+    with pytest.raises(write_gate.WriteGateRejectedError):
+        store.transition_status(item_id, 'in-progress', actor='an-operator',
+                                 origin=write_gate.Origins.ADMIN_UI)
+
+    # The same change, arriving as a validated Jira-originated event, is recorded.
     item = store.transition_status(item_id, 'in-progress', actor='jira-webhook', origin=write_gate.Origins.JIRA_WEBHOOK)
     assert item.status == 'in-progress'
+
+
+def test_req09_a_local_mode_project_is_unaffected_by_the_router(clean_db):
+    """The other half of REQ-09's routing: in local mode `route` answers
+    `record` for every origin, so each of the five handlers behaves exactly
+    as it did — including the admin's, which is the edit interface there."""
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
+
+    for origin in (write_gate.Origins.DIRECT, write_gate.Origins.ADMIN_UI,
+                   write_gate.Origins.EXTERNAL_API, write_gate.Origins.ROLLUP):
+        assert write_gate.route(PROJECT, origin) == write_gate.RECORD
+
+    assert store.transition_status(item_id, 'in-progress', actor='an-operator',
+                                    origin=write_gate.Origins.ADMIN_UI).status == 'in-progress'
+    assert store.assign_work_item(item_id, 'backend-agent', actor='an-operator',
+                                   origin=write_gate.Origins.ADMIN_UI).assignee_agent_id == 'backend-agent'
 
 
 def _make_release(clean_db, project=PROJECT):

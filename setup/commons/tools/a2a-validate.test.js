@@ -529,20 +529,91 @@ test('F-2: a terminal submission carrying an unrouted operation still publishes 
 // ---------------------------------------------------------------------------
 
 test('REQ-03/REQ-07: a well-formed pipeline_retry publishes and a malformed one is rejected by name', async () => {
+  // V5.2 Canonical Delivery State REQ-01 replaced this message's tracker key
+  // with the promoted pull requests, so what the definition requires now is
+  // the reference list; the build URL and number keep their optional-but-
+  // not-empty rule.
   const ok = await publish({
-    type: 'pipeline_retry', ticket_key: 'HW-1', build_url: 'https://ci.test/job/7', build_number: '7',
+    type: 'pipeline_retry', pull_requests: ['https://github.com/org/repo/pull/7'],
+    build_url: 'https://ci.test/job/7', build_number: '7',
   });
   assert.equal(ok.code, 0, ok.stderr);
   assert.equal(await client.xLen(STREAM), 1);
 
   const bad = await publish({ type: 'pipeline_retry', build_url: 'https://ci.test/job/7', build_number: '7' });
   assert.notEqual(bad.code, 0);
-  assert.match(bad.stderr, /ticket_key must be a non-empty string for a "pipeline_retry" message/);
+  assert.match(bad.stderr, /pull_requests must be an array of pull-request URLs/);
   assert.equal(await client.xLen(STREAM), 1, 'the rejected message must not have been written');
 
-  const empty = await publish({ type: 'pipeline_retry', ticket_key: 'HW-1', build_url: '' });
+  const blankReference = await publish({ type: 'pipeline_retry', pull_requests: [''] });
+  assert.notEqual(blankReference.code, 0);
+  assert.match(blankReference.stderr, /pull_requests\[0\] must be a non-empty string/);
+
+  const empty = await publish({
+    type: 'pipeline_retry', pull_requests: ['https://github.com/org/repo/pull/7'], build_url: '',
+  });
   assert.notEqual(empty.code, 0);
   assert.match(empty.stderr, /build_url must be a non-empty string when present/);
+});
+
+test('V5.2 REQ-07: a dev build with only direct commits publishes a pipeline_retry with an empty reference list', async () => {
+  // "The array may be empty": a dev build can promote commits that have no
+  // merged pull request at all, and core records each as unresolved. A
+  // narrower rule here would refuse a payload the gateway accepts.
+  const ok = await publish({ type: 'pipeline_retry', pull_requests: [], build_url: 'https://ci.test/job/8' });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(await client.xLen(STREAM), 1);
+});
+
+test('V5.2 REQ-07 (AC-04): a well-formed beta_deployed publishes and a malformed one is refused with the field named', async () => {
+  // SUCCESS-04's migration candidate: the one further structured action
+  // beyond create_subtask and pipeline_retry, and a non-agent producer's.
+  const payload = {
+    type: 'beta_deployed',
+    pull_requests: ['https://github.com/org/repo/pull/7'],
+    deployed_sha: 'deadbeefcafe', build_identifier: 'hello-world-deadbee-7',
+    build_url: 'https://ci.test/job/dev/9/', beta_url: 'https://hello-world.beta.example.com',
+  };
+  const ok = await publish(payload);
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(await client.xLen(STREAM), 1);
+
+  const entries = await client.xRange(STREAM, '-', '+');
+  const envelope = fromStreamFields(entries[0].message);
+  assert.equal(envelope.kind, 'gateway_operation');
+  assert.deepEqual(envelope.payload, payload);
+  // REQ-01: "the event's payload contains no field whose name or value is
+  // tracker-specific".
+  assert.equal(JSON.stringify(envelope.payload).toLowerCase().includes('jira'), false);
+  assert.equal('ticket_key' in envelope.payload, false);
+
+  for (const field of ['deployed_sha', 'build_identifier', 'build_url', 'beta_url']) {
+    const broken = { ...payload };
+    delete broken[field];
+    const result = await publish(broken);
+    assert.notEqual(result.code, 0, `${field} must be required`);
+    assert.match(result.stderr, new RegExp(`${field} must be a non-empty string for a "beta_deployed" message`));
+  }
+
+  const noReferences = { ...payload };
+  delete noReferences.pull_requests;
+  const result = await publish(noReferences);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /pull_requests must be an array of pull-request URLs/);
+
+  assert.equal(await client.xLen(STREAM), 1, 'no rejected message reached the stream');
+});
+
+test('V5.2 REQ-07: beta_deployed is a routing-table entry alone — no second checker and no change to the validator', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'a2a-validate.js'), 'utf8');
+  const definitionIds = [...source.matchAll(/^\s*id: '([^']+)',$/gm)].map(m => m[1]);
+  assert.deepEqual(definitionIds, ['materializeDecomposition', 'beta_deployed', 'pipeline_retry', 'a2a_submission'],
+    'in the order gateway.js dispatchGatewayOperation tests them');
+  // `validateGatewayPayload` and `definitionFor` are the whole dispatch: the
+  // new type added no branch to either.
+  assert.match(source, /const definition = definitionFor\(payload\);\n\s*const errors = \[\];\n\s*definition\.check\(payload, errors\);/,
+    'the validator still asks the table and nothing else');
+  assert.doesNotMatch(source, /beta_deployed[\s\S]{0,40}function/, 'no checker function of its own');
 });
 
 test('REQ-07: materializeDecomposition — an action outside REQ-01\'s set, validated by its definition alone', async () => {

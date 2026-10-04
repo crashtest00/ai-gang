@@ -22,7 +22,12 @@ const { newMessageId, newArtifactId } = require('./a2a/ids');
 const { buildTextPart, buildDataPart, buildMessage, buildTask, buildArtifact } = require('./a2a/parts');
 const { buildTaskPrompt } = require('./prompt');
 const { fromStreamFields } = require('./envelope');
-const { _handleA2ASubmission: handleA2ASubmission, _handlePipelineRetry: handlePipelineRetry, _handleTaskStatus: handleTaskStatus } = require('./gateway');
+const {
+  _handleA2ASubmission: handleA2ASubmission,
+  _handlePipelineRetry: handlePipelineRetry,
+  _handleTaskStatus: handleTaskStatus,
+  _dispatchGatewayOperation: dispatchGatewayOperation,
+} = require('./gateway');
 
 // The A2A Task id is the work item's canonical id, in every mode (REQ-06).
 const WORK_ITEM_ID = 'wi-gateway-42';
@@ -825,43 +830,197 @@ test('an invalid submission (bad state) is dropped without writing anything', as
   assert.deepEqual(calls, []);
 });
 
-// handlePipelineRetry — Jenkins reports a failed build back over the gateway
-// channel, naming the affected work item only by the tracker key it found in
-// the failed build's branch name. From v5.1 ScrumMaster may not use such a key
-// to find anything (REQ-05, REQ-07), so the message is recorded as unresolved
-// and nobody is dispatched. Its routing and a2a-validate.js's `pipeline_retry`
-// rule are unchanged, so it is still accepted rather than dead-lettered.
+// handlePipelineRetry — two messages share this type and this stream from
+// v5.2 (Canonical Delivery State REQ-01): Jenkins', which carries the
+// promoted pull requests and no canonical id and is RELAYED to core, and
+// core's, which carries the canonical workItemId it resolved and is the one
+// this service acts on. Nothing here derives a Redis key, or anything else,
+// from a tracker key — `acquireOnce`'s key is built from the canonical id.
 
-test('a pipeline_retry message is logged as unresolved, dispatches nobody and derives no Redis key', async (t) => {
-  assert.equal(redis.acquireOnce, undefined, 'acquireOnce must not exist; no Redis key may be derived from a tracker key');
+function retryEnvelope(payload) {
+  return {
+    schemaVersion: '1', messageId: newMessageId(), kind: 'gateway_operation',
+    project: PROJECT_NAME, createdAt: new Date().toISOString(), payload,
+  };
+}
+
+test("Jenkins' pipeline_retry carries pull requests, dispatches nobody here, and is relayed to core", async (t) => {
+  const calls = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    calls.push({ project, payload });
+    return { deduped: false };
+  });
+  let dispatched = false;
+  t.mock.method(streams, 'publish', async () => { dispatched = true; });
+
+  const env = retryEnvelope({
+    type: 'pipeline_retry',
+    pull_requests: ['https://github.com/org/repo/pull/7'],
+    failure_text: 'Pipeline failed on the post-merge dev build.',
+    build_url: 'https://jenkins.example.com/job/hello-world/17/',
+    build_number: 17,
+  });
+  const result = await handlePipelineRetry(env.payload, env, PROJECT_NAME);
+
+  assert.deepEqual(result, { relayed: 'recordPipelineFailure', sourceMessageId: env.messageId });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.command, 'recordPipelineFailure');
+  assert.deepEqual(calls[0].payload.pull_requests, ['https://github.com/org/repo/pull/7']);
+  assert.equal(calls[0].payload.sourceMessageId, env.messageId,
+    "the GATEWAY envelope's messageId, since publishCommand mints a fresh one on each relay");
+  assert.equal('ticket_key' in calls[0].payload, false);
+  assert.equal(dispatched, false, 'ScrumMaster takes no action on Jenkins\' message itself');
+});
+
+test("core's pipeline_retry redispatches the canonical work item's owner, once per (work item, build)", async (t) => {
+  const keys = [];
   t.mock.method(redis, 'getClient', () => ({}));
-  let publishCalled = false;
-  t.mock.method(streams, 'publish', async () => { publishCalled = true; });
-  let publishCommandCalled = false;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async () => { publishCommandCalled = true; });
+  t.mock.method(redis, 'acquireOnce', async (key) => {
+    const first = !keys.includes(key);
+    keys.push(key);
+    return first;
+  });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'backend-agent',
+    display_name: 'A task', comments: [], history: [], artifacts: [],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ project: PROJECT_NAME, mode: 'local', jiraProjectKey: null }));
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issueLike, agent, opts) => {
+    dispatched.push({ key: issueLike.key, agentId: agent.id, prompt: opts.promptFactory({ id: 't' }, { messageId: 'm' }) });
+  });
+
+  const msg = {
+    type: 'pipeline_retry', workItemId: WORK_ITEM_ID,
+    build_url: 'https://jenkins.example.com/job/hello-world/17/', build_number: 17,
+  };
+  const first = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+  const second = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.deepEqual(first, { workItemId: WORK_ITEM_ID, skipped: false });
+  assert.deepEqual(second, { workItemId: WORK_ITEM_ID, skipped: true },
+    'a second identical message dispatches no one');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].agentId, 'backend-agent', 'the owner the canonical record names');
+  assert.equal(dispatched[0].key, WORK_ITEM_ID);
+  assert.match(dispatched[0].prompt, /pipeline failed/i);
+  assert.match(dispatched[0].prompt, /jenkins\.example\.com\/job\/hello-world\/17/);
+  assert.deepEqual(keys, [
+    `retry-dispatch:${WORK_ITEM_ID}:https://jenkins.example.com/job/hello-world/17/`,
+    `retry-dispatch:${WORK_ITEM_ID}:https://jenkins.example.com/job/hello-world/17/`,
+  ], 'the dedupe key is built from the canonical id, never from a tracker key');
+});
+
+test("core's pipeline_retry for a work item with no assignee dispatches nobody and logs it as unresolved", async (t) => {
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async () => true);
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: null,
+  }));
+  let dispatched = false;
+  t.mock.method(handlers, 'dispatchTask', async () => { dispatched = true; });
   const errors = [];
   t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
 
-  const result = await handlePipelineRetry(
-    { ticket_key: 'GANG-70', build_url: 'https://jenkins.example.com/job/hello-world/17/', build_number: 17 },
-    PROJECT_NAME
-  );
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
 
-  assert.deepEqual(result, { ticket_key: 'GANG-70', unresolved: true });
-  assert.equal(publishCalled, false, 'no agent is dispatched');
-  assert.equal(publishCommandCalled, false, 'and nothing is written to the canonical store');
+  assert.equal(dispatched, false);
   assert.equal(errors.length, 1);
   assert.match(errors[0], /Unresolved pipeline_retry/);
-  assert.match(errors[0], /GANG-70/, 'the key and the build are named so an operator can act on it');
-  assert.match(errors[0], /17/);
+  assert.match(errors[0], new RegExp(WORK_ITEM_ID), 'the workItemId is named');
 });
 
-test('a pipeline_retry message with no ticket_key is dropped', async (t) => {
-  assert.equal(redis.acquireOnce, undefined, 'acquireOnce must not exist; no Redis key may be derived from a tracker key');
+test("core's pipeline_retry naming an agent the registry does not know dispatches nobody", async (t) => {
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async () => true);
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'ghost-agent',
+  }));
+  let dispatched = false;
+  t.mock.method(handlers, 'dispatchTask', async () => { dispatched = true; });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
 
-  const result = await handlePipelineRetry({ build_url: 'https://jenkins.example.com/job/hello-world/17/' }, PROJECT_NAME);
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
 
-  assert.equal(result, null);
+  assert.equal(dispatched, false);
+  assert.match(errors[0], /ghost-agent/);
+});
+
+// beta_deployed — REQ-01's canonical deployment event. ScrumMaster relays it
+// and decides nothing about it; core resolves the pull requests, posts the
+// evidence and makes the transition.
+
+test('a beta_deployed entry is relayed to core as recordBetaDeployment, carrying the gateway messageId', async (t) => {
+  const calls = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    calls.push({ project, payload });
+    return { deduped: false };
+  });
+
+  const env = retryEnvelope({
+    type: 'beta_deployed',
+    pull_requests: ['https://github.com/org/repo/pull/7'],
+    deployed_sha: 'deadbeef', build_identifier: 'hello-world-deadbee-7',
+    build_url: 'https://jenkins.example.com/job/hello-world/18/',
+    beta_url: 'https://hello-world.beta.example.com',
+  });
+  const result = await dispatchGatewayOperation(env, PROJECT_NAME);
+
+  assert.deepEqual(result, { relayed: 'recordBetaDeployment', sourceMessageId: env.messageId });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].project, PROJECT_NAME);
+  assert.equal(calls[0].payload.command, 'recordBetaDeployment');
+  assert.equal(calls[0].payload.sourceMessageId, env.messageId);
+  assert.equal(calls[0].payload.deployed_sha, 'deadbeef');
+  assert.equal(calls[0].payload.beta_url, 'https://hello-world.beta.example.com');
+  // No field whose name or value is tracker-specific survives the relay.
+  assert.equal(JSON.stringify(calls[0].payload).toLowerCase().includes('jira'), false);
+  assert.equal('ticket_key' in calls[0].payload, false);
+});
+
+test('a relay whose publishCommand fails raises, so the gateway entry stays pending', async (t) => {
+  t.mock.method(canonicalWorkItems, 'publishCommand', async () => { throw new Error('Redis unavailable'); });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+
+  const env = retryEnvelope({
+    type: 'beta_deployed', pull_requests: [], deployed_sha: 'a', build_identifier: 'b',
+    build_url: 'u', beta_url: 'bu',
+  });
+
+  await assert.rejects(() => dispatchGatewayOperation(env, PROJECT_NAME), /Redis unavailable/,
+    'the relay must not swallow the failure — raising is what leaves the entry unacknowledged');
+  assert.match(errors[0], /stays pending/);
+  assert.match(errors[0], new RegExp(env.messageId), "the entry's messageId is named");
+});
+
+test('idempotency.once records no completion for a handler that raises, so a redelivery runs it again', async (t) => {
+  // REQ-01 requires `once` to release any claim it took before a handler
+  // that raises. It takes none: it READS the recorded outcome, runs the
+  // function, and records only after the function resolves — so there is
+  // nothing to release, and this is the confirmation rather than a change.
+  const store = new Map();
+  const client = {
+    async get(key) { return store.has(key) ? store.get(key) : null; },
+    async set(key, value) { store.set(key, value); return 'OK'; },
+  };
+  let attempts = 0;
+
+  await assert.rejects(() => idempotency.once(client, 'gateway', 'msg-raise', async () => {
+    attempts += 1;
+    throw new Error('transient');
+  }), /transient/);
+  assert.equal(store.size, 0, 'no completion was recorded for the raising handler');
+
+  const { duplicate } = await idempotency.once(client, 'gateway', 'msg-raise', async () => {
+    attempts += 1;
+    return 'ok';
+  });
+  assert.equal(duplicate, false, 'the redelivery runs the handler again');
+  assert.equal(attempts, 2);
 });
 
 test('comment operation appends a canonical comment instead of posting to Jira', async (t) => {
@@ -920,7 +1079,7 @@ test('failed/canceled/rejected transition to the mapped terminal status and appe
   }
 });
 
-test('completed with a pull-request artifact only appends a comment, no status transition', async (t) => {
+test('completed with a pull-request artifact records the association and appends a comment, no status transition', async (t) => {
   const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
@@ -943,9 +1102,36 @@ test('completed with a pull-request artifact only appends a comment, no status t
     PROJECT_NAME
   );
 
+  // V5.2 REQ-03: the association AND the comment, in that order — the
+  // association is what REQ-02's resolver reads to turn a deployed pull
+  // request back into the work item that delivered it.
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].payload, {
+    command: 'attachArtifact',
+    actor: 'Backend Agent',
+    workItemId: WORK_ITEM_ID,
+    artifactType: 'pull_request',
+    reference: 'https://github.com/org/repo/pull/7',
+  });
+  assert.equal(calls[1].payload.command, 'appendComment');
+  assert.match(calls[1].payload.body, /github\.com\/org\/repo\/pull\/7/);
+  assert.equal(calls.filter(c => c.payload.command === 'transitionStatus').length, 0,
+    'opening a PR moves no status');
+});
+
+test('a task completed without a pull-request artifact records no association and raises no error', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+
+  await handleA2ASubmission(
+    envelope({ contextId, referenceMessageId: messageId, state: 'completed', parts: [buildTextPart('Done, no PR')] }),
+    PROJECT_NAME
+  );
+
+  assert.equal(calls.filter(c => c.payload.command === 'attachArtifact').length, 0,
+    'the pull-request Artifact is optional and stays optional');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.command, 'appendComment');
-  assert.match(calls[0].payload.body, /github\.com\/org\/repo\/pull\/7/);
 });
 
 // The gateway's Task state is not the work item's status. Nothing in the

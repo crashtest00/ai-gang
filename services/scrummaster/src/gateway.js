@@ -11,6 +11,17 @@ const assignment = require('./assignment');
 const taskStore = require('./a2a/taskStore');
 const schema = require('./a2a/schema');
 const { buildEnvelope, KIND, fromStreamFields } = require('./envelope');
+// Required lazily inside the one function that needs them: handlers.js and
+// dispatchConsumer.js are loaded by index.js alongside this module, and
+// dispatchConsumer requires handlers, so requiring either at the top here
+// would add a second edge to that graph for the sake of one call site.
+function dispatchModules() {
+  return {
+    handlers: require('./handlers'),
+    dispatchConsumer: require('./dispatchConsumer'),
+    buildRetryPrompt: require('./prompt').buildRetryPrompt,
+  };
+}
 
 // One durable consumer per project's gateway stream (aigang:gateway:{project},
 // group "scrummaster"). Project identity comes from which stream a consumer is
@@ -121,7 +132,11 @@ async function handleGatewayEnvelope(envelope, projectName) {
 //    content.
 //  - operation=materializeDecomposition: dependency handling's own
 //    structured-data contract.
-//  - type=pipeline_retry: Jenkins-originated, not agent-authored A2A content.
+//  - type=beta_deployed: Jenkins-originated, relayed to core (V5.2 Canonical
+//    Delivery State REQ-01). ScrumMaster decides nothing about it.
+//  - type=pipeline_retry: Jenkins-originated too, in two shapes on one
+//    stream — Jenkins' own, which is relayed to core, and core's own, which
+//    carries the canonical workItemId and is the one this service acts on.
 //  - everything else: agent-authored A2A content — comment, reassign,
 //    create_subtask, blocked, and completed (with an optional pull-request
 //    Artifact) all arrive here as one canonical
@@ -137,11 +152,56 @@ async function dispatchGatewayOperation(envelope, projectName) {
     return handleMaterializeDecomposition(msg, projectName);
   }
 
+  if (msg.type === 'beta_deployed') {
+    return relayToCore('recordBetaDeployment', msg, envelope, projectName);
+  }
+
   if (msg.type === 'pipeline_retry') {
-    return handlePipelineRetry(msg, projectName);
+    return handlePipelineRetry(msg, envelope, projectName);
   }
 
   return handleA2ASubmission(envelope, projectName);
+}
+
+// Relay one Jenkins-originated gateway payload to core as a canonical
+// command (V5.2 Canonical Delivery State REQ-01). Jenkins is not an agent and
+// its payload is not an A2A message; ScrumMaster makes no decision about it
+// and resolves nothing — core resolves the promoted pull requests, applies
+// the deployment or the failure, and publishes what this service has to act
+// on.
+//
+// The relay carries THIS envelope's messageId as the command's
+// `sourceMessageId`, not the command envelope's own: `publishCommand` mints a
+// fresh messageId on every relay, and REQ-01's and REQ-05's deduplication
+// keys have to survive a re-relay of the same Jenkins message.
+//
+// **It must not drop the event on a failure.** A refused or failed relay is
+// logged at error level naming the entry's messageId and then RAISES rather
+// than returning, so `handleGatewayEnvelope`'s `idempotency.once` records no
+// completion for that messageId: the gateway entry stays pending and the
+// stream's existing retry and dead-letter redeliver it. (`once` claims
+// nothing before running its function — it reads the recorded outcome and
+// writes one only after the function resolves — so a raise leaves no claim
+// to release, and the redelivery runs the handler again.)
+async function relayToCore(command, msg, envelope, projectName) {
+  const { type, ...fields } = msg;
+  try {
+    await canonicalWorkItems.publishCommand(projectName, {
+      command,
+      actor: 'jenkins',
+      type,
+      sourceMessageId: envelope.messageId,
+      ...fields,
+    });
+  } catch (err) {
+    console.error(
+      `[gateway] Could not relay ${type} entry ${envelope.messageId} on ${projectName} to core as ` +
+      `${command}: ${err.message} — the entry stays pending and will be redelivered`
+    );
+    throw err;
+  }
+  console.log(`[gateway] Relayed ${type} entry ${envelope.messageId} to core as ${command}`);
+  return { relayed: command, sourceMessageId: envelope.messageId };
 }
 
 // Forward a Refinement Agent decomposition to core, in every mode:
@@ -231,33 +291,92 @@ async function handleTaskStatus(envelope, projectName) {
   return null;
 }
 
-// Handle a pipeline-failure retry request from Jenkins. Jenkins names the
-// affected work item only by the tracker key it finds in the failed build's
-// branch name, and from v5.1 no ScrumMaster module may use such a key to
-// find anything (REQ-05, REQ-07). So this handler dispatches no one, derives
-// no Redis key from `ticket_key`, and records the message where an operator
-// will see it: at error level, naming the key and the build.
+// Handle a pipeline-failure retry. TWO messages share this type and this
+// stream (V5.2 Canonical Delivery State REQ-01), and they are told apart by
+// one field:
 //
-// The fix is already planned and not rebuilt here: v5.2's Canonical Delivery
-// State REQ-01 replaces `ticket_key` with the failed build's pull requests,
-// routes the message through core, and has core publish the retry for
-// ScrumMaster with the canonical workItemId. Its routing above and
-// a2a-validate.js's `pipeline_retry` rule are unchanged, so the message is
-// still validated, accepted and acknowledged rather than dead-lettered.
-async function handlePipelineRetry(msg, _projectName) {
-  const { ticket_key, build_url, build_number } = msg;
+//  - **Jenkins'**, which carries the promoted pull requests and no canonical
+//    id, because the Jira-key regex that used to name a ticket is gone. It is
+//    relayed to core as `recordPipelineFailure`; ScrumMaster takes no action
+//    on it itself and looks nothing up.
+//  - **core's**, which carries the canonical `workItemId` core resolved from
+//    those pull requests. Only this one names a work item, and this is the
+//    one this service acts on: it redispatches the owner the canonical record
+//    names, deduplicated per (work item, build) as it was before v5.1.
+//
+// v5.1 reduced this handler to logging the message, because it could not use
+// a tracker key to find anything and nothing supplied it with a canonical id.
+// It now has one.
+async function handlePipelineRetry(msg, envelope, projectName) {
+  const { workItemId, build_url, build_number } = msg;
 
-  if (!ticket_key) {
-    console.warn('[gateway] pipeline_retry message missing ticket_key — dropping');
+  if (!workItemId) {
+    return relayToCore('recordPipelineFailure', msg, envelope, projectName);
+  }
+
+  // A domain-level dedupe independent of this message's own messageId: core
+  // publishes one retry per resolved work item, and two distinct failures of
+  // the same build must not dispatch the owner twice. Keyed on the CANONICAL
+  // id, never on a tracker key — which is the whole reason v5.1 deleted the
+  // helper this calls.
+  const dedupeKey = `retry-dispatch:${workItemId}:${build_url || build_number || 'unknown'}`;
+  const acquired = await redis.acquireOnce(dedupeKey, 3600);
+  if (!acquired) {
+    console.log(`[gateway] Duplicate pipeline_retry for ${workItemId} (build ${build_number || build_url}) — skipping`);
+    return { workItemId, skipped: true };
+  }
+
+  await redispatchImplementationOwner(workItemId, {
+    kind: 'pipeline_failure',
+    build_url: build_url || null,
+    build_number: build_number || null,
+  });
+  return { workItemId, skipped: false };
+}
+
+// Redispatch the owner the canonical record names, following
+// dispatchConsumer.js's canonical pattern (the owner from
+// `assignee_agent_id`, the agent from the registry, the prompt from
+// `buildRetryPrompt`'s evidence). `e39e9ab`'s Jira-reading
+// `redispatchImplementationOwner`, which read the ticket's own preserved
+// Agent field off a live `jira.getIssue`, does not return.
+//
+// A work item with no assignee, or an assignee the registry does not know, is
+// logged at error level as unresolved, naming the workItemId and the message,
+// and dispatches no one — the same shape an unresolved reference takes in
+// core (REQ-02).
+async function redispatchImplementationOwner(workItemId, evidence) {
+  const full = await canonicalWorkItems.getWorkItem(workItemId, { full: true });
+  if (!full) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — no canonical work item by that id, ` +
+      `so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
+    return null;
+  }
+  if (!full.assignee_agent_id) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — the work item has no assignee, ` +
+      `so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
     return null;
   }
 
-  console.error(
-    `[gateway] Unresolved pipeline_retry naming "${ticket_key}" (build ${build_number || build_url || 'unknown'}) — ` +
-    `ScrumMaster cannot use an external tracker key to find a work item, so no agent was redispatched; ` +
-    `carrying the canonical work item id here is v5.2's`
-  );
-  return { ticket_key, unresolved: true };
+  const agent = registry.getAgent(full.assignee_agent_id);
+  if (!agent) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — its assignee "${full.assignee_agent_id}" ` +
+      `is not a registered agent id, so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
+    return null;
+  }
+
+  const { handlers, dispatchConsumer, buildRetryPrompt } = dispatchModules();
+  const issueLike = await dispatchConsumer.issueLikeFor(full);
+  await handlers.dispatchTask(issueLike, agent, {
+    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, evidence, task, message),
+  });
+  return { workItemId, agentId: agent.id };
 }
 
 // Apply an incoming agent submission to the stored A2A Task, then translate
@@ -560,10 +679,28 @@ async function persistedStatus(ticketKey, ctx) {
 }
 
 // Handle a completed Task. A "pull-request" Artifact means the agent opened
-// a PR — post a comment only. Opening a PR must not move the work item out of
-// whatever status it is in, or change its recorded owner: Jenkins is the sole
-// owner of the transition into review, firing only after tests pass, merge and
-// beta deploy succeed, so there is no status transition to make here.
+// a PR — record the association and post a comment. Opening a PR must not
+// move the work item out of whatever status it is in, or change its recorded
+// owner: the platform owns the transition into review, firing only after
+// tests pass, merge and beta deploy succeed, so there is no status
+// transition to make here.
+//
+// **The association is V5.2 REQ-03.** The PR url was already parsed out of
+// the Artifact and used only to compose the comment; it is now ALSO recorded
+// as a `pull_request` association on the work item, through the same
+// `publishCommand` path every other canonical write uses. That is the signal
+// REQ-02's resolver reads to turn a deployed pull request back into the work
+// item that delivered it — which needs no new A2A operation, no
+// agent-documentation change and no new ingress, because the agent already
+// supplies the PR and this call site already holds both the work-item id and
+// the url. Idempotence for a repeated completion is core's
+// (`store.attach_artifact`): `publishCommand`'s `dedupeKey` expires, so a
+// second completion must not leave a second row, and the row's reference is
+// normalized on the way in.
+//
+// The Artifact is optional and stays optional: a task completed without one
+// leaves no association, which REQ-02 handles by recording the later
+// deployment as unresolved rather than dropping it.
 async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   const prArtifact = (artifacts || []).find(a => a.name === 'pull-request');
 
@@ -571,6 +708,16 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
     const filePart = prArtifact.parts.find(p => p.kind === 'file');
     const summaryPart = prArtifact.parts.find(p => p.kind === 'text');
     const prUrl = filePart?.file?.uri;
+
+    if (prUrl) {
+      await canonicalWorkItems.publishCommand(ctx.projectName, {
+        command: 'attachArtifact',
+        actor: agentName,
+        workItemId: ticketKey,
+        artifactType: 'pull_request',
+        reference: prUrl,
+      });
+    }
 
     const comment = `[${agentName}] PR opened and ready for review: ${prUrl}${summaryPart ? `\n\n${summaryPart.text}` : ''}\n\nTicket: ${ticketKey}`;
     await postComment(ticketKey, ctx, agentName, comment, null);
@@ -864,6 +1011,7 @@ module.exports = {
   stopGatewaySubscriber,
   _handleA2ASubmission: handleA2ASubmission,
   _handlePipelineRetry: handlePipelineRetry,
+  _dispatchGatewayOperation: dispatchGatewayOperation,
   _handleTaskStatus: handleTaskStatus,
   _gatewayConsumerOptions: gatewayConsumerOptions,
 };

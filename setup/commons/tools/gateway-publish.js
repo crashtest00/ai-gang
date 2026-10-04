@@ -34,10 +34,16 @@
  * ticket_key/parent_ticket_key/parentWorkItemId fallbacks below exist only for
  * the operations that define their own structured-data contract outside A2A
  * Message shape: materializeDecomposition, whose id field is the parent work
- * item's canonical id (v5.1 REQ-06), and Jenkins' pipeline_retry, whose
- * `ticket_key` is the tracker key Jenkins found in a branch name. Nothing
- * resolves that one: ScrumMaster logs a pipeline_retry as unresolved until
- * v5.2 routes it through core with a canonical id (v5.1 REQ-05).
+ * item's canonical id (v5.1 REQ-06).
+ *
+ * Jenkins' two messages, `pipeline_retry` and `beta_deployed`, name no work
+ * item at all from v5.2: they carry the promoted pull requests, and core
+ * resolves each to a canonical work item (V5.2 Canonical Delivery State
+ * REQ-01, REQ-02). One message can resolve to several work items, so there is
+ * no single id for the transport envelope's `taskId` to carry and it is null
+ * — which the envelope allows, since `gateway_operation` is not one of the
+ * kinds that require task identity (`envelope.js`'s TASK_KINDS). The
+ * `ticket_key` fallback goes with the Jira-key regex that produced it.
  */
 
 const fs = require('fs');
@@ -103,7 +109,7 @@ async function main() {
   const envelope = buildEnvelope({
     kind: KIND.GATEWAY_OPERATION,
     project,
-    taskId: payload.message?.taskId || payload.ticket_key || payload.parent_ticket_key || payload.parentWorkItemId || null,
+    taskId: payload.message?.taskId || payload.parent_ticket_key || payload.parentWorkItemId || null,
     contextId: payload.message?.contextId || null,
     payload,
   });

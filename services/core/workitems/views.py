@@ -231,11 +231,28 @@ def admin_create_work_item(request):
 @csrf_exempt
 @require_http_methods(['POST'])
 def admin_transition_work_item(request, work_item_id):
+    """canonical-delivery-state.md REQ-09, "Callers state no mode" — the
+    external API is a MACHINE caller (at the pin its only callers outside
+    tests are Jenkins' posts), so `route` pushes its write in Jira mode
+    rather than refusing it. This view holds no transaction of its own
+    (`ATOMIC_REQUESTS` is off, and nothing here opens one), which is what
+    lets the push run in-process: a failed post then returns an error to
+    the caller and records nothing, instead of being registered for after a
+    commit nobody is waiting on.
+
+    On a push `transition_status` returns the posted result rather than a
+    work-item row, and this returns 202: the canonical row has not changed
+    and will not until Jira's webhook returns. It passes no
+    `completion_key`, so the write is not deduplicated — as in local
+    mode."""
     try:
         actor = request.headers.get('X-Actor', 'external-api')
         body = json.loads(request.body or b'{}')
-        item = store.transition_status(work_item_id, body.get('status'), actor=actor, origin=write_gate.Origins.EXTERNAL_API)
-        return JsonResponse(serialize_work_item(item))
+        result = store.transition_status(work_item_id, body.get('status'), actor=actor,
+                                          origin=write_gate.Origins.EXTERNAL_API)
+        if isinstance(result, dict):
+            return JsonResponse(result, status=202)
+        return JsonResponse(serialize_work_item(result))
     except Exception as err:
         return _error_response(err)
 
@@ -266,6 +283,13 @@ def admin_record_release_candidate(request, work_item_id):
 @csrf_exempt
 @require_http_methods(['POST'])
 def admin_add_comment(request, work_item_id):
+    """The one comment path, from the external API (REQ-09). Like the
+    transition above, this view holds no transaction, so in Jira mode the
+    writer posts in-process and a failed post returns its error to the
+    caller with nothing recorded. A posted comment returns 202 and no row:
+    the comment reaches `core` on its own `comment_created` webhook. The
+    body's `sourceMessageId` deduplicates it in both modes — as the row's
+    key in local mode, as the writer's completion key in Jira mode."""
     try:
         actor = request.headers.get('X-Actor', 'external-api')
         body = json.loads(request.body or b'{}')
@@ -273,7 +297,10 @@ def admin_add_comment(request, work_item_id):
             work_item_id, actor, body.get('body'),
             reference_file=body.get('referenceFile'), reference_function=body.get('referenceFunction'),
             source_message_id=body.get('sourceMessageId'),
+            origin=write_gate.Origins.EXTERNAL_API,
         )
+        if comment.get('id') is None and comment.get('posted'):
+            return JsonResponse(comment, status=202)
         return JsonResponse(comment, status=201)
     except Exception as err:
         return _error_response(err)

@@ -16,10 +16,15 @@
  * What it checks mirrors what the server does with the same payload, and it
  * is routed the same way: `services/scrummaster/src/gateway.js`'s
  * `dispatchGatewayOperation` branches on `operation === 'materializeDecomposition'`,
- * then `type === 'pipeline_retry'`, then falls through to
- * `handleA2ASubmission`. `DEFINITIONS` below is that routing table, and
- * adding validation for a further structured action is a new entry in it —
- * no second checker and no third entry point (REQ-07).
+ * then `type === 'beta_deployed'`, then `type === 'pipeline_retry'`, then
+ * falls through to `handleA2ASubmission`. `DEFINITIONS` below is that routing
+ * table, and adding validation for a further structured action is a new entry
+ * in it — no second checker and no third entry point (REQ-07).
+ *
+ * `beta_deployed` is that further structured action (V5.2 Canonical Delivery
+ * State REQ-07, SUCCESS-04/AC-04): a non-agent producer's action, on the same
+ * route `pipeline_retry` takes, with no A2A message shape. It is an entry
+ * below and nothing else.
  *
  * Two rules here are deliberately stricter than the gateway handler, both
  * product-owner-approved (READINESS_DECISIONS.md item 4, spec REQ-02): a
@@ -244,6 +249,26 @@ function checkA2ASubmission(payload, errors) {
   if (errors.length === 0) checkOperationFields(payload, errors);
 }
 
+// The promoted pull requests both Jenkins messages carry in place of the
+// tracker key the regex used to find (V5.2 REQ-01). A promoted commit with no
+// merged pull request is carried as its SHA and resolves to nothing, which
+// core records as unresolved — so an entry's shape is checked, never its
+// resolvability, which depends on server-side state this tool cannot see.
+// The array may be empty: a dev build can promote only direct commits.
+function checkPromotedReferences(payload, errors, kind) {
+  const { pull_requests: references } = payload;
+  if (!Array.isArray(references)) {
+    errors.push(`pull_requests must be an array of pull-request URLs (or commit SHAs, for a promoted commit with no merged pull request) for a "${kind}" message`);
+    return;
+  }
+  for (const [i, reference] of references.entries()) {
+    if (!isNonEmptyString(reference)) {
+      errors.push(`pull_requests[${i}] must be a non-empty string for a "${kind}" message`);
+    }
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // The routing table (REQ-07)
 // ---------------------------------------------------------------------------
@@ -285,18 +310,41 @@ const DEFINITIONS = [
     },
   },
   {
+    // Jenkins' successful post-merge dev build (setup/Jenkinsfile.template's
+    // beta-promotion stage) -> gateway.js's relay -> core's
+    // recordBetaDeployment, which reads the promoted pull requests, the
+    // deployed SHA, the build identifier, the build URL and the beta URL
+    // (V5.2 REQ-01). The deployed SHA and the build identifier are what
+    // core deduplicates the deployment on, so neither may be empty; the
+    // beta URL is the one value core cannot derive, since Jenkins builds it
+    // from the project name.
+    id: 'beta_deployed',
+    matches: payload => payload.type === 'beta_deployed',
+    check(payload, errors) {
+      for (const field of ['deployed_sha', 'build_identifier', 'build_url', 'beta_url']) {
+        if (!isNonEmptyString(payload[field])) {
+          errors.push(`${field} must be a non-empty string for a "beta_deployed" message`);
+        }
+      }
+      checkPromotedReferences(payload, errors, 'beta_deployed');
+    },
+  },
+  {
     // Jenkins' pipeline-failure handler (setup/Jenkinsfile.template's
-    // `post { failure { ... } }`) -> gateway.js handlePipelineRetry, which
-    // reads ticket_key, build_url and build_number.
+    // `post { failure { ... } }`) -> gateway.js's relay -> core's
+    // recordPipelineFailure, which resolves the promoted pull requests to
+    // canonical work items and publishes the retry with the canonical id.
+    // The tracker key this message used to carry is gone with the regex
+    // that found it (V5.2 REQ-01), so there is no key field left to check;
+    // what the handler reads now is the reference list, the build URL and
+    // the build number.
     id: 'pipeline_retry',
     matches: payload => payload.type === 'pipeline_retry',
     check(payload, errors) {
-      if (!isNonEmptyString(payload.ticket_key)) {
-        errors.push('ticket_key must be a non-empty string for a "pipeline_retry" message');
-      }
-      // handlePipelineRetry defaults both to null, so they are optional; an
-      // empty string is what a broken `jq` interpolation produces, and that is
-      // worth naming rather than forwarding.
+      checkPromotedReferences(payload, errors, 'pipeline_retry');
+      // core defaults both to null, so they are optional; an empty string is
+      // what a broken `jq` interpolation produces, and that is worth naming
+      // rather than forwarding.
       for (const field of ['build_url', 'build_number']) {
         const value = payload[field];
         if (value !== undefined && value !== null && !isNonEmptyString(value) && typeof value !== 'number') {

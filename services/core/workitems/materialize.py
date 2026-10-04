@@ -187,13 +187,24 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
         # (gateway.js) always supplies one; materialize_decomposition's own
         # unit tests that omit parentWorkItemId never reach this path.
         #
-        # Both writes below are best-effort: this report exists to help a
+        # From v5.2 the COMMENT is not written here. Every rejection
+        # `core` makes leaves exactly one comment, in one format, appended
+        # by `command_consumer`'s handler after the permanent rejection and
+        # keyed `<messageId>:rejection` (canonical-delivery-state.md
+        # REQ-09, "Rejections, in every mode"); this module's own
+        # unresolved-artifact comment is restated there, with the same two
+        # ids in it. What stays here is the parent's status write, which no
+        # other path can make: in local mode it records
+        # `needs-clarification`, and in Jira mode `write_gate.route` sends
+        # the same call to the writer, which sets the Blocked flag — the
+        # flag Jira shows for all three of those statuses (REQ-09).
+        #
+        # The write below is best-effort: this report exists to help a
         # human find the parent, it must never replace `err` itself, which
         # is what command_consumer.py's dead-letter reason and
         # is_permanent_rejection need intact (the latter via err.code) to
-        # dead-letter the command once instead of retrying it forever. Each
-        # write gets its own try/except so a failure in one does not skip
-        # the other, and either failing just logs and moves on.
+        # dead-letter the command once instead of retrying it forever, so a
+        # failure just logs and moves on.
         #
         # transition_status's own story-detail gate
         # (store.py:443-451, `_assert_story_fields_present`) normally can't
@@ -204,17 +215,6 @@ def materialize_decomposition(message: dict, project: str, *, actor: str = 'refi
         # could start being refused too — the try/except below is what
         # keeps that refusal from masking `err` if that happens.
         if parent_work_item_id:
-            try:
-                store.append_comment(
-                    parent_work_item_id, actor,
-                    f'[system] Subtask {err.subtask_id} could not be created: {err.artifact_error}. '
-                    'No subtask was created for it; fix the reference and retry the decomposition.',
-                )
-            except Exception:  # noqa: BLE001 - best-effort report; `err` below is what must propagate
-                logger.warning(
-                    'materialize_decomposition: could not append the unresolved-artifact comment to '
-                    'parent %s for subtask %s', parent_work_item_id, err.subtask_id, exc_info=True,
-                )
             try:
                 store.transition_status(
                     parent_work_item_id, 'needs-clarification', actor=actor, origin=write_gate.Origins.DIRECT,

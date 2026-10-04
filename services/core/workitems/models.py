@@ -218,6 +218,14 @@ class WorkItemArtifact(models.Model):
         db_table = 'work_item_artifact'
         indexes = [
             models.Index(fields=['work_item'], name='idx_work_item_artifact_item'),
+            # canonical-delivery-state.md REQ-02 — the reverse lookup. V4's
+            # only index on this table is by `work_item`, which answers
+            # "what did this item produce"; the resolver asks the opposite
+            # question, "which item produced this commit or pull request",
+            # and Jenkins knows only the reference. Without this index that
+            # query is a sequential scan of every association row AND every
+            # REQ-19 completion marker sharing the column.
+            models.Index(fields=['artifact_type', 'reference'], name='idx_work_item_artifact_ref'),
         ]
 
     def __str__(self) -> str:
@@ -469,3 +477,87 @@ class WebhookFailure(models.Model):
 
     def __str__(self) -> str:
         return f'{self.reason} ({self.external_key or self.work_item_id})'
+
+
+class BetaDeploymentRecord(models.Model):
+    """canonical-delivery-state.md REQ-01 — `recordBetaDeployment`'s own
+    deduplication record, written only once its handler's last step has
+    completed. The gateway deduplicates by `messageId` alone
+    (`gateway.js`'s `idempotency.once`), so a second `beta_deployed`
+    message for the same deployment under a fresh `messageId` would
+    otherwise re-post evidence and re-transition. The deployed SHA and the
+    build identifier together are what identify one deployment, so that
+    pair is the unique key — enforced by the database, not by a read-then-
+    write check (`uq_beta_deployment_sha_build` below).
+
+    A redelivery of the *same* message runs its own incomplete steps
+    instead (REQ-09 "Redelivery", `JiraWriteCompletion`): this table says
+    "this deployment is fully applied", the completion records say "this
+    step of this message is done"."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.TextField()
+    deployed_sha = models.TextField()
+    build_identifier = models.TextField()
+    build_url = models.TextField(null=True, blank=True)
+    beta_url = models.TextField(null=True, blank=True)
+    # The gateway envelope's own messageId, which the relay carries as the
+    # command's sourceMessageId (REQ-01) — recorded for an operator tracing
+    # one deployment back to the Jenkins build that published it.
+    source_message_id = models.TextField(null=True, blank=True)
+    work_item_ids = models.JSONField(default=list)
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'beta_deployment_record'
+        constraints = [
+            models.UniqueConstraint(fields=['deployed_sha', 'build_identifier'],
+                                    name='uq_beta_deployment_sha_build'),
+        ]
+        indexes = [
+            models.Index(fields=['recorded_at'], name='idx_beta_deployment_recorded'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.project} {self.deployed_sha} ({self.build_identifier})'
+
+
+class JiraWriteCompletion(models.Model):
+    """canonical-delivery-state.md REQ-09 "Redelivery" — the outbound
+    writer's per-step completion record. Keyed on the command or event's
+    `messageId` (what the routing layer calls the `completion_key`), the
+    work item, and the step; `completed_at` is set **after** the Jira call
+    succeeds, never before, because a claim taken first turns a transient
+    Jira failure into a lost write.
+
+    A row with `completed_at IS NULL` is *registered*, not complete: story
+    intake's comment steps are the one case registered ahead of their work,
+    so `_handle_story_created`'s early return on redelivery knows which
+    comment steps that `messageId` owes. A registered step is not skipped.
+
+    Kept at least as long as dead letters (30 days, `streams.py`'s
+    `trim_dead_letters` default), so a replayed dead letter still finds its
+    own completion record."""
+
+    RETENTION_DAYS = 30
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    completion_key = models.TextField()
+    work_item_id = models.UUIDField()
+    step = models.TextField()
+    registered_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'jira_write_completion'
+        constraints = [
+            models.UniqueConstraint(fields=['completion_key', 'work_item_id', 'step'],
+                                    name='uq_jira_write_completion_step'),
+        ]
+        indexes = [
+            models.Index(fields=['registered_at'], name='idx_jira_write_completion_age'),
+        ]
+
+    def __str__(self) -> str:
+        state = 'complete' if self.completed_at else 'registered'
+        return f'{self.completion_key}/{self.work_item_id}/{self.step} ({state})'

@@ -91,14 +91,15 @@ consumer half: the `core` consumer group on that same stream.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from typing import Any, Callable, Optional
 
 from django.db import transaction
 from django.utils import timezone
 
-from . import jira_interpret, project_config, registry, status_vocabulary, store, write_gate
-from .models import WebhookFailure, WorkItem, WorkItemReleaseDetail, WorkItemStoryDetail
+from . import jira_interpret, jira_writer, project_config, registry, status_vocabulary, store, write_gate
+from .models import ProjectStatusConfig, WebhookFailure, WorkItem, WorkItemReleaseDetail, WorkItemStoryDetail
 from .streams import create_consumer
 
 WEBHOOK_GROUP = 'core'
@@ -136,15 +137,112 @@ DEFAULT_JIRA_STATUS_MAP = {
 }
 
 
-def jira_status_to_canonical(project: str, jira_status_name: str) -> str:
-    """Per-project configured mapping first (ProjectStatusConfig rows,
-    covering both minimum-set overrides and custom statuses — this mapping does
-    not distinguish the two for mapping purposes), falling back to the
-    built-in default map for a project that hasn't configured its own."""
-    for row in project_config.get_custom_statuses(project):
-        if row['jira_status_name'] == jira_status_name:
-            return row['status']
-    return DEFAULT_JIRA_STATUS_MAP.get(jira_status_name, jira_status_name)
+def jira_status_to_canonical(project: str, jira_status_name: str) -> Optional[str]:
+    """**The one inbound status map, chosen PER PROJECT**
+    (canonical-delivery-state.md REQ-09, "A status write to any other
+    status"; Shovel Ready Pass 8, answer 1.1), in the order
+    `canonical-work-model.md` REQ-11's resolution records: a project with
+    `ProjectStatusConfig` rows is mapped by its rows ALONE, and
+    `DEFAULT_JIRA_STATUS_MAP` maps a project with none.
+
+    Returns None when the project's map does not name `jira_status_name` —
+    including a Jira status only `DEFAULT_JIRA_STATUS_MAP` names, for a
+    project that has rows. There is then no canonical status to record, and
+    the caller records none (`_apply_validated_status_change`).
+
+    `jira_writer.canonical_to_jira_status` is this function's inverse, and
+    the writer calls this one for the forward direction rather than keeping
+    a second copy: the two have to agree on which map a project uses, and
+    the only way to guarantee that is for there to be one map.
+
+    **Two behaviours changed at v5.2**, both because this function was
+    consulted as though it were per-project when it was not:
+
+      - it no longer falls back to `DEFAULT_JIRA_STATUS_MAP` for a project
+        that has declared rows. Up to v5.1 a project that declared one row
+        still inherited the whole default map, so a webhook moving an issue
+        to a default-map name the project had deliberately not declared
+        changed the canonical status anyway;
+      - it no longer falls through to the raw `jira_status_name`. That
+        passthrough made an unmapped status indistinguishable from a
+        declared one until `status_vocabulary.validate_status` rejected it
+        one layer later, which is a rejection about the canonical vocabulary
+        reported as though the transition had been attempted.
+
+    Rows are read in id order so a tie — two rows naming the same Jira
+    status — resolves to the lowest-id row, the same rule the inverse
+    direction follows. `project_config.get_custom_statuses` is not used
+    here because it returns no id and imposes no ordering, and the tie rule
+    needs both."""
+    rows = list(
+        ProjectStatusConfig.objects.filter(project=project)
+        .order_by('id').values('status', 'jira_status_name')
+    )
+    if rows:
+        for row in rows:
+            if row['jira_status_name'] == jira_status_name:
+                return row['status']
+        return None
+    return DEFAULT_JIRA_STATUS_MAP.get(jira_status_name)
+
+
+# canonical-delivery-state.md REQ-09, "Canonical events with a Jira side
+# effect": story intake's comments are not part of the `story_intake` event.
+# This module appends them through the comment path AFTER its handler's
+# `transaction.atomic()` block exits, because in Jira mode that path posts to
+# Jira in-process and a Jira call must not run inside an open transaction.
+# The texts are V1's own, from `e39e9ab`'s `handlers.js` — `:142` (the
+# acknowledgement), `:153-156` (missing fields) and `:245-248` (the reblock).
+# Each is a step keyed `<messageId>:<name>` on the webhook envelope.
+STORY_INTAKE_COMMENT_AUTHOR = 'system'
+STORY_INTAKE_ACKNOWLEDGEMENT = 'Ticket received. Assigned to Refinement Agent for decomposition.'
+
+
+def _missing_fields_list(missing: list[str]) -> str:
+    return '\n'.join(f'  - {label}' for label in missing)
+
+
+def _missing_fields_comment(missing: list[str]) -> str:
+    return (
+        'Story is missing required fields and cannot be refined until they are filled in:\n\n'
+        f'{_missing_fields_list(missing)}\n\n'
+        'Please complete these fields and move the ticket back to Backlog to retry.'
+    )
+
+
+def _reblock_comment(missing: list[str]) -> str:
+    return (
+        'Story is still missing required fields and cannot be refined until they are filled in:\n\n'
+        f'{_missing_fields_list(missing)}\n\n'
+        'Please complete these fields and clear the Blocked field again to retry.'
+    )
+
+
+def _register_comment_steps(message_id: Optional[str], work_item_id, names) -> None:
+    """Registered inside the handler's own atomic block, ahead of the work
+    — the one case REQ-09's "Redelivery" allows that, because
+    `_handle_story_created`'s early return on a redelivery has no other way
+    to know which comment steps this `messageId` owes. A registered step is
+    not complete and is not skipped."""
+    if not message_id:
+        return
+    for name in names:
+        jira_writer.register_step(f'{message_id}:{name}', work_item_id, jira_writer.STEP_COMMENT)
+
+
+def _post_comment_steps(work_item_id, message_id: Optional[str], steps) -> None:
+    """`steps` is [(name, text), ...]. Appended after the caller's atomic
+    block has exited, through the one comment path, each keyed
+    `<messageId>:<name>` so a redelivered webhook posts it once. Recorded
+    complete only after it posts (local mode: the row's own
+    `source_message_id` dedupes it; Jira mode: the writer's completion
+    record does)."""
+    for name, text in steps:
+        store.append_comment(
+            work_item_id, STORY_INTAKE_COMMENT_AUTHOR, text,
+            source_message_id=f'{message_id}:{name}' if message_id else None,
+            origin=write_gate.Origins.DIRECT,
+        )
 
 
 def _publish_side_effect(project: str, work_item_id, jira_issue_key: str, kind: str, detail: dict) -> None:
@@ -226,7 +324,47 @@ def _sync_release_detail(item: WorkItem, fields: dict) -> None:
 
 
 def _apply_validated_status_change(item: WorkItem, jira_status_name: str, issue_key: str, envelope: dict) -> None:
+    """A Jira status change, applied through the project's own inbound map.
+
+    A Jira status the project's map does not name has no canonical status
+    to record, so **no canonical status change is made** (REQ-09's
+    Acceptance: "a Jira-mode webhook moving an issue to a Jira status that
+    only `DEFAULT_JIRA_STATUS_MAP` names changes no canonical status"). It
+    is recorded as one webhook failure naming the work item and that Jira
+    status, and nothing is raised, so the webhook is acknowledged as any
+    other recorded-not-applied event is.
+
+    One failure row rather than a generic event, because that is what this
+    path already produced for an unnamed status up to v5.1 — the raw
+    passthrough reached `status_vocabulary.validate_status`, which rejected
+    it and landed here — and losing it would quietly remove the one place
+    an operator sees that a project's status configuration does not cover
+    what its Jira workflow offers. The reason now says that, instead of
+    naming the canonical vocabulary. It is symmetric with the outbound
+    side, where a push to a status the same map does not cover is recorded
+    as one webhook failure too (§4)."""
     target_status = jira_status_to_canonical(item.project, jira_status_name)
+    if target_status is None:
+        record_failure(
+            item.project, item.id, issue_key,
+            f'Jira status "{jira_status_name}" is not mapped to a canonical status for this project — '
+            'no canonical status was recorded',
+            {'jiraStatusName': jira_status_name, 'envelopeId': envelope.get('messageId')},
+        )
+        return
+
+    _apply_validated_status_change_to(
+        item, target_status, issue_key, envelope, jira_status_name=jira_status_name,
+    )
+
+
+def _apply_validated_status_change_to(item: WorkItem, target_status: str, issue_key: str, envelope: dict,
+                                       *, jira_status_name: Optional[str] = None) -> None:
+    """The same validated-write-or-record-a-failure path, given the
+    CANONICAL target directly rather than a Jira status name — what the
+    Blocked flag's set branch needs, since the flag is not a Jira status
+    and maps to `needs-clarification` by REQ-09's rule rather than through
+    the project's status map."""
     try:
         store.transition_status(item.id, target_status, actor=f'jira-webhook:{issue_key}',
                                  origin=write_gate.Origins.JIRA_WEBHOOK)
@@ -249,26 +387,52 @@ def _handle_story_created(project: str, issue: dict, issue_key: str, envelope: d
     display_name = fields.get('summary') or issue_key
     description = jira_interpret.adf_to_text(fields.get('description')).strip() or None
     status = 'proposed' if missing else 'ready'
+    message_id = envelope.get('messageId')
+
+    # This delivery's comment steps, in the order V1 posted them: the
+    # acknowledgement always, then the missing-fields block when the
+    # five-field gate refuses the Story (the "accepted with missing fields"
+    # branch posts both). Derived from this envelope's own payload, so a
+    # redelivery of the same message derives the same texts.
+    steps = [('acknowledgement', STORY_INTAKE_ACKNOWLEDGEMENT)]
+    if missing:
+        steps.append(('missing-fields', _missing_fields_comment(missing)))
 
     with transaction.atomic():
-        if WorkItem.objects.filter(external_key=issue_key).exists():
-            return  # redelivery of an issue_created webhook already materialized — idempotent no-op.
+        existing = WorkItem.objects.filter(external_key=issue_key).first()
+        if existing is not None:
+            # Already materialized. Up to v5.1 this was a bare no-op; from
+            # v5.2 it first leaves this block and runs only the INCOMPLETE
+            # comment steps a previous delivery of this same `messageId`
+            # registered (REQ-09, "Canonical events with a Jira side
+            # effect"), so a comment whose post failed is posted on
+            # redelivery. A *first* delivery for a Story whose key already
+            # has a row — one REQ-10's `connect_jira` pushed — registered
+            # none, so it posts no story-intake comment at all.
+            pending = set(jira_writer.pending_comment_steps(message_id, existing.id)) if message_id else set()
+            resume = [(name, text) for name, text in steps if name in pending]
+            work_item_id = existing.id
+        else:
+            item = store.create_work_item(
+                {
+                    'id': uuid.uuid4(), 'project': project, 'type': 'story',
+                    'displayName': display_name, 'description': description,
+                    'status': status, 'assigneeAgentId': 'refinement-agent',
+                    'externalKey': issue_key, 'storyDetail': detail,
+                },
+                actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
+            )
+            # `ok` distinguishes the acknowledgement comment from the
+            # missing-fields-block comment — the same choice V1's
+            # handleStoryCreated made before posting. The writer consumes
+            # this side effect for the Agent field and the Blocked flag;
+            # the comments are appended below, not carried on the event.
+            _publish_side_effect(project, item.id, issue_key, 'story_intake', {'ok': not missing, 'missing': missing})
+            _register_comment_steps(message_id, item.id, [name for name, _ in steps])
+            work_item_id = item.id
+            resume = steps
 
-        item = store.create_work_item(
-            {
-                'id': uuid.uuid4(), 'project': project, 'type': 'story',
-                'displayName': display_name, 'description': description,
-                'status': status, 'assigneeAgentId': 'refinement-agent',
-                'externalKey': issue_key, 'storyDetail': detail,
-            },
-            actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
-        )
-        # `ok` distinguishes the acknowledgement comment from the
-        # missing-fields-block comment — the same choice V1's
-        # handleStoryCreated made before posting. Neither comment is posted
-        # today: this `story_intake` side effect has no consumer until
-        # v5.2's outbound writer decides between the two from `ok`.
-        _publish_side_effect(project, item.id, issue_key, 'story_intake', {'ok': not missing, 'missing': missing})
+    _post_comment_steps(work_item_id, message_id, resume)
 
 
 # ---------------------------------------------------------------------------
@@ -276,23 +440,78 @@ def _handle_story_created(project: str, issue: dict, issue_key: str, envelope: d
 # custom field going from truthy to falsy.
 # ---------------------------------------------------------------------------
 
+# The three canonical statuses Jira shows as one Blocked flag. The writer
+# pushes each of them as `set_blocked_field(true)` (REQ-09, "A status write
+# to `needs-clarification`, `failed` or `cancelled`"), so the flag coming
+# back is read as `needs-clarification` — which is why `failed` and
+# `cancelled` are recorded as `needs-clarification` in Jira mode (§4).
+_BLOCKED_FLAG_BASELINES = ('needs-clarification', 'failed', 'cancelled')
+
+
+def _handle_blocked_flag_set(project: str, issue_key: str, work_item_id, envelope: dict) -> None:
+    """canonical-delivery-state.md REQ-09 — the Blocked field BECOMING SET
+    is a validated transition to `needs-clarification`, origin
+    JIRA_WEBHOOK, in Jira mode only (this module is reached for no other
+    mode). Up to v5.1 nothing in the platform set the flag, so there was no
+    "became blocked" webhook to react to; from v5.2 the writer sets it for
+    every machine write of those three statuses, and a person can set it by
+    hand, and both have to arrive here.
+
+    Two cases keep their status: a work item in `proposed` — story intake's
+    missing-fields block, which flags the ticket precisely to leave it
+    `proposed` — and one already in one of the three statuses the flag
+    stands for, which is the write having already taken effect."""
+    if work_item_id is None:
+        _record_generic_event(project, None, issue_key, envelope, {'field': 'blocked', 'set': True})
+        return
+
+    item = store.get_work_item(work_item_id)
+    if not item:
+        return
+
+    baseline = status_vocabulary.baseline_of(
+        item.status, project_config.get_custom_statuses(item.project),
+    )
+    if baseline == 'proposed' or baseline in _BLOCKED_FLAG_BASELINES:
+        _record_generic_event(project, work_item_id, issue_key, envelope,
+                               {'field': 'blocked', 'set': True, 'statusKept': item.status})
+        return
+
+    _apply_validated_status_change_to(item, 'needs-clarification', issue_key, envelope)
+
+
+def _handle_blocked_flag_cleared_status(item: WorkItem, issue: dict, issue_key: str, envelope: dict) -> None:
+    """REQ-09 — "When the flag is cleared, the work item first returns to
+    the status its current Jira status maps to, and then the existing
+    blocked-cleared handling runs." The webhook's `issue` snapshot carries
+    the ticket's current status, which is where the item belongs now that
+    the flag no longer overrides it."""
+    jira_status_name = ((issue.get('fields') or {}).get('status') or {}).get('name')
+    if not jira_status_name:
+        return
+    _apply_validated_status_change(item, jira_status_name, issue_key, envelope)
+
+
 def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work_item_id, change: dict,
                                   envelope: dict) -> None:
     became_unblocked = bool(change.get('from')) and not change.get('to')
-    if not became_unblocked:
-        # V1 never had a "became blocked" webhook-driven handler either —
-        # Blocked was only ever SET by ScrumMaster's own side effects (a
-        # missing-fields or assignment-rejection comment). From v5.1 no AI
-        # Gang component sets Jira's Blocked field at all: ScrumMaster's
-        # write call sites are retired (REQ-04), and v5.2's outbound writer
-        # is the first thing that will set it again. Either way this is not
-        # a human action this module needs to react to.
+    became_blocked = (not change.get('from')) and bool(change.get('to'))
+
+    if became_blocked:
+        _handle_blocked_flag_set(project, issue_key, work_item_id, envelope)
         return
+    if not became_unblocked:
+        return  # neither direction — nothing this module interprets.
 
     if work_item_id is None:
         _record_generic_event(project, None, issue_key, envelope, {'field': 'blocked', 'cleared': True})
         return
 
+    item = store.get_work_item(work_item_id)
+    if not item:
+        return
+
+    _handle_blocked_flag_cleared_status(item, issue, issue_key, envelope)
     item = store.get_work_item(work_item_id)
     if not item:
         return
@@ -330,8 +549,13 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
                 'edgeCases': story_detail.edge_cases if story_detail else None,
                 'outOfScope': story_detail.out_of_scope if story_detail else None,
             })
+            message_id = envelope.get('messageId')
             with transaction.atomic():
                 _publish_side_effect(project, item.id, issue_key, 'story_intake', {'ok': False, 'missing': missing, 'reblock': True})
+                _register_comment_steps(message_id, item.id, ['reblock'])
+            # Appended after the block, like story intake's own comments and
+            # for the same reason (REQ-09, "One comment path").
+            _post_comment_steps(item.id, message_id, [('reblock', _reblock_comment(missing))])
         return
 
     # Everything else (a dev-agent ticket blocked mid-implementation): no
@@ -348,12 +572,32 @@ def _handle_blocked_field_change(project: str, issue: dict, issue_key: str, work
 # Release scope carve-out.
 # ---------------------------------------------------------------------------
 
+# `[<author>] <body>` — the prefix the writer posts so an author survives
+# the round trip (REQ-09, "The author survives the round trip"). Stripped
+# back off here, and ONLY for a comment Jira says came from the configured
+# integration account, so a person who happens to start a comment with a
+# bracketed word keeps their own author.
+_AUTHORED_PREFIX = re.compile(r'^\[([^\]\n]+)\]\s(.*)$', re.DOTALL)
+
+
+def _author_round_trip(author: str, text: str, comment: dict) -> tuple[str, str]:
+    integration_email = (os.environ.get('JIRA_EMAIL') or '').strip()
+    author_email = ((comment.get('author') or {}).get('emailAddress') or '').strip()
+    if not integration_email or author_email.lower() != integration_email.lower():
+        return author, text
+    match = _AUTHORED_PREFIX.match(text)
+    if not match:
+        return author, text
+    return match.group(1), match.group(2)
+
+
 def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work_item_id, envelope: dict) -> None:
     comment = body.get('comment') or {}
     work_item_id = resolve_work_item_id(issue_key)
     author = (comment.get('author') or {}).get('displayName') or 'Unknown'
     text = jira_interpret.adf_to_text(comment.get('body')).strip()
     comment_id = comment.get('id')
+    author, text = _author_round_trip(author, text, comment)
 
     if work_item_id is None:
         _record_generic_event(project, None, issue_key, envelope, {'event': 'comment', 'author': author, 'body': text})
@@ -370,10 +614,15 @@ def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work
                                 'ignored': 'work item project not in Jira mode'})
         return
 
+    # Origin JIRA_WEBHOOK, so `write_gate.route` answers `record`: this is
+    # the write path a Jira comment takes INTO `core`, in Jira mode as in
+    # local mode, and the same `store.append_comment` the writer's own
+    # posted comment comes back through (REQ-09, "One comment path").
     with transaction.atomic():
         store.append_comment(
             work_item_id, author, text,
             source_message_id=f'jira-comment:{issue_key}:{comment_id}' if comment_id else None,
+            origin=write_gate.Origins.JIRA_WEBHOOK,
         )
 
 

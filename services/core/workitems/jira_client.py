@@ -10,8 +10,10 @@ workaround and does not port it. The ported `createSubtaskForProposal`
 therefore takes no `proposal_id` and sets no label.
 
 `jira.js` itself has no retry, timeout, backoff or interceptor logic, and
-this port adds none. A per-call timeout is left for v5.2 to set alongside
-the client's first caller.
+this port adds none beyond the one value it left to v5.2: `TIMEOUT_SECONDS`,
+the per-call timeout `_request` now applies, set alongside the client's first
+caller (canonical-delivery-state.md §4). A timeout is a transient failure —
+the stream redelivers the message, or the caller receives it as an error.
 
 This module is the only code in the running platform that calls Jira on a
 work item's behalf. In v5.1 nothing calls it at runtime — it is exercised
@@ -45,6 +47,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 API_PATH = 'rest/api/3'
+
+# canonical-delivery-state.md §4 — "The writer sets the one value the client
+# leaves to this stage: a 30-second per-call timeout on `_request`." Without
+# it a hung Jira leaves a consumer's handler running for the process's life,
+# holding its stream entry pending and its database connection open.
+TIMEOUT_SECONDS = 30
 
 # The placeholder values services/scrummaster/.env.example used to ship
 # (jira.js:20-24). Matching them literally is a fact about that shipped
@@ -82,8 +90,10 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None,
               json: dict[str, Any] | None = None) -> Any:
     """The one function that talks to Jira. Every ported function below
     calls through here — mirrors jira.js's single `client` axios instance
-    (baseURL + basic auth + JSON content type), with no timeout, retry,
-    backoff or interceptor, same as the original."""
+    (baseURL + basic auth + JSON content type), with no retry, backoff or
+    interceptor, same as the original, and with the per-call timeout
+    `TIMEOUT_SECONDS` above (the one thing jira.js had none of that this
+    port is asked to add)."""
     response = requests.request(
         method,
         f'{_base_url()}{path}',
@@ -91,6 +101,7 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None,
         headers={'Content-Type': 'application/json'},
         params=params,
         json=json,
+        timeout=TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     return response.json() if response.content else None
@@ -293,8 +304,18 @@ def set_blocked_field(key: str, blocked: bool) -> None:
 
 # --- transitionIssue (jira.js:172-181) --------------------------------------
 
-def transition_issue(key: str, status_name: str) -> None:
-    """Transition an issue to a named status."""
+def transition_issue(key: str, status_name: str) -> bool:
+    """Transition an issue to a named status. Returns True when the
+    transition was made, False when the issue's workflow offers no
+    transition to that status from where it is.
+
+    jira.js returned nothing and logged a warning, which made a missing
+    transition indistinguishable from a successful one. v5.2's writer has to
+    tell them apart — a missing transition is an outcome it records, not a
+    success (canonical-delivery-state.md REQ-09, "A missing transition is an
+    outcome, not a success") — so the skip is reported by this return value.
+    The warning stays: a caller that ignores the result behaves exactly as
+    it did."""
     data = _request('GET', f'/issue/{key}/transitions')
     transition = next(
         (t for t in (data.get('transitions') or []) if (t.get('to') or {}).get('name') == status_name),
@@ -302,8 +323,9 @@ def transition_issue(key: str, status_name: str) -> None:
     )
     if not transition:
         logger.warning('[jira] Transition to "%s" not found for %s — skipping', status_name, key)
-        return
+        return False
     _request('POST', f'/issue/{key}/transitions', json={'transition': {'id': transition['id']}})
+    return True
 
 
 # --- createIssue (jira.js:183-205) ------------------------------------------

@@ -18,7 +18,10 @@ import uuid
 from django.test import Client
 
 from workitems import project_config, store, views as views_module, write_gate
-from workitems.models import AccessLog, OutboxEvent
+from workitems.models import AccessLog, OutboxEvent, WorkItemComment
+
+from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
+from tests.jira_fixture import posted_comment_texts
 
 PROJECT = 'test-project'
 
@@ -47,17 +50,70 @@ def test_get_project_mode_reports_local_by_default(clean_db):
     assert body['mode'] == 'local'
 
 
-def test_admin_transition_rejected_for_jira_mode_project(clean_db):
+def test_admin_transition_for_a_jira_mode_project_posts_and_returns_202(clean_db, permissive_jira):
+    """canonical-delivery-state.md REQ-09, "The external API is a machine
+    caller" — this endpoint used to be refused with WRITE_GATE_REJECTED
+    (409). From v5.2 `route` pushes it: the equivalent Jira write is made
+    in-process (the view holds no transaction), the response is 202 with
+    the posted result, and no canonical row changes until Jira's webhook
+    returns."""
     client = Client()
     item_id = uuid.uuid4()
-    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X'})
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'X', 'externalKey': 'TP-800'})
     project_config.set_mode(PROJECT, 'jira')
+
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-800/transitions')] = \
+        lambda query, body: (200, {'transitions': [{'id': '31', 'to': {'name': 'In Progress'}}]})
+    permissive_jira.routes[('POST', '/rest/api/3/issue/TP-800/transitions')] = \
+        lambda query, body: (200, None)
 
     res = client.post(f'/admin/work-items/{item_id}/transition', data=json.dumps({'status': 'in-progress'}),
                        content_type='application/json')
-    assert res.status_code == 409
-    body = res.json()
-    assert body['error'] == 'WRITE_GATE_REJECTED'
+    assert res.status_code == 202, res.content
+    assert res.json() == {'posted': True, 'workItemId': str(item_id), 'deferred': False}
+    assert store.get_work_item(item_id).status == 'proposed'
+
+
+def test_an_external_api_transition_whose_jira_post_fails_returns_an_error_and_records_nothing(
+        clean_db, permissive_jira):
+    """REQ-09's acceptance: "in Jira mode an external-API transition or
+    comment whose Jira post fails returns an error to its caller and
+    records nothing, its view holding no transaction." The fixture answers
+    the transition POST with a 500."""
+    client = Client()
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'X', 'externalKey': 'TP-801'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-801/transitions')] = \
+        lambda query, body: (200, {'transitions': [{'id': '31', 'to': {'name': 'In Progress'}}]})
+    permissive_jira.routes[('POST', '/rest/api/3/issue/TP-801/transitions')] = \
+        lambda query, body: (500, {'errorMessages': ['Jira is down']})
+
+    res = client.post(f'/admin/work-items/{item_id}/transition', data=json.dumps({'status': 'in-progress'}),
+                       content_type='application/json')
+    assert res.status_code >= 400
+    assert store.get_work_item(item_id).status == 'proposed'
+
+
+def test_admin_add_comment_for_a_jira_mode_project_posts_and_returns_202(clean_db, permissive_jira):
+    """The one comment path from the external API (REQ-09): the comment is
+    posted with its `[<author>] ` prefix, 202 is returned with no row, and
+    the comment reaches `core` on its own `comment_created` webhook."""
+    client = Client()
+    item_id = uuid.uuid4()
+    store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'X', 'externalKey': 'TP-802'})
+    project_config.set_mode(PROJECT, 'jira')
+
+    res = client.post(f'/admin/work-items/{item_id}/comments', data=json.dumps({'body': 'Deployed.'}),
+                       content_type='application/json', HTTP_X_ACTOR='jenkins')
+    assert res.status_code == 202, res.content
+    assert res.json()['id'] is None
+    assert posted_comment_texts() == ['[jenkins] Deployed.']
+    assert WorkItemComment.objects.filter(work_item_id=item_id).count() == 0
 
 
 def test_admin_create_endpoint_uses_external_api_origin(clean_db, monkeypatch):
