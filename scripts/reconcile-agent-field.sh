@@ -26,7 +26,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 HQ_ENV="${HQ_ENV:-$HOME/ai-gang/.env}"
-SM_ENV="$REPO_ROOT/services/scrummaster/.env"
+# canonical-delivery-state.md REQ-10, "The field ids reach `core`" — the
+# Agent field id is read back from the platform .env, where
+# create-jira-fields.sh now writes it and scripts/startup/derive-env.sh
+# reads it (OQ-09; v5.1 BUGFIXES BF-03).
+FIELD_ID_ENV="$HQ_ENV"
 CATALOG_PATH="$REPO_ROOT/services/scrummaster/config/agents.json"
 
 if [[ -f "$HQ_ENV" ]]; then
@@ -38,8 +42,8 @@ fi
 : "${JIRA_EMAIL:?JIRA_EMAIL is not set. Check $HQ_ENV}"
 : "${JIRA_TOKEN:?JIRA_TOKEN is not set. Check $HQ_ENV}"
 
-AGENT_FIELD_ID=$(grep -E '^JIRA_AGENT_FIELD_ID=customfield_' "$SM_ENV" 2>/dev/null | cut -d= -f2 || true)
-: "${AGENT_FIELD_ID:?JIRA_AGENT_FIELD_ID not found in $SM_ENV — run scripts/create-jira-fields.sh first}"
+AGENT_FIELD_ID=$(grep -E '^JIRA_AGENT_FIELD_ID=customfield_' "$FIELD_ID_ENV" 2>/dev/null | cut -d= -f2 || true)
+: "${AGENT_FIELD_ID:?JIRA_AGENT_FIELD_ID not found in $FIELD_ID_ENV — run scripts/create-jira-fields.sh first}"
 
 API="$JIRA_URL/rest/api/3"
 AUTH="$JIRA_EMAIL:$JIRA_TOKEN"

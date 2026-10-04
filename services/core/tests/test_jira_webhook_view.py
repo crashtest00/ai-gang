@@ -27,6 +27,7 @@ from workitems import project_config, registry
 from workitems.models import WorkItem
 from workitems.webhook_consumer import handle_webhook_envelope
 
+from tests.jira_fixture import jira_instance, permissive_jira  # noqa: F401 - pytest fixtures, used by name
 from tests.wait_support import wait_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -422,3 +423,120 @@ def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_e
     external_keys = list(WorkItem.objects.filter(project=project).values_list('external_key', flat=True))
     assert sorted(external_keys) == sorted(f'KMI-{i}' for i in range(total))
     assert len(external_keys) == len(set(external_keys)), 'no issue key must have been processed twice'
+
+
+# ---------------------------------------------------------------------------
+# REQ-10: routing by jira_project_key, and REQ-11: an issuelink_created body
+# ---------------------------------------------------------------------------
+
+def test_req10_a_webhook_is_routed_by_jira_project_key_before_the_project_name(
+        clean_db, monkeypatch, redis_client):
+    """canonical-delivery-state.md REQ-10: "`views.py`'s `jira_webhook` MUST
+    route a webhook whose `issue.fields.project.key` equals a
+    `ProjectConfig.jira_project_key` to that row's project before falling
+    back to the project name, because a Jira project's name need not match
+    its AI Gang project's."
+
+    Up to v5.1 the name was the only route, so a Jira project named anything
+    else reached a project this service had never heard of, and every
+    webhook for it was recorded as an untracked event for ever."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+
+    payload = jira_payload('TP-77')
+    payload['issue']['fields']['project'] = {'key': 'TP', 'name': 'Totally Different Name'}
+    resp = Client().post('/webhooks/jira', data=json.dumps(payload), content_type='application/json')
+
+    assert resp.status_code == 200
+    entries = redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')
+    assert len(entries) == 1, 'routed by its key, onto the AI Gang project\'s own stream'
+    assert json.loads(entries[0][1]['data'])['project'] == registry.normalize_project_name(PROJECT)
+    assert redis_client.xrange(registry.webhook_stream_name('Totally Different Name'), '-', '+') == []
+
+
+def test_req10_a_webhook_whose_key_matches_no_row_still_falls_back_to_the_project_name(
+        clean_db, monkeypatch, redis_client):
+    """The fallback is unchanged for every project that has no row — which
+    is every local-mode project, since a row is written when its mode or
+    key is."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(jira_payload('TP-78')),
+                          content_type='application/json')
+
+    assert resp.status_code == 200
+    assert len(redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')) == 1
+
+
+def _issuelink_body(link_id='10500', source_id='10001', destination_id='10002'):
+    """Jira's own `issuelink_created` body: it "carries `issueLink` and no
+    `issue`" (REQ-11), which is exactly why this view refused it up to
+    v5.1."""
+    return {
+        'webhookEvent': 'issuelink_created',
+        'issueLink': {
+            'id': link_id,
+            'sourceIssueId': source_id,
+            'destinationIssueId': destination_id,
+            'issueLinkType': {'id': '10001', 'name': 'Blocks',
+                               'outwardName': 'blocks', 'inwardName': 'is blocked by'},
+        },
+    }
+
+
+def test_req11_an_issuelink_created_body_is_accepted_and_routed_by_its_source_issue(
+        clean_db, monkeypatch, redis_client, jira_instance):  # noqa: F811
+    """REQ-11: "`views.py`'s `jira_webhook` MUST accept an
+    `issuelink_created` body, which carries `issueLink` and no `issue` ...
+    it reads `issueLink.sourceIssueId` with `get_issue` (Jira's
+    `/issue/{idOrKey}` takes an id), routes on that issue's project as it
+    routes an issue event, and enqueues the event keyed
+    `webhook:issuelink_created:<issueLink.id>`"."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    jira_instance.add_issue('TP-1')
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                          content_type='application/json')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'received': True, 'deduped': False}
+    entries = redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')
+    assert len(entries) == 1
+    envelope = json.loads(entries[0][1]['data'])
+    assert envelope['payload']['event'] == 'issuelink_created'
+    assert envelope['payload']['issue'] is None, 'the body carries none, and none is invented'
+    assert envelope['payload']['body']['issueLink']['id'] == '10500'
+    # Read with get_issue, by id — the source issue's own project is what
+    # routed it.
+    assert any(request['path'] == '/rest/api/3/issue/1' for request in jira_instance.handler.received)
+
+
+def test_req11_a_redelivered_issuelink_created_is_deduped_on_the_link_id(
+        clean_db, monkeypatch, redis_client, jira_instance):  # noqa: F811
+    """"enqueues the event keyed `webhook:issuelink_created:<issueLink.id>`"
+    — the link id is what Jira redelivers the same event with, and the body
+    carries no changelog id or issue key to key it on instead."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    jira_instance.add_issue('TP-1')
+    client = Client()
+
+    first = client.post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                         content_type='application/json')
+    second = client.post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                          content_type='application/json')
+
+    assert first.json()['deduped'] is False
+    assert second.json()['deduped'] is True
+    assert len(redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')) == 1
+
+
+def test_req11_an_issuelink_created_body_with_no_source_issue_is_refused(clean_db, monkeypatch):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    body = _issuelink_body()
+    del body['issueLink']['sourceIssueId']
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(body), content_type='application/json')
+
+    assert resp.status_code == 400

@@ -51,6 +51,49 @@ def set_mode(project: str, mode: str, *, jira_project_key: Optional[str] = None)
             row.save(update_fields=['mode', 'jira_project_key', 'updated_at'])
 
 
+class AlreadyJiraModeError(Exception):
+    """`set_jira_project_key` called for a project that is already in Jira
+    mode (canonical-delivery-state.md REQ-10). This is how `connect_jira`
+    refuses such a project WITHOUT reading the mode itself: the mode layer
+    raises, and the command reports it (REQ-09, "Where the mode is read is a
+    property, stated as a search"). A project found in Jira mode is
+    re-synced by running `disconnect_jira` and then `connect_jira`."""
+
+    code = 'VALIDATION_ERROR'
+
+
+def set_jira_project_key(project: str, jira_project_key: str) -> None:
+    """Records a project's Jira project key with the project STILL LOCAL
+    (canonical-delivery-state.md REQ-10). `set_mode` above writes the key
+    only together with a mode, and `connect_jira` needs the key recorded
+    before it pushes anything: the push creates Jira issues in that project,
+    and every create commits its key before the next, so a part-way failure
+    has to leave the key where a re-run will find it — while the project is
+    still local, so `core` keeps ignoring the Jira webhooks those creates
+    produce (v5.1's REQ-10).
+
+    Raises `AlreadyJiraModeError` for a project already in Jira mode, which
+    is the whole of `connect_jira`'s refusal of one."""
+    if not jira_project_key:
+        raise ValueError('set_jira_project_key requires a Jira project key')
+
+    with transaction.atomic():
+        row, created = ProjectConfig.objects.select_for_update().get_or_create(
+            project=project,
+            defaults={'mode': LOCAL, 'jira_project_key': jira_project_key, 'updated_at': timezone.now()},
+        )
+        if created:
+            return
+        if row.mode == JIRA:
+            raise AlreadyJiraModeError(
+                f'project "{project}" is already in Jira mode (key {row.jira_project_key}) — '
+                'run disconnect_jira first if you mean to re-sync it'
+            )
+        row.jira_project_key = jira_project_key
+        row.updated_at = timezone.now()
+        row.save(update_fields=['jira_project_key', 'updated_at'])
+
+
 def revert_to_local(project: str) -> None:
     """Switching from Jira mode back to local mode must be
     supported and must require no data reconciliation beyond re-enabling

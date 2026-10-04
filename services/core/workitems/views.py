@@ -23,7 +23,8 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from . import project_config, readstore, registry, relay, store, write_gate
+from . import jira_client, project_config, readstore, registry, relay, store, write_gate
+from .models import ProjectConfig
 from .envelope import Kind, build_envelope
 from .serializers import (
     serialize_work_item, serialize_work_item_full, serialize_work_item_with_associations,
@@ -98,6 +99,31 @@ def relay_health(client) -> dict:
     return {'component': 'outbox-relay', 'unpublishedCount': unpublished_count, 'oldestUnpublishedAgeMs': age_ms, 'status': status}
 
 
+# canonical-delivery-state.md REQ-11 — Jira's own link-creation event,
+# whose body carries `issueLink` and no `issue`.
+ISSUE_LINK_CREATED_EVENT = 'issuelink_created'
+
+
+def _route_webhook_project(jira_project_key, jira_project_name):
+    """The AI Gang project a Jira webhook belongs to.
+
+    canonical-delivery-state.md REQ-10: a webhook whose
+    `issue.fields.project.key` equals a `ProjectConfig.jira_project_key` is
+    routed to THAT ROW'S project, "before falling back to the project name,
+    because a Jira project's name need not match its AI Gang project's".
+    Up to v5.1 the name was the only route, so a Jira project named
+    anything else reached a project this service had never heard of and
+    every webhook for it was recorded as an untracked event.
+
+    Returns None when neither identifies a project, which is the 400 the
+    caller returns."""
+    if jira_project_key:
+        row = ProjectConfig.objects.filter(jira_project_key=jira_project_key).first()
+        if row is not None:
+            return row.project
+    return jira_project_name or jira_project_key or None
+
+
 @csrf_exempt
 @require_http_methods(['POST'])
 def jira_webhook(request):
@@ -124,19 +150,50 @@ def jira_webhook(request):
 
     event = body.get('webhookEvent')
     issue = body.get('issue')
-    if not event or not issue or not issue.get('key'):
-        return JsonResponse({'error': 'Missing webhookEvent or issue'}, status=400)
 
-    issue_fields = issue.get('fields') or {}
-    project_field = issue_fields.get('project') or {}
-    project_name = project_field.get('name') or project_field.get('key')
-    if not project_name:
-        return JsonResponse({'error': 'Missing issue.fields.project'}, status=400)
+    if event == ISSUE_LINK_CREATED_EVENT:
+        # canonical-delivery-state.md REQ-11 — this body "carries
+        # `issueLink` and no `issue`", which this view refused up to v5.1.
+        # The source issue is read with `get_issue` ("Jira's
+        # `/issue/{idOrKey}` takes an id") only to learn which Jira project
+        # the link is in, so the event can be routed and enqueued like any
+        # issue event; the pair itself is reconciled by the consumer, which
+        # reads each end's key for itself.
+        link = body.get('issueLink') or {}
+        source_issue_id = link.get('sourceIssueId')
+        if not link.get('id') or not source_issue_id:
+            return JsonResponse({'error': 'Missing issueLink.id or issueLink.sourceIssueId'}, status=400)
+        try:
+            source_issue = jira_client.get_issue(str(source_issue_id)) or {}
+        except Exception as err:
+            # Jira will retry a non-2xx, and the event is not lost.
+            print(f'[views] Could not read issueLink source issue {source_issue_id}: {err!r}')
+            return JsonResponse({'error': 'Failed to resolve the issue link\'s source issue'}, status=502)
+        project_name = _route_webhook_project(source_issue.get('project'), source_issue.get('projectName'))
+        if not project_name:
+            return JsonResponse({'error': 'Missing issueLink source issue project'}, status=400)
+        dedupe_key = f'webhook:issuelink_created:{link["id"]}'
+        subject = f'issue link {link["id"]}'
+        payload = {'event': event, 'issue': None, 'body': body}
+    else:
+        if not event or not issue or not issue.get('key'):
+            return JsonResponse({'error': 'Missing webhookEvent or issue'}, status=400)
 
-    # Stable across Jira's own redelivery of the same event — built from
-    # fields Jira itself supplies for this delivery, not a value we mint.
-    changelog_id = (body.get('changelog') or {}).get('id')
-    dedupe_seed = ':'.join(str(part) for part in (event, issue['key'], body.get('timestamp'), changelog_id) if part)
+        issue_fields = issue.get('fields') or {}
+        project_field = issue_fields.get('project') or {}
+        project_name = _route_webhook_project(project_field.get('key'), project_field.get('name'))
+        if not project_name:
+            return JsonResponse({'error': 'Missing issue.fields.project'}, status=400)
+
+        # Stable across Jira's own redelivery of the same event — built from
+        # fields Jira itself supplies for this delivery, not a value we mint.
+        changelog_id = (body.get('changelog') or {}).get('id')
+        dedupe_seed = ':'.join(
+            str(part) for part in (event, issue['key'], body.get('timestamp'), changelog_id) if part
+        )
+        dedupe_key = f'webhook:{dedupe_seed}'
+        subject = issue['key']
+        payload = {'event': event, 'issue': issue, 'body': body}
 
     try:
         client = registry_redis_client()
@@ -144,14 +201,14 @@ def jira_webhook(request):
         envelope = build_envelope(
             Kind.WEBHOOK_EVENT,
             registry.normalize_project_name(project_name),
-            payload={'event': event, 'issue': issue, 'body': body},
+            payload=payload,
         )
-        result = publish(client, stream, envelope, dedupe_key=f'webhook:{dedupe_seed}')
+        result = publish(client, stream, envelope, dedupe_key=dedupe_key)
         return JsonResponse({'received': True, 'deduped': result['deduped']})
     except Exception as err:
         # Do not report success if the event was never durably enqueued —
         # Jira will retry a non-2xx response.
-        print(f'[views] Failed to durably enqueue webhook for {issue["key"]}: {err!r}')
+        print(f'[views] Failed to durably enqueue webhook for {subject}: {err!r}')
         return JsonResponse({'error': 'Failed to durably accept event'}, status=502)
 
 

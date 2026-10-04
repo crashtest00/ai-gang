@@ -94,7 +94,11 @@ _TABLES = [
     # key into work_item, so neither is reached by its CASCADE: a completion
     # record or a deployment record left behind by one test would make the
     # next test's redelivery skip a step it never ran.
-    'beta_deployment_record', 'jira_write_completion',
+    # v5.2 REQ-11's decomposition record joins them for the same reason:
+    # a proposal-to-key row left behind would make the next test's
+    # decomposition skip a create it never made, and would be counted as
+    # an inward blocker by `store.inward_blockers_of`.
+    'beta_deployment_record', 'jira_write_completion', 'jira_decomposition_proposal',
 ]
 
 

@@ -330,10 +330,47 @@ def transition_issue(key: str, status_name: str) -> bool:
 
 # --- createIssue (jira.js:183-205) ------------------------------------------
 
-def create_issue(project_key: str, issue_type_name: str, summary: str, description: Optional[str]) -> str:
+def adf_document(text: Optional[str]) -> dict[str, Any]:
+    """Wrap plain text as an Atlassian Document Format document, one
+    paragraph per line — the inverse of `adf_to_text` above, and the shape
+    Jira's REST API v3 requires for a multi-line rich-text field
+    (canonical-delivery-state.md REQ-10: "story fields are sent as
+    Atlassian Document Format paragraphs, the shape `jira_interpret` reads
+    back with `adf_to_text`").
+
+    One paragraph per line rather than one text node holding newlines,
+    because `adf_to_text` appends a newline per paragraph and reads a text
+    node verbatim, so this is the shape that round-trips: what
+    `jira_interpret.parse_story_fields` reads back off the issue is what
+    was sent, modulo the trailing newline it strips. An empty line becomes
+    an empty paragraph, which Jira renders as a blank line."""
+    lines = (text or '').split('\n')
+    return {
+        'type': 'doc',
+        'version': 1,
+        'content': [
+            {'type': 'paragraph', 'content': ([{'type': 'text', 'text': line}] if line else [])}
+            for line in lines
+        ],
+    }
+
+
+def create_issue(project_key: str, issue_type_name: str, summary: str, description: Optional[str],
+                  fields: Optional[dict[str, Any]] = None) -> str:
     """Create a top-level issue (not a subtask) for a canonical work item
-    with no Jira counterpart yet."""
-    fields = {
+    with no Jira counterpart yet.
+
+    `fields` is canonical-delivery-state.md REQ-10's addition: extra issue
+    fields set in the SAME request as the create, so `connect_jira`'s push
+    sets a pushed item's Agent field and, for a story, each story field
+    without a second round trip that could half-succeed ("an addition to
+    the client, not a second client"). Keys are Jira field ids or names,
+    values are whatever Jira's create API takes for them — a
+    single-select's `{'value': ...}`, a rich-text field's
+    `adf_document(...)`. They are merged over the four fields built here,
+    so a caller can override the description it just passed; nothing in
+    this stage does."""
+    issue_fields: dict[str, Any] = {
         'project': {'key': project_key},
         'summary': summary,
         'description': {
@@ -346,7 +383,8 @@ def create_issue(project_key: str, issue_type_name: str, summary: str, descripti
         },
         'issuetype': {'name': issue_type_name},
     }
-    data = _request('POST', '/issue', json={'fields': fields})
+    issue_fields.update(fields or {})
+    data = _request('POST', '/issue', json={'fields': issue_fields})
     return data['key']
 
 

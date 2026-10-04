@@ -378,6 +378,48 @@ def _blockers_of(work_item_id) -> list[dict]:
     return [{'blocker_id': r['from_work_item_id'], 'blocker_status': r['from_work_item__status']} for r in rows]
 
 
+def inward_blockers_of(item: WorkItem) -> list[dict]:
+    """Every inward blocker of a work item: its canonical `blocks` links,
+    PLUS the Blocks pairs REQ-11's decomposition record holds with it as
+    the dependent, "a pair whose blocker has no row yet" counting as not
+    `done` (canonical-delivery-state.md REQ-11).
+
+    One rule, in every mode, for the two readers that need it: this
+    module's `_unblock_dependents` and `webhook_consumer.py`'s Sub-task
+    mirror, which derives a Backlog subtask's status from exactly this set.
+    A Jira-mode decomposition's Blocks link reaches `core` as a Jira link
+    event that may land after the subtask it names, so a record pair is an
+    inward blocker the canonical graph does not hold yet.
+
+    The record row is found by the item's own Jira key where it has one,
+    falling back to its canonical id — the proposal id the mirror normally
+    gives a mirrored subtask, and §4 records the one case where it does not
+    (a Sub-task webhook landing before the writer recorded its key).
+
+    Each entry is `{'blocker_id', 'blocker_status'}`, with `blocker_status`
+    None for a blocker with no canonical row, which is not `done`."""
+    blockers = _blockers_of(item.id)
+    seen = {str(entry['blocker_id']) for entry in blockers}
+
+    record = (jira_writer.proposal_record_for_key(item.external_key) if item.external_key else None) \
+        or jira_writer.proposal_record(item.id)
+    for pair in (record.blocks_pairs or []) if record is not None else []:
+        blocker_key = pair.get('blockerKey')
+        blocker_proposal_id = pair.get('blockerProposalId')
+        blocker = None
+        if blocker_key:
+            blocker = WorkItem.objects.filter(external_key=blocker_key).first()
+        if blocker is None and blocker_proposal_id:
+            blocker = WorkItem.objects.filter(id=blocker_proposal_id).first()
+        blocker_id = str(blocker.id) if blocker is not None else (blocker_proposal_id or blocker_key)
+        if str(blocker_id) in seen:
+            continue
+        seen.add(str(blocker_id))
+        blockers.append({'blocker_id': blocker_id,
+                          'blocker_status': blocker.status if blocker is not None else None})
+    return blockers
+
+
 def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str],
                           origin: str = write_gate.Origins.DIRECT) -> Optional[dict]:
     """Internal: applies a status transition with no gating/validation of
@@ -670,10 +712,36 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
     this service's own graph instead of Jira issue links. Stateless and
     idempotent: a dependent only moves if it is CURRENTLY
     'waiting-on-dependency' with every blocker done, which becomes false
-    the instant it has already moved."""
-    dependent_ids = WorkItemLink.objects.filter(
+    the instant it has already moved.
+
+    **The dependents are the canonical `blocks` links PLUS the Blocks pairs
+    REQ-11's decomposition record holds, in every mode** (§4's "Jira-mode
+    unblocking from the decomposition record" row; REQ-11:
+    "`_unblock_dependents` applies the same rule in every mode and reads no
+    mode"). In Jira mode a decomposition's Blocks link reaches `core` as a
+    Jira link event, which may land after the subtask it names, so the
+    canonical link may not exist yet when the blocker reaches `done` — and
+    the record, written by the writer as it created each link, is what
+    stops the dependent being stranded. Only a Jira-mode decomposition
+    writes that record, so a project that was never in Jira mode has no
+    pair to count; a project returned to local mode by `disconnect_jira`
+    keeps its pairs, and they still count, so an operator who deletes a
+    blocker the record names moves its dependent by hand (REQ-11).
+
+    No mode is read to decide this: the union is the same in both modes,
+    and each dependent is routed by `write_gate.route` exactly as before."""
+    linked_ids = list(WorkItemLink.objects.filter(
         from_work_item_id=blocker_work_item_id, link_type='blocks',
-    ).values_list('to_work_item_id', flat=True)
+    ).values_list('to_work_item_id', flat=True))
+    recorded_ids = jira_writer.dependent_proposal_ids_for_blocker(blocker_work_item_id)
+
+    seen: set = set()
+    dependent_ids = []
+    for dependent_id in [*linked_ids, *recorded_ids]:
+        if str(dependent_id) in seen:
+            continue
+        seen.add(str(dependent_id))
+        dependent_ids.append(dependent_id)
 
     for dependent_id in dependent_ids:
         dependent = WorkItem.objects.filter(id=dependent_id).first()
@@ -690,7 +758,10 @@ def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
         if dependent.status != 'waiting-on-dependency':
             continue
 
-        blockers = _blockers_of(dependent_id)
+        # The same inward-blocker rule the mirror applies, so a dependent
+        # whose Blocks pair the record holds but whose canonical link has
+        # not landed yet is not moved early (REQ-11).
+        blockers = inward_blockers_of(dependent)
         all_done = all(b['blocker_status'] == 'done' for b in blockers)
         if not all_done:
             continue

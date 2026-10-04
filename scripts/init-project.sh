@@ -12,11 +12,12 @@
 # later, explicitly-requested operation — never offered as part of the
 # default interactive flow above):
 #   4. Prompts for a Jira project key
-#   5. Runs create-jira-fields.sh (idempotent — creates missing fields, skips existing)
+#   5. Runs create-jira-fields.sh and create-release-fields.sh (both
+#      idempotent — create missing fields, skip existing)
 #   6. Registers the Jira webhook
 #   7. Creates the Jira project (company-managed Kanban)
 #   8. Creates the AI Gang Kanban workflow (idempotent) and assigns it to the project
-#   9. Adds all JIRA_*_FIELD_ID fields from services/scrummaster/.env to
+#   9. Adds all JIRA_*_FIELD_ID fields from the platform .env to
 #      every screen in the new project (Stories, Tasks, Subtasks)
 #
 # Usage:
@@ -80,7 +81,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 HQ_ENV="${HQ_ENV:-$HOME/ai-gang/.env}"
-SM_ENV="$REPO_ROOT/services/scrummaster/.env"
+# canonical-delivery-state.md REQ-10, "The field ids reach `core`" —
+# get_field_ids below reads the ids back out of the platform .env, where
+# create-jira-fields.sh and create-release-fields.sh now write them and
+# scripts/startup/derive-env.sh's JIRA_FIELD_ID_VARS loop reads them
+# (OQ-09; v5.1 BUGFIXES BF-03).
+FIELD_ID_ENV="$HQ_ENV"
 # Overridable so tests can point this at a temp directory instead of the
 # real projects/ tree — see setup/graphs/engine/test/config-init-cli.test.js.
 PROJECTS_DIR="${AIGANG_PROJECTS_DIR:-$REPO_ROOT/projects}"
@@ -230,11 +236,17 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
   : "${JIRA_TOKEN:?JIRA_TOKEN is not set. Check $HQ_ENV}"
   : "${HQ_URL:?HQ_URL is not set. Check $HQ_ENV (e.g. http://1.2.3.4:9000)}"
 
-  # Ensure all Jira custom fields exist and IDs are written to services/scrummaster/.env.
-  # create-jira-fields.sh is idempotent — skips fields that already exist.
-  # Running it here also picks up any new fields added in a later version of the script.
+  # Ensure all Jira custom fields exist and IDs are written to the platform
+  # .env, where scripts/startup/derive-env.sh reads them
+  # (canonical-delivery-state.md REQ-10). BOTH provisioning scripts run:
+  # create-release-fields.sh's five ids are as much a part of
+  # JIRA_FIELD_ID_VARS as the nine story-schema ones, and connect_jira
+  # refuses until all fourteen are set. Both are idempotent — they skip a
+  # field that already exists — so running them here also picks up any
+  # field a later version of either script adds.
   echo "Checking Jira custom fields..."
   HQ_ENV="$HQ_ENV" bash "$SCRIPT_DIR/create-jira-fields.sh"
+  HQ_ENV="$HQ_ENV" bash "$SCRIPT_DIR/create-release-fields.sh"
   echo ""
 fi
 
@@ -281,7 +293,13 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
     echo "  Warning: webhook registration did not complete — see the command's own output above."
     echo "  Register manually in Jira Settings → System → Webhooks:"
     echo "    URL:    ${HQ_URL}/webhooks/jira?secret=<services/core/.env's WEBHOOK_SECRET>"
-    echo "    Events: jira:issue_created, jira:issue_updated"
+    # Every entry in ensure_jira_webhook.py's WEBHOOK_EVENTS, which
+    # canonical-delivery-state.md REQ-09/REQ-11 extended with
+    # comment_created and issuelink_created: a registration missing
+    # either leaves `core` blind to a Jira comment or a Blocks link.
+    # services/core/tests/test_ensure_jira_webhook_command.py asserts
+    # this line against that list, so the two cannot drift.
+    echo "    Events: jira:issue_created, jira:issue_updated, comment_created, issuelink_created"
     echo "  Note: Jira Cloud requires HTTPS. Point a domain at this server and set HQ_URL accordingly."
   fi
 
@@ -325,9 +343,9 @@ derive_key() {
   echo "$key"
 }
 
-# Collect all JIRA_*_FIELD_ID values from services/scrummaster/.env
+# Collect all JIRA_*_FIELD_ID values from the platform .env
 get_field_ids() {
-  grep -E '^JIRA_[A-Z_]+_FIELD_ID=customfield_' "$SM_ENV" | cut -d= -f2
+  grep -E '^JIRA_[A-Z_]+_FIELD_ID=customfield_' "$FIELD_ID_ENV" | cut -d= -f2
 }
 
 # Get all screen IDs associated with a Jira project

@@ -82,23 +82,28 @@ nodes:
   - id: create-jira-custom-fields
     kind: action
     procedure: >-
-      Run `./scripts/create-jira-fields.sh` once for this Jira instance.
-      Creates the Agent and Blocked single-select fields plus the 7
-      story-schema paragraph fields (Value Hypothesis, Test & Measurement,
-      Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of
-      Scope), and records the 9 JIRA_*_FIELD_ID values it created in
-      services/scrummaster/.env. From V5.1 no running service reads that
-      output — only the provisioning scripts themselves do. [HUMAN] Copy the
-      IDs into ~/ai-gang/.env, the platform .env, which
-      scripts/startup/derive-env.sh carries to Django/core, the platform's
-      only Jira client (V5.1 REQ-01, REQ-06). Verify with:
-      `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l`
-      returning 9, then the same grep against ~/ai-gang/.env returning 9
-      once the IDs are copied. Every later project applies these
+      Run `./scripts/create-jira-fields.sh` and then
+      `./scripts/create-release-fields.sh`, once each for this Jira
+      instance. The first creates the Agent and Blocked single-select
+      fields plus the 7 story-schema paragraph fields (Value Hypothesis,
+      Test & Measurement, Behavior, Acceptance Criteria, Constraints, Edge
+      Cases, Out of Scope); the second creates the Release issue type, its
+      5 fields (Target Project, Release Notes, Candidate SHA, Build
+      Identifier, Preview URL) and the Abandoned resolution. Both write
+      the JIRA_*_FIELD_ID values they provision straight into
+      ~/ai-gang/.env, the platform .env, which
+      scripts/startup/derive-env.sh carries into services/core/.env for
+      Django/core, the platform's only Jira client — so there is nothing
+      to copy by hand (canonical-delivery-state.md REQ-10). Verify with:
+      `grep -cE '^JIRA_[A-Z_]+_FIELD_ID=customfield_' ~/ai-gang/.env`
+      returning 14, the full set
+      scripts/startup/derive-env.sh's JIRA_FIELD_ID_VARS loop reads; then
+      re-run platform startup so services/core/.env carries them before
+      connect_jira is run. Every later project applies these
       already-created fields via init-project.sh — this step is not repeated
       per project.
     writes:
-      files: ["services/scrummaster/.env", "~/ai-gang/.env"]
+      files: ["~/ai-gang/.env"]
       services: []
     terminal: true
     outcome: success

@@ -101,7 +101,13 @@ def handle_command(envelope: dict[str, Any]) -> Any:
         # contract — see materialize.py. payload['message'] is the same
         # { parentWorkItemId, subtasks } shape dependencies.js's function
         # already uses.
-        return materialize_decomposition(payload['message'], envelope['project'], actor=actor or 'refinement-agent')
+        # REQ-09, step 5: the envelope's `messageId` reaches every routed
+        # handler but `append_comment`, and `materialize_decomposition` is
+        # the fifth of them — on `push` its root transitions skip any step
+        # the writer's completion record already shows done.
+        return materialize_decomposition(payload['message'], envelope['project'],
+                                          actor=actor or 'refinement-agent',
+                                          completion_key=message_id)
     if command == 'recordBetaDeployment':
         # canonical-delivery-state.md REQ-01 — the gateway relays Jenkins'
         # `beta_deployed` payload here, carrying the gateway envelope's own

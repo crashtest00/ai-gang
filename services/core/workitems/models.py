@@ -561,3 +561,63 @@ class JiraWriteCompletion(models.Model):
     def __str__(self) -> str:
         state = 'complete' if self.completed_at else 'registered'
         return f'{self.completion_key}/{self.work_item_id}/{self.step} ({state})'
+
+
+class JiraDecompositionProposal(models.Model):
+    """canonical-delivery-state.md REQ-11 — the proposal-to-key record a
+    Jira-mode decomposition writes, one row per proposal: "proposal id,
+    project, parent work item id, the proposal's specification and artifact
+    links, Jira key, and each Blocks pair created".
+
+    It is what makes a Jira-mode decomposition idempotent and what lets the
+    Sub-task mirror give a mirrored subtask its PROPOSAL id rather than a
+    fresh one (local mode's behaviour, `materialize.py`'s canonical
+    id === proposal id). The writer creates each Jira Sub-task and records
+    its key here immediately, and records each Blocks pair immediately
+    after linking it, so a redelivery skips every recorded proposal and
+    link.
+
+    `blocks_pairs` holds the pairs created with THIS proposal as the
+    DEPENDENT — the direction both readers need:
+
+      - the mirror derives a Backlog subtask's status from its inward
+        blockers, which for a subtask the record names are "every Blocks
+        pair the record holds with its key as the dependent", a pair whose
+        blocker has no row yet counting as not `done`;
+      - `store._unblock_dependents` finds a blocker's dependents by
+        `blockerProposalId`, which equals the dependent-side row's
+        blocker's canonical work item id, so it needs no Jira key and reads
+        no mode (REQ-11: it "applies the same rule in every mode").
+
+    Each entry is `{'blockerProposalId': str, 'blockerKey': str|None,
+    'dependentKey': str|None}`. The keys are recorded for an operator
+    reading the row; the proposal ids are what the queries use, since they
+    exist before any Jira call does.
+
+    A project that was never in Jira mode has no row here, because only a
+    Jira-mode decomposition writes one — which is why `_unblock_dependents`
+    can consult it unconditionally. A project returned to local mode by
+    `disconnect_jira` keeps its rows, and they still count (REQ-11; §4)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.TextField()
+    parent_work_item_id = models.UUIDField(null=True, blank=True)
+    proposal_id = models.UUIDField()
+    jira_key = models.TextField(null=True, blank=True)
+    specification_link = models.JSONField(null=True, blank=True)
+    artifact_links = models.JSONField(default=list)
+    blocks_pairs = models.JSONField(default=list)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'jira_decomposition_proposal'
+        constraints = [
+            models.UniqueConstraint(fields=['proposal_id'], name='uq_jira_decomposition_proposal'),
+        ]
+        indexes = [
+            models.Index(fields=['jira_key'], name='idx_jira_decomposition_key'),
+            models.Index(fields=['project'], name='idx_jira_decomposition_project'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.proposal_id} -> {self.jira_key or "(not yet created)"}'

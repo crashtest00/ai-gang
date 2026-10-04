@@ -160,3 +160,187 @@ def permissive_jira(monkeypatch):
     `transitions` list, so it reports the transition as unavailable — which
     a test that cares about registers a route for."""
     yield from _start(monkeypatch, catch_all={})
+
+
+# ---------------------------------------------------------------------------
+# A stateful Jira project over the fixture server
+# ---------------------------------------------------------------------------
+
+BLOCKS_LINK_TYPE_ID = '10001'
+
+# The statuses the provisioned workflow offers from anywhere: the workflow
+# `scripts/init-project.sh` creates makes every transition global
+# (`:436-440`), which is the behaviour several requirements reason about.
+GLOBAL_STATUSES = ('Backlog', 'Shovel Ready', 'In Progress', 'In Review', 'Done')
+
+
+class FakeJiraInstance:
+    """A small, STATEFUL Jira over `fixture_jira`'s HTTP server: issues with
+    a key, an issue type, a status, custom fields and Blocks links, created
+    and moved through the same REST paths `jira_client` calls.
+
+    `fixture_jira` on its own answers whatever a test registers, which is
+    right for testing one call. REQ-10's push and re-sync, and REQ-11's
+    decomposition and mirror, instead make a SEQUENCE of calls whose later
+    steps read what the earlier ones wrote — `get_issue_links` after
+    `create_issue_link`, `get_issue` after `transition_issue` — so what they
+    need is a Jira that remembers. Every route is registered on the fixture,
+    so each call is still a real HTTP round trip and still recorded in
+    `fixture_jira.received`.
+
+    `transitions` lists the statuses the workflow offers; the default is the
+    provisioned workflow's global set. `offered` can be narrowed per issue to
+    exercise a missing transition."""
+
+    def __init__(self, handler, *, project_key='TP', agent_field='customfield_10050',
+                  blocked_field='customfield_10051'):
+        self.handler = handler
+        self.project_key = project_key
+        self.agent_field = agent_field
+        self.blocked_field = blocked_field
+        self.issues: dict[str, dict] = {}
+        self.links: list[tuple[str, str]] = []
+        self.created: list[dict] = []
+        self._next = 1
+
+        handler.routes[('GET', '/rest/api/3/issueLinkType')] = lambda q, b: (
+            200, {'issueLinkTypes': [{'id': BLOCKS_LINK_TYPE_ID, 'name': 'Blocks',
+                                       'outward': 'blocks', 'inward': 'is blocked by'}]}
+        )
+        handler.routes[('POST', '/rest/api/3/issue')] = self._create
+        handler.routes[('POST', '/rest/api/3/issueLink')] = self._link
+
+    # --- creating -------------------------------------------------------
+
+    def add_issue(self, key, *, issuetype='Task', status='Backlog', parent=None, fields=None,
+                   offered=None, issue_id=None):
+        """Seed an issue that already exists in Jira, as one a previous
+        connect or a person created.
+
+        `issue_id` is Jira's own numeric id, which `/issue/{idOrKey}` takes
+        as readily as the key — REQ-11's `issuelink_created` body carries
+        only ids, so both have to resolve. It defaults to the key's own
+        numeric tail."""
+        self.issues[key] = {
+            'key': key, 'id': str(issue_id or key.split('-')[-1]), 'issuetype': issuetype,
+            'status': status, 'parent': parent,
+            'fields': dict(fields or {}), 'offered': list(offered) if offered else list(GLOBAL_STATUSES),
+        }
+        self._register_issue_routes(key)
+        return self.issues[key]
+
+    def id_of(self, key):
+        return self.issues[key]['id']
+
+    def _create(self, query, body):
+        fields = (body or {}).get('fields') or {}
+        # Mint the next key nothing holds yet, so a seeded issue (a parent
+        # story, an issue a previous connect created) is never overwritten
+        # by a create — which would silently point a decomposition record
+        # at its own parent.
+        while f'{self.project_key}-{self._next}' in self.issues:
+            self._next += 1
+        key = f'{self.project_key}-{self._next}'
+        self._next += 1
+        parent = (fields.get('parent') or {}).get('key')
+        issue = self.add_issue(
+            key,
+            issuetype=(fields.get('issuetype') or {}).get('name') or 'Task',
+            parent=parent,
+            fields={k: v for k, v in fields.items()
+                    if k not in ('project', 'summary', 'description', 'issuetype', 'parent')},
+        )
+        issue['summary'] = fields.get('summary')
+        issue['description'] = fields.get('description')
+        self.created.append({'key': key, 'fields': fields})
+        return 200, {'key': key, 'id': issue['id']}
+
+    def _link(self, query, body):
+        body = body or {}
+        blocker = (body.get('outwardIssue') or {}).get('key')
+        dependent = (body.get('inwardIssue') or {}).get('key')
+        self.links.append((blocker, dependent))
+        return 201, None
+
+    # --- per-issue routes ------------------------------------------------
+
+    def _register_issue_routes(self, key):
+        # By key AND by id: Jira's `/issue/{idOrKey}` resolves either, and
+        # `views.py`'s `issuelink_created` branch and the consumer's own
+        # reconciliation both look an end up by its id (REQ-11).
+        for identifier in (key, self.issues[key]['id']):
+            self.handler.routes[('GET', f'/rest/api/3/issue/{identifier}')] = \
+                lambda q, b, key=key: (200, self._issue_body(key, q))
+        self.handler.routes[('PUT', f'/rest/api/3/issue/{key}')] = \
+            lambda q, b, key=key: self._set_fields(key, b)
+        self.handler.routes[('GET', f'/rest/api/3/issue/{key}/transitions')] = \
+            lambda q, b, key=key: (200, {'transitions': [
+                {'id': str(100 + i), 'to': {'name': name}}
+                for i, name in enumerate(self.issues[key]['offered'])
+            ]})
+        self.handler.routes[('POST', f'/rest/api/3/issue/{key}/transitions')] = \
+            lambda q, b, key=key: self._transition(key, b)
+        self.handler.routes[('POST', f'/rest/api/3/issue/{key}/comment')] = \
+            lambda q, b, key=key: (201, {'id': f'{key}-comment-{len(self.handler.received)}'})
+
+    def _issue_body(self, key, query):
+        issue = self.issues[key]
+        fields = {
+            'summary': issue.get('summary'),
+            'description': issue.get('description'),
+            'status': {'name': issue['status']},
+            'issuetype': {'name': issue['issuetype']},
+            'project': {'key': self.project_key, 'name': self.project_key},
+            **issue['fields'],
+        }
+        if issue.get('parent'):
+            fields['parent'] = {'key': issue['parent']}
+        fields['issuelinks'] = [
+            {'type': {'id': BLOCKS_LINK_TYPE_ID, 'name': 'Blocks'}, 'inwardIssue': {'key': blocker}}
+            for blocker, dependent in self.links if dependent == key
+        ] + [
+            {'type': {'id': BLOCKS_LINK_TYPE_ID, 'name': 'Blocks'}, 'outwardIssue': {'key': dependent}}
+            for blocker, dependent in self.links if blocker == key
+        ]
+        return {'key': key, 'id': issue['id'], 'fields': fields}
+
+    def _set_fields(self, key, body):
+        self.issues[key]['fields'].update(((body or {}).get('fields') or {}))
+        return 204, None
+
+    def _transition(self, key, body):
+        transition_id = ((body or {}).get('transition') or {}).get('id')
+        issue = self.issues[key]
+        for i, name in enumerate(issue['offered']):
+            if str(100 + i) == str(transition_id):
+                issue['status'] = name
+                return 204, None
+        return 400, {'errorMessages': [f'transition {transition_id} not available']}
+
+    # --- reading, for assertions ------------------------------------------
+
+    def status_of(self, key):
+        return self.issues[key]['status']
+
+    def blocked(self, key):
+        return self.issues[key]['fields'].get(self.blocked_field)
+
+    def agent(self, key):
+        value = self.issues[key]['fields'].get(self.agent_field)
+        return value.get('value') if isinstance(value, dict) else value
+
+    def issue_webhook(self, key, event='jira:issue_created', *, changelog=None):
+        """The webhook body Jira would send for this issue, in the shape
+        `views.jira_webhook` enqueues and `webhook_consumer` reads."""
+        body = {'webhookEvent': event, 'issue': self._issue_body(key, {})}
+        if changelog:
+            body['changelog'] = {'id': f'{key}-changelog', 'items': changelog}
+        return body
+
+
+@pytest.fixture
+def jira_instance(permissive_jira):
+    """`FakeJiraInstance` over the permissive fixture: every route it
+    registers answers from its own state, and any call it does not model is
+    still accepted and recorded rather than 404'd."""
+    return FakeJiraInstance(permissive_jira)

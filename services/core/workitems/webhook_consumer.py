@@ -98,7 +98,10 @@ from typing import Any, Callable, Optional
 from django.db import transaction
 from django.utils import timezone
 
-from . import jira_interpret, jira_writer, project_config, registry, status_vocabulary, store, write_gate
+from . import (
+    assignment, jira_client, jira_interpret, jira_writer, project_config, registry, status_vocabulary,
+    store, write_gate,
+)
 from .models import ProjectStatusConfig, WebhookFailure, WorkItem, WorkItemReleaseDetail, WorkItemStoryDetail
 from .streams import create_consumer
 
@@ -730,6 +733,415 @@ def _handle_release_abandoned(project: str, issue_key: str, envelope: dict) -> N
 
 
 # ---------------------------------------------------------------------------
+# The Sub-task and link mirror (canonical-delivery-state.md REQ-11)
+# ---------------------------------------------------------------------------
+#
+# The inbound half of Jira-mode decomposition. REQ-09's writer creates a Jira
+# Sub-task per proposal and records its key; this is what turns each of those
+# issues — and each Sub-task a PERSON creates in Jira, and each Blocks link a
+# person draws — into canonical state, so that from then on "Jira-mode
+# dependency progression and dispatch are canonical, as in local mode, except
+# that Jira moves first".
+#
+# Everything here runs in the inbound tracker layer, origin JIRA_WEBHOOK, so
+# `write_gate.route` answers `record`: this is the one write path into `core`
+# in Jira mode. The one thing it does NOT record is a derived `ready` — that
+# goes to Jira first, as every derived write does (REQ-09, "Derived writes go
+# through the router too"), and comes back on the issue's own webhook.
+
+# A Backlog subtask is the one whose status is derived rather than mapped
+# (REQ-11). "Backlog" is read through the project's own inbound map rather
+# than matched literally, so a project whose `ProjectStatusConfig` rows name
+# its first column something else is handled by its own configuration; with
+# `DEFAULT_JIRA_STATUS_MAP` it is exactly `Backlog`.
+_BACKLOG_CANONICAL = 'proposed'
+
+# The two canonical statuses a Backlog subtask can hold, and so the ones a
+# re-derivation may act on: `proposed` (no blocker, or none known yet) and
+# `waiting-on-dependency` (a blocker that is not done). A subtask at any
+# other status is one Jira has moved past Backlog, or one a person moved
+# back from Shovel Ready, which "keeps the status its Jira status maps to"
+# (Shovel Ready Pass 6, decision 5.1).
+_DERIVABLE_STATUSES = (_BACKLOG_CANONICAL, 'waiting-on-dependency')
+
+
+def _canonical_for_key(issue_key: Optional[str]) -> Optional[WorkItem]:
+    if not issue_key:
+        return None
+    return WorkItem.objects.filter(external_key=issue_key).first()
+
+
+def _subtask_parent(project: str, issue: dict, issue_key: str, envelope: dict) -> Optional[WorkItem]:
+    """The canonical parent of a Jira Sub-task, "found by the parent issue's
+    `external_key`". A parent with no canonical row is one webhook failure
+    and the subtask is mirrored with no parent (REQ-11) — it is a real
+    subtask either way, and leaving it unmirrored would lose it."""
+    parent_key = ((issue.get('fields') or {}).get('parent') or {}).get('key')
+    parent = _canonical_for_key(parent_key)
+    if parent is None:
+        record_failure(
+            project, None, issue_key,
+            f'Sub-task {issue_key}: parent issue {parent_key or "(none on the issue)"} has no canonical '
+            'work item — the subtask is mirrored with no parent',
+            {'event': 'subtask_mirror', 'parentIssueKey': parent_key,
+             'envelopeId': envelope.get('messageId')},
+        )
+    return parent
+
+
+def _subtask_assignee(project: str, fields: dict, issue_key: str, envelope: dict) -> Optional[str]:
+    """The subtask's assignee, "from the Agent field, validated against the
+    agent catalog (a missing or unknown agent is recorded as a webhook
+    failure, and the subtask is mirrored unassigned)" (REQ-11). Validated by
+    the same catalog-backed rules every assignment goes through
+    (`assignment.validate_assignment`), never by what Jira's field happens
+    to offer."""
+    agent_id = jira_interpret.parse_agent_field(fields)
+    if not agent_id:
+        record_failure(
+            project, None, issue_key,
+            f'Sub-task {issue_key}: the Agent field is not set — the subtask is mirrored unassigned',
+            {'event': 'subtask_mirror', 'envelopeId': envelope.get('messageId')},
+        )
+        return None
+
+    verdict = assignment.validate_assignment(project, agent_id)
+    if not verdict['ok']:
+        record_failure(
+            project, None, issue_key,
+            f'Sub-task {issue_key}: Agent "{agent_id}" is not a valid assignee for this project '
+            f'({verdict["code"]}) — the subtask is mirrored unassigned',
+            {'event': 'subtask_mirror', 'requestedAgent': agent_id,
+             'permittedAgents': verdict.get('permittedAgents'),
+             'envelopeId': envelope.get('messageId')},
+        )
+        return None
+    return agent_id
+
+
+def _add_record_links_for(item: WorkItem, issue_key: str) -> None:
+    """Every Blocks pair the decomposition record holds in which this
+    subtask's key is either end, added as a canonical `blocks` link, for the
+    pairs whose other end already has a row (Shovel Ready Pass 6, decision
+    2.1). Idempotent per pair: `store.create_link` dedupes an existing
+    edge.
+
+    This is what closes REQ-11's ordering window from the other side: a
+    link event that arrived before this subtask existed was skipped with no
+    failure precisely because the record holds it, and this is where it is
+    honoured."""
+    for pair in jira_writer.record_pairs_naming_key(issue_key):
+        blocker = _canonical_for_key(pair.get('blockerKey')) or \
+            WorkItem.objects.filter(id=pair.get('blockerProposalId')).first()
+        dependent = _canonical_for_key(pair.get('dependentKey')) or \
+            WorkItem.objects.filter(id=pair.get('dependentProposalId')).first()
+        if blocker is None or dependent is None or blocker.id == dependent.id:
+            continue
+        store.create_link(blocker.id, dependent.id, 'blocks',
+                           actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK)
+
+
+def _derived_backlog_status(item: WorkItem) -> Optional[str]:
+    """A Backlog subtask's status, "derived from its inward blockers:
+    `waiting-on-dependency` while any is not `done`, `ready` once it has at
+    least one and all are `done`, and `proposed` with none" (REQ-11).
+
+    The inward blockers are `store.inward_blockers_of`'s union of canonical
+    `blocks` links and the decomposition record's Blocks pairs, where a pair
+    whose blocker has no row yet counts as not `done`."""
+    blockers = store.inward_blockers_of(item)
+    if not blockers:
+        return _BACKLOG_CANONICAL
+    if all(blocker['blocker_status'] == 'done' for blocker in blockers):
+        return 'ready'
+    return 'waiting-on-dependency'
+
+
+def _push_derived_ready(item: WorkItem) -> None:
+    """A derived `ready` is not recorded: it is pushed to Jira as the Jira
+    status the project's map writes for `ready` (Shovel Ready with the
+    default map), origin `ROLLUP`, and `core` records `ready` from that
+    issue's own webhook (REQ-09, "Derived writes go through the router
+    too"; REQ-11).
+
+    `route` is asked rather than assumed, like every other write: the
+    mirror is only ever reached for a Jira-mode project, so the answer is
+    `push`, but no caller in this service states a mode."""
+    if write_gate.route(item.project, write_gate.Origins.ROLLUP) == write_gate.PUSH:
+        jira_writer.register_derived_status_push(item, 'ready')
+
+
+def mirror_subtask(project: str, issue: dict, issue_key: str, envelope: dict) -> Optional[WorkItem]:
+    """REQ-11 — materializes a Jira `Sub-task` as a canonical work item of
+    type `task`, origin JIRA_WEBHOOK, on `jira:issue_created` or on the
+    first `jira:issue_updated`.
+
+    **Skipped when a canonical row already holds its key** — a redelivered
+    create, or a Sub-task `connect_jira` pushed and keyed. The existing row
+    is returned so the caller can still reconcile its links.
+
+    Its canonical id is "the proposal id the record holds for its key ... as
+    local mode does, or a fresh id when the record holds none": a Sub-task
+    the writer created gets the same canonical id local mode would have
+    given it, and one a person created in Jira gets a fresh one. (§4 records
+    the window where a Sub-task's webhook beats the writer's key record, in
+    which case it gets a fresh id too.)
+
+    Its status "maps from its Jira status, except that a `Backlog` subtask
+    is derived from its inward blockers". It is "created and transitioned in
+    one transaction, so `_recompute_parent_rollup` and `_unblock_dependents`
+    run" — a subtask first seen at Done rolls its parent up on the spot."""
+    existing = _canonical_for_key(issue_key)
+    if existing is not None:
+        return existing
+
+    fields = issue.get('fields') or {}
+    record = jira_writer.proposal_record_for_key(issue_key)
+    canonical_id = record.proposal_id if record is not None else uuid.uuid4()
+    display_name = fields.get('summary') or issue_key
+    description = jira_interpret.adf_to_text(fields.get('description')).strip() or None
+    parent = _subtask_parent(project, issue, issue_key, envelope)
+    assignee = _subtask_assignee(project, fields, issue_key, envelope)
+
+    jira_status = ((fields.get('status') or {}).get('name')) or ''
+    mapped = jira_status_to_canonical(project, jira_status)
+    if mapped is None:
+        record_failure(
+            project, None, issue_key,
+            f'Sub-task {issue_key}: Jira status "{jira_status}" is not mapped to a canonical status for '
+            'this project — the subtask is mirrored as "proposed"',
+            {'event': 'subtask_mirror', 'jiraStatusName': jira_status,
+             'envelopeId': envelope.get('messageId')},
+        )
+        mapped = _BACKLOG_CANONICAL
+
+    derived_ready = False
+    with transaction.atomic():
+        item = store.create_work_item(
+            {
+                'id': canonical_id, 'project': project, 'type': 'task',
+                'displayName': display_name, 'description': description,
+                'status': _BACKLOG_CANONICAL, 'externalKey': issue_key,
+                'parentId': parent.id if parent is not None else None,
+                'assigneeAgentId': assignee,
+            },
+            actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
+        )
+        # The record's own Blocks pairs first, so the derivation below sees
+        # the blockers this subtask was created with.
+        _add_record_links_for(item, issue_key)
+        item = store.get_work_item(item.id)
+
+        target = mapped
+        if mapped == _BACKLOG_CANONICAL:
+            derived = _derived_backlog_status(item)
+            if derived == 'ready':
+                # Not recorded here: "the mirror records the mapped status,
+                # and the routing layer pushes ... `ready` ... after the
+                # mirror's transaction commits".
+                derived_ready = True
+                target = _BACKLOG_CANONICAL
+            else:
+                target = derived
+
+        if target != item.status:
+            # In the SAME transaction as the create, so the parent rollup and
+            # the dependency unblock both run for a subtask first seen at a
+            # later status.
+            #
+            # Through the inbound layer's own validated-write-or-record-a-
+            # failure path, not a bare `transition_status`: a Sub-task a
+            # person moved to Shovel Ready while a blocker of it is not
+            # `done` maps to a canonical status the dependency gate refuses,
+            # and a raise here would roll the whole mirror back and fail the
+            # webhook message for ever. The subtask is mirrored either way
+            # and the refusal is recorded, which is what this path does for
+            # every other Jira-originated status it cannot apply.
+            _apply_validated_status_change_to(item, target, issue_key, envelope,
+                                               jira_status_name=jira_status)
+
+        # The mirror's side of REQ-11's "whichever lands second attaches":
+        # one implementation, in the writer, called from both sides.
+        if record is not None:
+            jira_writer.attach_record_references(record)
+
+    item = store.get_work_item(canonical_id)
+    if derived_ready and item is not None:
+        _push_derived_ready(item)
+    return item
+
+
+def _snapshot_blocks_pairs(issue: dict) -> list[tuple]:
+    """The Blocks pairs an issue's own `issuelinks` snapshot holds, as
+    `(blocker_key, dependent_key)`.
+
+    The inward/outward reading is `jira_client.get_issue_links`'s, so the
+    two agree on direction: an entry carrying `inwardIssue` names an issue
+    this one is blocked BY, and one carrying `outwardIssue` names an issue
+    this one blocks. Only the configured Blocks link type counts."""
+    fields = issue.get('fields') or {}
+    links = fields.get('issuelinks') or []
+    if not links:
+        return []
+
+    own_key = issue.get('key')
+    link_type_id = str(jira_client.get_blocks_link_type_id())
+    pairs = []
+    for link in links:
+        if str((link.get('type') or {}).get('id')) != link_type_id:
+            continue
+        inward = (link.get('inwardIssue') or {}).get('key')
+        if inward:
+            pairs.append((inward, own_key))
+        outward = (link.get('outwardIssue') or {}).get('key')
+        if outward:
+            pairs.append((own_key, outward))
+    return pairs
+
+
+def _reconcile_pair(project: str, blocker_key: str, dependent_key: str, issue_key: str,
+                     envelope: dict) -> tuple[Optional[WorkItem], Optional[WorkItem], bool]:
+    """One Blocks pair, reconciled into a canonical `blocks` link, origin
+    JIRA_WEBHOOK, idempotent per pair (REQ-11). Reconciliation only ADDS
+    links.
+
+    "A link whose other end has no canonical row is skipped. It is recorded
+    as a webhook failure unless the record holds it as a Blocks pair, which
+    the mirror adds when that end is created" (Shovel Ready Pass 6, decision
+    2.1; Pass 7, SR-7-11) — a decomposition's own link is not a defect just
+    because its subtask's create webhook has not been processed yet.
+
+    Returns `(blocker, dependent, added)`, where `added` is True only when
+    this call created the canonical link."""
+    blocker = _canonical_for_key(blocker_key)
+    dependent = _canonical_for_key(dependent_key)
+    if blocker is None or dependent is None:
+        if not jira_writer.record_holds_pair(blocker_key, dependent_key):
+            record_failure(
+                project, None, issue_key,
+                f'Blocks link {blocker_key} -> {dependent_key}: '
+                f'{"blocker" if blocker is None else "dependent"} has no canonical work item — '
+                'the link is skipped',
+                {'event': 'blocks_link_reconciliation', 'blockerKey': blocker_key,
+                 'dependentKey': dependent_key, 'envelopeId': envelope.get('messageId')},
+            )
+        return blocker, dependent, False
+
+    if blocker.id == dependent.id:
+        return blocker, dependent, False
+
+    result = store.create_link(blocker.id, dependent.id, 'blocks',
+                                actor=f'jira-webhook:{issue_key}',
+                                origin=write_gate.Origins.JIRA_WEBHOOK)
+    return blocker, dependent, not result.get('deduped')
+
+
+def _rederive_ends(project: str, ends: list, newly_linked_ids: set, issue_key: str,
+                    envelope: dict) -> None:
+    """Both ends of every reconciled pair, re-derived under REQ-11's Backlog
+    rule — but "only for a subtask whose canonical status is
+    `waiting-on-dependency` or for which this reconciliation added a Blocks
+    pair", so "a Backlog subtask a person moved back keeps the status its
+    Jira status maps to" and receives no Shovel Ready push (Shovel Ready
+    Pass 6, decision 5.1).
+
+    A derived `waiting-on-dependency` is RECORDED, origin JIRA_WEBHOOK —
+    no Jira status maps to it with the default map, and it is the inbound
+    layer's own reading of a Backlog subtask with an unfinished blocker. A
+    derived `ready` is PUSHED through `route`, origin ROLLUP, after this
+    function's caller has left its transaction, and recorded only from the
+    issue's own webhook.
+
+    A subtask's canonical status being `proposed` or
+    `waiting-on-dependency` is what stands for "its Jira status is
+    Backlog": those are the only two canonical statuses a Backlog subtask
+    holds, and any other means Jira has it past Backlog."""
+    to_push = []
+    seen = set()
+    for item_id in ends:
+        if item_id is None or str(item_id) in seen:
+            continue
+        seen.add(str(item_id))
+        item = store.get_work_item(item_id)
+        # Subtasks only: REQ-11's derivation is a Sub-task rule, and a
+        # mirrored Sub-task is a canonical `task`, as `materialize.py`
+        # creates one.
+        if item is None or item.type != 'task' or item.status not in _DERIVABLE_STATUSES:
+            continue
+        if item.status != 'waiting-on-dependency' and str(item_id) not in newly_linked_ids:
+            continue
+
+        derived = _derived_backlog_status(item)
+        if derived == 'ready':
+            to_push.append(item)
+        elif derived == 'waiting-on-dependency' and item.status != 'waiting-on-dependency':
+            _apply_validated_status_change_to(item, 'waiting-on-dependency', issue_key, envelope)
+
+    for item in to_push:
+        _push_derived_ready(store.get_work_item(item.id) or item)
+
+
+def reconcile_subtask_snapshot(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
+    """"On every `jira:issue_updated` for a subtask, `webhook_consumer.py`
+    MUST reconcile the snapshot's Blocks links into canonical `blocks`
+    links, origin `JIRA_WEBHOOK`, idempotent per pair, and then re-derive
+    both ends' status under the rule above" (REQ-11)."""
+    pairs = _snapshot_blocks_pairs(issue)
+    if not pairs:
+        return
+
+    ends = []
+    newly_linked_ids: set = set()
+    for blocker_key, dependent_key in pairs:
+        blocker, dependent, added = _reconcile_pair(project, blocker_key, dependent_key, issue_key, envelope)
+        for end in (blocker, dependent):
+            if end is not None:
+                ends.append(end.id)
+                if added:
+                    newly_linked_ids.add(str(end.id))
+
+    _rederive_ends(project, ends, newly_linked_ids, issue_key, envelope)
+
+
+def handle_issue_link_created(project: str, body: dict, envelope: dict) -> None:
+    """Jira's own link-creation event (REQ-11). Its body "carries
+    `issueLink` and no `issue`", which is why `views.py` routes it by the
+    source issue's project and `handle_webhook_envelope` dispatches it
+    ahead of its `issue_key` guard.
+
+    "If `issueLink.issueLinkType.id` is the Blocks type
+    (`get_blocks_link_type_id`), `core` reconciles that one pair, source
+    blocking destination, reading each end's key with `get_issue`, which
+    returns no links." Reconciliation is idempotent per pair, so whichever
+    of this event and the dependent's next `jira:issue_updated` arrives
+    first does the work."""
+    link = body.get('issueLink') or {}
+    link_type_id = (link.get('issueLinkType') or {}).get('id')
+    if not link_type_id or str(link_type_id) != str(jira_client.get_blocks_link_type_id()):
+        _record_generic_event(project, None, None, envelope,
+                               {'event': 'issuelink_created', 'issueLinkId': link.get('id'),
+                                'ignored': 'not the Blocks issue link type'})
+        return
+
+    source_id = link.get('sourceIssueId')
+    destination_id = link.get('destinationIssueId')
+    if not source_id or not destination_id:
+        _record_generic_event(project, None, None, envelope,
+                               {'event': 'issuelink_created', 'issueLinkId': link.get('id'),
+                                'ignored': 'issueLink carries no source or destination issue id'})
+        return
+
+    blocker_key = (jira_client.get_issue(str(source_id)) or {}).get('key')
+    dependent_key = (jira_client.get_issue(str(destination_id)) or {}).get('key')
+    blocker, dependent, added = _reconcile_pair(
+        project, blocker_key, dependent_key, dependent_key or blocker_key or '', envelope,
+    )
+    ends = [end.id for end in (blocker, dependent) if end is not None]
+    newly_linked_ids = {str(item_id) for item_id in ends} if added else set()
+    _rederive_ends(project, ends, newly_linked_ids, dependent_key or blocker_key or '', envelope)
+
+
+# ---------------------------------------------------------------------------
 # Top-level dispatch
 # ---------------------------------------------------------------------------
 
@@ -739,6 +1151,15 @@ def _handle_issue_created(project: str, issue: dict, issue_key: str, envelope: d
         _handle_story_created(project, issue, issue_key, envelope)
     elif issuetype == 'Release':
         _handle_release_requested(project, issue, issue_key, envelope)
+    elif issuetype == 'Sub-task':
+        # canonical-delivery-state.md REQ-11 — the Sub-task mirror. Skipped
+        # when a canonical row already holds the key (a redelivered create,
+        # or a Sub-task `connect_jira` pushed and keyed), and the issue's
+        # own Blocks links are reconciled either way, so whichever of the
+        # create and the link event arrives first does the work.
+        item = mirror_subtask(project, issue, issue_key, envelope)
+        if item is not None:
+            reconcile_subtask_snapshot(project, issue, issue_key, envelope)
     else:
         _record_generic_event(project, None, issue_key, envelope, {'event': 'issue_created', 'issuetype': issuetype})
 
@@ -779,6 +1200,30 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         # changelog field the webhook happens to report it under.
         with transaction.atomic():
             _sync_release_detail(item, issue.get('fields') or {})
+    elif issuetype == 'Sub-task':
+        # canonical-delivery-state.md REQ-11. Two things, in this order,
+        # before the field-specific handling below:
+        #
+        #   - a Sub-task with no canonical row is mirrored here, on "the
+        #     first `jira:issue_updated`" — the same create-or-update rule
+        #     the Release branch above follows, and without it a Sub-task
+        #     whose `jira:issue_created` came and went unmirrored would
+        #     never become canonical;
+        #   - the snapshot's Blocks links are reconciled and both ends'
+        #     status re-derived.
+        #
+        # Before the `field == 'status'` branch, because a person moving a
+        # Backlog subtask back from Shovel Ready "keeps the status its Jira
+        # status maps to" (Pass 6, decision 5.1): the re-derivation reads
+        # the status the subtask held BEFORE this changelog item, which is
+        # what that rule is about, and the mapped status is then recorded
+        # over it.
+        if item is None:
+            item = mirror_subtask(project, issue, issue_key, envelope)
+            work_item_id = item.id if item is not None else None
+        if item is not None:
+            reconcile_subtask_snapshot(project, issue, issue_key, envelope)
+            item = store.get_work_item(item.id)
 
     if field == 'status':
         to_status = change.get('toString')
@@ -825,14 +1270,31 @@ def handle_webhook_envelope(envelope: dict[str, Any], *,
     issue = payload.get('issue') or {}
     body = payload.get('body') or {}
     issue_key = issue.get('key')
+
+    project = envelope['project']  # a required envelope field (envelope.py's own validation) — always the normalized project name the ingestion view resolved from issue.fields.project (or, for an issuelink_created, from its source issue's).
+
+    # REQ-10: a project not in Jira mode ignores every Jira webhook —
+    # recorded, not applied, and not a failure. Read once, above the
+    # issue-key guard, because an `issuelink_created` body carries no
+    # `issue` at all and the same ignore still applies to it (REQ-11:
+    # handled "before its `issue_key` guard ... after applying the same
+    # local-mode ignore to the routed project").
+    in_jira_mode = project_config.get_mode(project)['mode'] == project_config.JIRA
+
+    if event == 'issuelink_created':
+        # canonical-delivery-state.md REQ-11 — Jira's own link-creation
+        # event, whose body carries `issueLink` and no `issue`.
+        if not in_jira_mode:
+            _record_generic_event(project, None, None, envelope,
+                                   {'event': event, 'ignored': 'project not in Jira mode'})
+            return
+        handle_issue_link_created(project, body, envelope)
+        return
+
     if not issue_key:
         return  # not a shape this consumer understands — ignore, not a failure.
 
-    project = envelope['project']  # a required envelope field (envelope.py's own validation) — always the normalized project name the ingestion view resolved from issue.fields.project.
-
-    # REQ-10: a project not in Jira mode ignores every Jira webhook —
-    # recorded, not applied, and not a failure.
-    if project_config.get_mode(project)['mode'] != project_config.JIRA:
+    if not in_jira_mode:
         _record_generic_event(project, None, issue_key, envelope, {'event': event, 'ignored': 'project not in Jira mode'})
         return
 

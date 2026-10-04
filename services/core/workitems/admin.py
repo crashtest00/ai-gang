@@ -699,14 +699,64 @@ class WebhookFailureAdmin(admin.ModelAdmin):
 
 @admin.register(ProjectConfig)
 class ProjectConfigAdmin(admin.ModelAdmin):
-    """Mode selection. Not itself a "work item write" the gated-write rules
-    govern — this is project-level meta-configuration, plain CRUD.
-    Prefer catchup.connect_jira/disconnect_jira for a real mode flip (they
-    also trigger the catch-up push); this admin is an operational
-    escape hatch."""
+    """Mode selection, **read-only from v5.2** (canonical-delivery-state.md
+    REQ-10; Shovel Ready Pass 5, decision 6.2).
+
+    Up to v5.1 this was plain CRUD over the row that decides a project's
+    mode, described as an operational escape hatch. It is not one any more:
+    switching a project to Jira mode without pushing its work items into
+    Jira leaves `core` holding items no Jira issue corresponds to, and
+    every write for them routed at an empty tracker. So `mode` and
+    `jira_project_key` are read-only on ADD as well as on change, and no
+    row is deleted here, because a project with no row is local mode by
+    definition (`models.py`) — deleting the row of a Jira-mode project
+    would switch it back with no `disconnect_jira` and no record of it.
+
+    The two management commands are the only paths that change a project's
+    mode: `connect_jira <project> <jira-key>`, which refuses unless the
+    credentials, the field ids and the webhook's events are all in place
+    and no Release is open, pushes every keyless work item into Jira,
+    re-syncs each keyed item's status and Blocks links, and only then
+    switches; and `disconnect_jira <project>`, which switches back and
+    makes no Jira write. Both are run with ScrumMaster stopped and the
+    project otherwise left alone.
+
+    An add form therefore creates a LOCAL row with no key — which is what a
+    project's first row always was — and the row's own project name and
+    timestamps are all this admin still writes."""
 
     list_display = ('project', 'mode', 'jira_project_key', 'updated_at')
-    readonly_fields = ('created_at', 'updated_at')
+    _ALWAYS_READONLY = ('mode', 'jira_project_key', 'created_at', 'updated_at')
+    readonly_fields = _ALWAYS_READONLY
+
+    def get_readonly_fields(self, request, obj=None):
+        # `obj is None` is the ADD form, which Django otherwise renders with
+        # every field editable — REQ-10 requires the two mode fields
+        # read-only there too, so a new row cannot be created straight into
+        # Jira mode.
+        return self._ALWAYS_READONLY
+
+    def has_delete_permission(self, request, obj=None):
+        """No row is deleted through this admin, single or bulk: Django
+        hides the delete button and drops `delete_selected` from the action
+        list when this is False, so the refusal is visible rather than a
+        rejection on submit."""
+        return False
+
+    def delete_model(self, request, obj):
+        _raise_as_form_error(write_gate.WriteGateRejectedError(
+            'a ProjectConfig row is not deleted through the admin — a project with no row is in local '
+            'mode, so deleting one would switch its project back with no disconnect_jira; run '
+            'disconnect_jira instead'
+        ))
+
+    def delete_queryset(self, request, queryset):
+        """Belt to `has_delete_permission`'s braces, for a caller that
+        reaches the model admin directly rather than through the change
+        list. A selection containing any Jira-mode row is refused WHOLE,
+        its local rows included, as every other bulk delete in this module
+        is (REQ-09)."""
+        self.delete_model(request, None)
 
 
 @admin.register(ProjectStatusConfig)

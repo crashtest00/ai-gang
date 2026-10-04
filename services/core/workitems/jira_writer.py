@@ -45,7 +45,10 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from . import jira_client, project_config, write_gate
-from .models import JiraWriteCompletion, ProjectStatusConfig, WebhookFailure, WorkItem
+from .models import (
+    JiraDecompositionProposal, JiraWriteCompletion, ProjectConfig, ProjectStatusConfig, WebhookFailure,
+    WorkItem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -257,36 +260,64 @@ def _no_issue_to_write(item: WorkItem, step: str) -> bool:
 # The Jira write for each input (REQ-09, "The writer's Jira write for each")
 # ---------------------------------------------------------------------------
 
+def transition_outcome(project: str, issue_key: str, jira_status: str) -> dict:
+    """Make one transition and report WHAT HAPPENED, deciding nothing.
+
+    `transition_issue` returns normally when the issue offers no transition
+    to the named status (`jira_client.py`'s own skip-and-warn), so this
+    distinguishes that case by its return value and, when it happens, reads
+    the issue's current status and Blocked flag once (`get_issue`) so a
+    caller can tell "the write it asked for has already taken effect" from
+    "this workflow does not offer it".
+
+    Returns `{'transitioned': bool, 'alreadyMapped': bool, 'flagged': bool,
+    'currentJiraStatus': str|None}`. `alreadyMapped` is REQ-09's test: the
+    issue is in a Jira status that maps to the SAME canonical status the
+    target maps to (`jira_status_to_canonical`), which covers both the
+    target status itself and another Jira status meaning the same thing.
+
+    The decision is deliberately the caller's, because the two callers
+    differ on exactly one point (REQ-10): a writer push counts an
+    already-mapped issue done only while its Blocked flag is CLEAR, while
+    `connect_jira`'s re-sync counts it done whether or not the flag is set,
+    because the re-sync clears no flag."""
+    if jira_client.transition_issue(issue_key, jira_status):
+        return {'transitioned': True, 'alreadyMapped': False, 'flagged': False, 'currentJiraStatus': None}
+
+    target_canonical = jira_status_to_canonical(project, jira_status)
+    issue = jira_client.get_issue(issue_key)
+    current = issue.get('status') or ''
+    current_canonical = jira_status_to_canonical(project, current)
+    return {
+        'transitioned': False,
+        'alreadyMapped': target_canonical is not None and current_canonical == target_canonical,
+        'flagged': bool(issue.get('blocked')),
+        'currentJiraStatus': current or None,
+    }
+
+
 def _transition_or_record_outcome(item: WorkItem, jira_status: str, *, completion_key: Optional[str],
                                    step: str) -> None:
-    """`transition_issue` returns normally when the issue offers no
-    transition to the named status (`jira_client.py`'s own
-    skip-and-warn). This distinguishes that case by its return value and
-    records it as ONE webhook failure naming the work item, the target
-    status and the step — the recorded outcome REQ-04 requires. It is never
-    retried, and the step is recorded complete when the call carries a key.
+    """The writer's rule over `transition_outcome` above: a missing
+    transition is recorded as ONE webhook failure naming the work item, the
+    target status and the step — the recorded outcome REQ-04 requires. It
+    is never retried, and the step is recorded complete when the call
+    carries a key.
 
-    Before recording it, the issue's current status is read: an issue
-    already in a Jira status that maps to the target canonical status, with
-    its Blocked flag clear, is a SUCCESS — the write it asked for has taken
-    effect (a duplicate derived push, or a person who moved the issue
-    first). While the flag is set it is one webhook failure."""
-    transitioned = jira_client.transition_issue(item.external_key, jira_status)
-    if transitioned:
+    An issue already in a Jira status that maps to the target canonical
+    status, with its Blocked flag CLEAR, is a SUCCESS — the write it asked
+    for has taken effect (a duplicate derived push, or a person who moved
+    the issue first). While the flag is set it is one webhook failure."""
+    outcome = transition_outcome(item.project, item.external_key, jira_status)
+    if outcome['transitioned']:
         mark_step_complete(completion_key, item.id, step)
         return
 
-    target_canonical = jira_status_to_canonical(item.project, jira_status)
-    issue = jira_client.get_issue(item.external_key)
-    current_canonical = jira_status_to_canonical(item.project, issue.get('status') or '')
-    already_there = target_canonical is not None and current_canonical == target_canonical
-    flagged = bool(issue.get('blocked'))
-
-    if already_there and not flagged:
+    if outcome['alreadyMapped'] and not outcome['flagged']:
         logger.info(
             '[jira-writer] %s offers no transition to "%s" but is already in a status that maps to it '
             '(%s) with its Blocked flag clear — counted done',
-            item.external_key, jira_status, issue.get('status'),
+            item.external_key, jira_status, outcome['currentJiraStatus'],
         )
         mark_step_complete(completion_key, item.id, step)
         return
@@ -294,8 +325,8 @@ def _transition_or_record_outcome(item: WorkItem, jira_status: str, *, completio
     record_webhook_failure(
         item,
         f'Jira issue {item.external_key} offers no transition to "{jira_status}"',
-        {'step': step, 'targetJiraStatus': jira_status, 'currentJiraStatus': issue.get('status'),
-         'blocked': flagged},
+        {'step': step, 'targetJiraStatus': jira_status, 'currentJiraStatus': outcome['currentJiraStatus'],
+         'blocked': outcome['flagged']},
     )
     mark_step_complete(completion_key, item.id, step)
 
@@ -587,3 +618,311 @@ def create_writer_consumer(redis_factory, project: str, *, consumer_name: str | 
         consumer_name=consumer_name or os.uname().nodename,
         handler=handler,
     )
+
+
+# ---------------------------------------------------------------------------
+# A Jira-mode decomposition (canonical-delivery-state.md REQ-11)
+# ---------------------------------------------------------------------------
+#
+# `materialize.materialize_decomposition` routes the command here on `push`
+# (REQ-09, "The routing layer"), having already run every validation it runs
+# in local mode apart from the gate — the assignment check, the no-progress
+# rule over the proposal graph and each proposal's artifact resolution —
+# with nothing written, so a rejected decomposition creates nothing in Jira.
+#
+# Nothing canonical is recorded here either. Each Jira Sub-task reaches
+# `core` through its own `jira:issue_created` webhook, which REQ-11's mirror
+# materializes with the proposal id this module's record holds for its key,
+# so a Jira-mode subtask ends up with the SAME canonical id local mode would
+# have given it.
+
+STEP_DECOMPOSITION = 'decomposition'
+
+
+def jira_project_key_of(project: str) -> Optional[str]:
+    """The Jira project key a Jira-mode project's issues are created in
+    (REQ-11: "with the project key from `ProjectConfig.jira_project_key`").
+
+    Read off the row directly rather than through
+    `project_config.get_mode`, which also returns the mode: the key is not
+    the mode, and `REQ-09/mode-readers` makes "no `get_mode` call outside
+    the mode layer" a property of the built Source. `write_gate.mode_of`
+    stays this module's one mode read."""
+    row = ProjectConfig.objects.filter(project=project).only('jira_project_key').first()
+    return (row.jira_project_key or None) if row is not None else None
+
+
+def proposal_record(proposal_id) -> Optional[JiraDecompositionProposal]:
+    return JiraDecompositionProposal.objects.filter(proposal_id=proposal_id).first()
+
+
+def proposal_record_for_key(jira_key: str) -> Optional[JiraDecompositionProposal]:
+    """The record row whose Jira key is `jira_key`, which is how REQ-11's
+    mirror finds a mirrored Sub-task's proposal id, specification link and
+    artifact links."""
+    if not jira_key:
+        return None
+    return JiraDecompositionProposal.objects.filter(jira_key=jira_key).first()
+
+
+def keyed_proposal_ids(subtasks: list[dict]) -> set:
+    """The ids among `subtasks` the record already holds a Jira key for — a
+    redelivery's already-created proposals, which count as resolved
+    blockers without being created again."""
+    ids = [s.get('id') for s in (subtasks or []) if s.get('id')]
+    if not ids:
+        return set()
+    rows = JiraDecompositionProposal.objects.filter(
+        proposal_id__in=ids, jira_key__isnull=False,
+    ).values_list('proposal_id', flat=True)
+    keyed = {str(proposal_id) for proposal_id in rows}
+    return {s['id'] for s in subtasks if s.get('id') and str(s['id']) in keyed}
+
+
+def inward_record_pairs(jira_key: str) -> list[dict]:
+    """The Blocks pairs the record holds with `jira_key` as the DEPENDENT —
+    a subtask's inward blockers as REQ-11 defines them for a subtask the
+    record names ("every Blocks pair the record holds with its key as the
+    dependent")."""
+    row = proposal_record_for_key(jira_key)
+    return list(row.blocks_pairs or []) if row is not None else []
+
+
+def record_pairs_naming_key(jira_key: str) -> list[dict]:
+    """Every Blocks pair the record holds in which `jira_key` is EITHER end
+    — what the mirror adds as canonical `blocks` links when it creates the
+    subtask (Shovel Ready Pass 6, decision 2.1)."""
+    if not jira_key:
+        return []
+    pairs = list(inward_record_pairs(jira_key))
+    for row in JiraDecompositionProposal.objects.filter(
+            blocks_pairs__contains=[{'blockerKey': jira_key}]):
+        pairs.extend(pair for pair in (row.blocks_pairs or []) if pair.get('blockerKey') == jira_key)
+    return pairs
+
+
+def record_holds_pair(blocker_key: str, dependent_key: str) -> bool:
+    """Whether the record holds this Blocks pair. A reconciled link the
+    record holds whose other end has no canonical row yet is SKIPPED with
+    no webhook failure, because the mirror will add it when that end is
+    created (REQ-11; Shovel Ready Pass 7, SR-7-11)."""
+    if not blocker_key or not dependent_key:
+        return False
+    return any(pair.get('blockerKey') == blocker_key for pair in inward_record_pairs(dependent_key))
+
+
+def dependent_proposal_ids_for_blocker(blocker_work_item_id) -> list:
+    """The canonical ids of the dependents the record holds for this
+    blocker. `store._unblock_dependents` adds these to the dependents it
+    finds through canonical `blocks` links, "in every mode", reading no
+    mode (REQ-11; §4's "Jira-mode unblocking from the decomposition
+    record" row): a Jira link may land after its subtask, so a canonical
+    link may not exist yet when the blocker reaches `done`.
+
+    Matched on the blocker's PROPOSAL id, not its Jira key, because the
+    proposal id is a mirrored subtask's canonical id (REQ-11) and is known
+    before any Jira call is made — so this needs no `external_key` and
+    works for a project that has since been returned to local mode."""
+    rows = JiraDecompositionProposal.objects.filter(
+        blocks_pairs__contains=[{'blockerProposalId': str(blocker_work_item_id)}],
+    ).values_list('proposal_id', flat=True)
+    return list(rows)
+
+
+def _record_row_for(project: str, parent: WorkItem, proposal: dict) -> JiraDecompositionProposal:
+    """The record row for one proposal, created if this is its first
+    delivery. Carries the proposal's specification and artifact links so
+    whichever of the mirror and this record lands second can attach them to
+    the canonical subtask (REQ-11)."""
+    spec_link = proposal.get('specificationLink') or None
+    artifact_links = [str(artifact_id) for artifact_id in (proposal.get('artifactLinks') or [])]
+    row, created = JiraDecompositionProposal.objects.get_or_create(
+        proposal_id=proposal['id'],
+        defaults={
+            'project': project,
+            'parent_work_item_id': parent.id,
+            'specification_link': ({'artifactId': str(spec_link['artifactId']),
+                                     'requirementId': spec_link['requirementId']} if spec_link else None),
+            'artifact_links': artifact_links,
+        },
+    )
+    return row
+
+
+def _record_blocks_pair(dependent_proposal_id, blocker_proposal_id, blocker_key: str,
+                         dependent_key: str) -> None:
+    """Recorded immediately after the Jira link is created, on the
+    DEPENDENT's row, so a redelivery skips it and the mirror can read a
+    subtask's inward blockers off one row."""
+    row = JiraDecompositionProposal.objects.filter(proposal_id=dependent_proposal_id).first()
+    if row is None:
+        return
+    pairs = list(row.blocks_pairs or [])
+    if any(pair.get('blockerKey') == blocker_key for pair in pairs):
+        return
+    pairs.append({
+        'blockerProposalId': str(blocker_proposal_id),
+        'dependentProposalId': str(dependent_proposal_id),
+        'blockerKey': blocker_key,
+        'dependentKey': dependent_key,
+    })
+    row.blocks_pairs = pairs
+    row.save(update_fields=['blocks_pairs'])
+
+
+def attach_record_references(row: JiraDecompositionProposal) -> None:
+    """Attach a proposal's specification and artifact links to its canonical
+    subtask, if that subtask exists yet.
+
+    REQ-11: "Whichever of the mirror and the writer's key record lands
+    second attaches the proposal's specification and artifact links to the
+    canonical subtask; each side commits its own write before it looks for
+    the other's, and both attaches are idempotent". This is that one
+    attach, called from both sides: here, right after the writer commits a
+    proposal's Jira key (the normal order is that no canonical row exists
+    yet, so this does nothing), and from the mirror right after it commits
+    the subtask (which is the side that normally does the work). §4 records
+    the window this covers from this side: a Sub-task webhook that beats
+    the writer's key record is mirrored with a fresh id and no record, and
+    its references would otherwise never be attached at all.
+
+    Idempotent on both paths: `store._record_specification_link` returns
+    the existing row unchanged for the same pair, and `_add_artifact_link`
+    dedupes on (work item, artifact)."""
+    from . import store  # lazy: store imports this module at import time.
+
+    if not row.jira_key:
+        return
+    item = WorkItem.objects.filter(external_key=row.jira_key).first()
+    if item is None:
+        return
+
+    spec_link = row.specification_link or None
+    if spec_link:
+        store.record_specification_link(item.id, spec_link['artifactId'], spec_link['requirementId'],
+                                        actor=f'jira-writer:{row.jira_key}')
+    for artifact_id in (row.artifact_links or []):
+        store.add_artifact_link(item.id, artifact_id, actor=f'jira-writer:{row.jira_key}')
+
+
+def execute_decomposition(project: str, parent: WorkItem, plan: dict, *,
+                           completion_key: Optional[str] = None) -> dict:
+    """REQ-11's Jira-mode decomposition: a Sub-task per proposal under the
+    parent's issue with its Agent field set, a Blocks link per edge of the
+    proposal graph, and the Jira status the project's map writes for
+    `ready` on the root subtasks (Shovel Ready with
+    `DEFAULT_JIRA_STATUS_MAP`).
+
+    `plan` is `materialize.plan_decomposition`'s result: `order` (every
+    proposal, blockers first), `pairs` (the Blocks edges) and `rootIds`.
+
+    **Each key is recorded the moment its issue exists, and each pair the
+    moment its link does**, so a redelivery skips every recorded proposal
+    and link. Called with no transaction open — `materialize`'s pushing
+    path opens none and the command consumer holds none — so each of those
+    records commits before the next create, which is what makes a failure
+    part way through resumable (§4 records the crash window between a Jira
+    create and its record as a known limitation)."""
+    if _no_issue_to_write(parent, STEP_DECOMPOSITION):
+        return {'posted': True, 'workItemId': str(parent.id), 'skipped': 'parent-has-no-external-key'}
+
+    project_key = jira_project_key_of(project)
+    if not project_key:
+        logger.error('[jira-writer] project %s is in Jira mode with no jira_project_key — '
+                      'cannot create a Sub-task', project)
+        record_webhook_failure(
+            parent,
+            'project is in Jira mode with no jira_project_key recorded — no Sub-task could be created',
+            {'step': STEP_DECOMPOSITION},
+        )
+        return {'posted': True, 'workItemId': str(parent.id), 'skipped': 'no-jira-project-key'}
+
+    id_to_jira_key: dict[str, str] = {}
+    for proposal in plan['order']:
+        row = _record_row_for(project, parent, proposal)
+        if not row.jira_key:
+            row.jira_key = jira_client.create_subtask_for_proposal(
+                parent.external_key, project_key,
+                summary=proposal.get('displayName') or str(proposal['id']),
+                description=proposal.get('description'),
+                agent_field_value=proposal.get('agent'),
+            )
+            row.save(update_fields=['jira_key'])
+        # "each side commits its own write before it looks for the other's"
+        # — the key is committed above, so this is where the writer attaches
+        # the proposal's references if the mirror got there first (§4's
+        # window; normally there is no canonical row yet and this is a
+        # single SELECT).
+        attach_record_references(row)
+        id_to_jira_key[str(proposal['id'])] = row.jira_key
+
+    for blocker_id, dependent_id in plan['pairs']:
+        blocker_key = id_to_jira_key.get(str(blocker_id))
+        dependent_key = id_to_jira_key.get(str(dependent_id))
+        if not blocker_key or not dependent_key:
+            continue  # unreachable: the plan resolves every blocker to a proposal in this command.
+        if record_holds_pair(blocker_key, dependent_key):
+            continue
+        links = jira_client.get_issue_links(dependent_key)
+        if blocker_key not in (links.get('isBlockedBy') or []):
+            # Jira does not dedupe identical links, so the check is the
+            # client's documented precondition, not an optimization.
+            jira_client.create_issue_link(blocker_key, dependent_key)
+        _record_blocks_pair(dependent_id, blocker_id, blocker_key, dependent_key)
+
+    ready_status = canonical_to_jira_status(project, 'ready')
+    for proposal_id in plan['rootIds']:
+        issue_key = id_to_jira_key.get(str(proposal_id))
+        if not issue_key or is_step_complete(completion_key, proposal_id, STEP_STATUS):
+            continue
+        if ready_status is None:
+            # V2 REQ-02 forbids this configuration (§4); should it exist
+            # anyway, the push is recorded as one webhook failure and not
+            # retried, and the subtask keeps the status Jira gave it.
+            record_webhook_failure(
+                parent,
+                'this project\'s Jira status map writes no Jira status for "ready" — '
+                f'root Sub-task {issue_key} was left as Jira created it',
+                {'step': STEP_STATUS, 'proposalId': str(proposal_id), 'jiraKey': issue_key},
+            )
+            mark_step_complete(completion_key, proposal_id, STEP_STATUS)
+            continue
+        outcome = transition_outcome(project, issue_key, ready_status)
+        if not outcome['transitioned'] and not (outcome['alreadyMapped'] and not outcome['flagged']):
+            record_webhook_failure(
+                parent,
+                f'Jira issue {issue_key} offers no transition to "{ready_status}"',
+                {'step': STEP_STATUS, 'proposalId': str(proposal_id),
+                 'targetJiraStatus': ready_status, 'currentJiraStatus': outcome['currentJiraStatus'],
+                 'blocked': outcome['flagged']},
+            )
+        mark_step_complete(completion_key, proposal_id, STEP_STATUS)
+
+    return {'posted': True, 'workItemId': str(parent.id), 'idToJiraKey': id_to_jira_key}
+
+
+def move_writer_group_to_stream_end(project: str, *, client=None) -> None:
+    """Move this writer's consumer group on a project's event stream to the
+    stream's END — what REQ-10's `connect_jira` does at the switch, "so
+    nothing published while the project was local is written to Jira".
+
+    A project that was local has been recording status changes, comments
+    and links into its event stream all along; after the switch the writer
+    starts consuming that stream, and without this it would begin at
+    whatever position the group already held (or at the stream's start for
+    a group created fresh) and replay a project's entire local history into
+    Jira as new writes.
+
+    Idempotent, and safe to call for a stream that does not exist yet
+    (`mkstream`)."""
+    from .redis_client import get_client
+    from .stream_topology import event_stream_name
+
+    stream = event_stream_name(project)
+    client = client or get_client()
+    try:
+        client.xgroup_create(stream, WRITER_GROUP, id='$', mkstream=True)
+    except Exception as err:  # noqa: BLE001 - BUSYGROUP means the group exists and has to be MOVED
+        if 'BUSYGROUP' not in str(err):
+            raise
+        client.xgroup_setid(stream, WRITER_GROUP, id='$')

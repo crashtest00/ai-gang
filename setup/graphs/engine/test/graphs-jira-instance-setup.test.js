@@ -96,3 +96,46 @@ test('the entry escalation node declares no check, procedure, or writes', () => 
   assert.equal(entry.writes, undefined);
   assert.equal(typeof entry.prompt, 'string');
 });
+
+// canonical-delivery-state.md REQ-10, "The field ids reach `core`" — the
+// 1.1 step runs BOTH provisioning scripts, writes only to the platform
+// .env, and verifies that all fourteen JIRA_FIELD_ID_VARS ids are there.
+// Up to v5.1 it ran only create-jira-fields.sh and told a human to copy
+// nine ids into the platform .env by hand; the five Release ids were
+// nobody's, and connect_jira refuses until all fourteen are set.
+test('the custom-fields step runs both provisioning scripts and verifies all fourteen ids', () => {
+  const doc = loadGraph();
+  const step = doc.nodes.find((n) => n.id === 'create-jira-custom-fields');
+
+  assert.match(step.procedure, /create-jira-fields\.sh/);
+  assert.match(step.procedure, /create-release-fields\.sh/);
+  assert.match(step.procedure, /14/, 'the verify names the full JIRA_FIELD_ID_VARS count');
+  assert.deepEqual(step.writes.files, ['~/ai-gang/.env'],
+    'the ids are written straight into the platform .env, so there is nothing to copy');
+  assert.ok(!/copy the IDs/i.test(step.procedure),
+    'the copy-the-ids instruction is dropped: derive-env.sh reads this file itself');
+  assert.ok(!/scrummaster/.test(step.procedure),
+    'nothing Jira-facing has read services/scrummaster/.env since v5.1');
+});
+
+// The two scripts the step names are the ones that exist, with the ids the
+// loop that reads them declares (gate 4: an enumerating doc matches the
+// config that defines it).
+test('the step names scripts that exist, and the fourteen ids derive-env.sh reads', () => {
+  const fs = require('node:fs');
+  const repoRoot = path.join(__dirname, '..', '..', '..', '..');
+
+  for (const script of ['create-jira-fields.sh', 'create-release-fields.sh']) {
+    const scriptPath = path.join(repoRoot, 'scripts', script);
+    assert.ok(fs.existsSync(scriptPath), `${script} is named by the graph and must exist`);
+    const text = fs.readFileSync(scriptPath, 'utf8');
+    assert.match(text, /FIELD_ID_ENV="\$HQ_ENV"/,
+      `${script} writes its ids into the platform .env`);
+  }
+
+  const deriveEnv = fs.readFileSync(path.join(repoRoot, 'scripts', 'startup', 'derive-env.sh'), 'utf8');
+  const block = deriveEnv.match(/JIRA_FIELD_ID_VARS=\(([\s\S]*?)\)/);
+  assert.ok(block, 'derive-env.sh declares JIRA_FIELD_ID_VARS as an array literal');
+  const ids = block[1].split('\n').map((line) => line.trim()).filter(Boolean);
+  assert.equal(ids.length, 14, 'the count the graph step verifies');
+});

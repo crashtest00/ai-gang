@@ -52,7 +52,8 @@ import base64
 import json
 import os
 import urllib.request
-from typing import Any
+from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from django.core.management.base import BaseCommand, CommandError
 
@@ -65,7 +66,23 @@ WEBHOOK_NAME = 'AI Gang'
 # back with its author. `comment_updated` is deliberately NOT subscribed:
 # `core` records a comment once, keyed on its Jira id, and an edit is not
 # mirrored.
-WEBHOOK_EVENTS = ['jira:issue_created', 'jira:issue_updated', 'comment_created']
+#
+# `issuelink_created` is REQ-11's: Jira documents link creation as its own
+# event, and the Sub-task link mirror reconciles a Blocks link from it
+# (`views.py`'s `jira_webhook` accepts that body, which carries `issueLink`
+# and no `issue`, and `webhook_consumer.handle_webhook_envelope` dispatches
+# it ahead of its `issue_key` guard). Without it a Blocks link a person
+# makes in Jira reaches `core` only on the dependent's next
+# `jira:issue_updated`, if one ever comes.
+#
+# REQ-10's `connect_jira` refuses to connect a project unless a registered
+# webhook carries every entry in this list, and
+# `scripts/init-project.sh`'s manual-registration fallback message lists
+# them; `services/core/tests/test_ensure_jira_webhook_command.py` pins both
+# against this list.
+WEBHOOK_EVENTS = [
+    'jira:issue_created', 'jira:issue_updated', 'comment_created', 'issuelink_created',
+]
 
 
 class JiraWebhookError(RuntimeError):
@@ -88,6 +105,42 @@ def _jira_request(method: str, url: str, email: str, token: str, body: dict[str,
     with urllib.request.urlopen(request) as response:
         raw = response.read()
     return json.loads(raw) if raw else None
+
+
+WEBHOOK_PATH = '/webhooks/jira'
+
+
+def list_webhooks(*, jira_url: str, jira_email: str, jira_token: str) -> list[dict[str, Any]]:
+    """Every webhook this Jira instance has registered, or [] if the list
+    cannot be read. REQ-10's `connect_jira` refuses to connect a project
+    unless one of these carries every `WEBHOOK_EVENTS` entry, which is the
+    one check that a Jira-mode project's inbound half actually works before
+    its outbound half is switched on."""
+    try:
+        existing = _jira_request('GET', f'{jira_url.rstrip("/")}/rest/webhooks/1.0/webhook',
+                                  jira_email, jira_token)
+    except Exception:
+        return []
+    return [hook for hook in (existing or []) if isinstance(hook, dict)]
+
+
+def webhook_missing_events(hooks: list[dict[str, Any]]) -> Optional[list[str]]:
+    """None when some registered webhook at this service's own path carries
+    every `WEBHOOK_EVENTS` entry; otherwise the entries the closest match
+    lacks — or the whole list when no webhook is registered at that path at
+    all. The URL is matched on its PATH (REQ-10: "a webhook whose URL path
+    is `/webhooks/jira`"), because the registered URL also carries the host
+    and the `?secret=` query, neither of which a caller can reconstruct."""
+    best: Optional[list[str]] = None
+    for hook in hooks:
+        if urlsplit(hook.get('url') or '').path != WEBHOOK_PATH:
+            continue
+        missing = [event for event in WEBHOOK_EVENTS if event not in (hook.get('events') or [])]
+        if not missing:
+            return None
+        if best is None or len(missing) < len(best):
+            best = missing
+    return best if best is not None else list(WEBHOOK_EVENTS)
 
 
 def ensure_jira_webhook(*, jira_url: str, jira_email: str, jira_token: str, webhook_url: str) -> bool:

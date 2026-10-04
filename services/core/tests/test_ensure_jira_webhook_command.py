@@ -19,6 +19,7 @@ request to anything.
 from __future__ import annotations
 
 import io
+import pathlib
 
 import pytest
 from django.core.management import call_command
@@ -131,13 +132,28 @@ def test_an_existing_registration_missing_an_event_is_updated_not_returned_from(
 
 
 def test_the_subscribed_event_list_is_what_the_webhook_consumer_dispatches_on():
-    """REQ-09 — the registration and the consumer have to agree: an event
-    `webhook_consumer.handle_webhook_envelope` branches on but nobody
+    """REQ-09, REQ-11 — the registration and the consumer have to agree: an
+    event `webhook_consumer.handle_webhook_envelope` branches on but nobody
     subscribes is a branch that never runs, which is exactly what
-    `comment_created` was before v5.2."""
+    `comment_created` was before v5.2 and `issuelink_created` would be
+    without REQ-11's addition."""
     assert command_module.WEBHOOK_EVENTS == [
-        'jira:issue_created', 'jira:issue_updated', 'comment_created',
+        'jira:issue_created', 'jira:issue_updated', 'comment_created', 'issuelink_created',
     ]
+
+
+def test_init_projects_manual_registration_message_lists_every_subscribed_event():
+    """canonical-delivery-state.md §5's REQ-09/REQ-11 line —
+    "`init-project.sh:284`'s manual-registration message lists every
+    `WEBHOOK_EVENTS` entry". That message is what an operator follows when
+    the command could not reach Jira, so a list that has fallen behind this
+    one produces a registration Jira mode does not work with, and nothing
+    would say so."""
+    script = (pathlib.Path(__file__).resolve().parents[3] / 'scripts' / 'init-project.sh').read_text()
+    events_lines = [line for line in script.splitlines() if 'Events:' in line]
+    assert len(events_lines) == 1, 'one manual-registration message, so one list to keep in step'
+    listed = [event.strip() for event in events_lines[0].split('Events:')[1].rstrip('"').split(',')]
+    assert listed == command_module.WEBHOOK_EVENTS
 
 
 def test_registration_is_attempted_even_when_the_existence_check_fails(monkeypatch):

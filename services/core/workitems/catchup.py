@@ -1,6 +1,6 @@
 """
 What remains of connecting a project to Jira: recording an external key
-against a work item, and the mode flip itself.
+against a work item.
 
 Django/`core` holds the running platform's only Jira client
 (`workitems/jira_client.py`, V5.1 REQ-01); nothing calls it until v5.2's
@@ -8,11 +8,20 @@ outbound writer, besides `ensure_jira_webhook.py`'s webhook registration
 (BF-02).
 
 The catch-up push that used to live here is gone (v5.1): its Jira-facing half
-was ScrumMaster's jiraCatchupConsumer.js, which no longer exists, and pushing
-a project's existing work items into Jira returns with the outbound writer in
-v5.2. record_external_key stays as the idempotent recorder that writer will
-report back through, and disconnect_jira stays as the operator's switch back
-to local mode.
+was ScrumMaster's jiraCatchupConsumer.js, which no longer exists.
+
+**From v5.2 the mode flip is gone from this module too**
+(canonical-delivery-state.md REQ-10). A project's mode changes through
+exactly two paths, both management commands run with the project quiesced:
+`connect_jira <project> <jira-key>`, which pushes the project's keyless work
+items into Jira, re-syncs each keyed item's status and links, and only then
+switches the mode; and `disconnect_jira <project>`, which calls
+`project_config.revert_to_local` and makes no Jira write. `catchup.connect_jira`
+switched with no push at all, which is the thing REQ-10 exists to stop, and
+`catchup.disconnect_jira` had no caller once the command existed.
+
+What stays here is `record_external_key`, the idempotent recorder
+`connect_jira`'s push reports each created issue's key back through.
 """
 
 from __future__ import annotations
@@ -20,7 +29,6 @@ from __future__ import annotations
 from django.db import transaction
 from django.utils import timezone
 
-from . import project_config
 from .models import WorkItem, WorkItemHistory
 from .store import write_outbox_event as _write_outbox_event
 
@@ -47,14 +55,3 @@ def record_external_key(work_item_id, external_key: str, *, actor: str = 'jira-c
             payload={'workItemId': str(work_item_id), 'externalKey': external_key},
         )
         return {'alreadyRecorded': False, 'externalKey': external_key}
-
-
-def connect_jira(project: str, jira_project_key: str) -> None:
-    """The mode flip itself. Connecting a project is v5.2's, with the outbound
-    writer and the catch-up push that goes with it; this is the flip that
-    command will call."""
-    project_config.set_mode(project, project_config.JIRA, jira_project_key=jira_project_key)
-
-
-def disconnect_jira(project: str) -> None:
-    project_config.revert_to_local(project)
