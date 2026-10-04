@@ -317,12 +317,14 @@ def admin_transition_work_item(request, work_item_id):
 @csrf_exempt
 @require_http_methods(['POST'])
 def admin_record_release_candidate(request, work_item_id):
-    """The local-mode writeback
-    target for the release-candidate Jenkins job's results (Candidate SHA,
-    Build Identifier, Preview URL), mirroring what Jenkins already writes
-    directly onto a Jira Release ticket's custom fields today. Jenkins
-    itself does not yet call this — remaining Jenkins-side follow-up is
-    tracked separately."""
+    """The writeback target for the release-candidate Jenkins job's results
+    (Candidate SHA, Build Identifier, Preview URL), called by Jenkins in
+    every mode (canonical-delivery-state.md REQ-06): `jenkins.yaml`'s
+    Jira-mode reporting branch calls this endpoint the same way its
+    local-mode branch always has, rather than writing the three fields
+    directly onto a Jira Release ticket itself. `record_release_candidate`
+    records them here first, in every mode, before REQ-09's writer sets
+    them in Jira for a Jira-mode project."""
     try:
         actor = request.headers.get('X-Actor', 'jenkins')
         body = json.loads(request.body or b'{}')
