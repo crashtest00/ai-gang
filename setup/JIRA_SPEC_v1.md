@@ -94,7 +94,7 @@ These fields are **instance-level** — created once for the whole Jira instance
 | Field name | `Agent` |
 | Field type | Single-select |
 | Scope | All projects |
-| Set by | Nothing in V5.1 — writing it back to Jira is v5.2's outbound writer. A human or the provisioning scripts set it |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human or the provisioning scripts may also set it |
 | Read by | `core`'s webhook interpretation, which carries the value onto the canonical work item |
 | Env var | `JIRA_AGENT_FIELD_ID` |
 
@@ -111,7 +111,7 @@ These fields are **instance-level** — created once for the whole Jira instance
 | Field name | `Blocked` |
 | Field type | Single-select (one option: `Yes`) |
 | Scope | All projects |
-| Set by | No AI Gang component from V5.1 until v5.2's outbound writer does; a human may set it |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human may also set it |
 | Cleared by | Human only |
 | Read by | `core` — the `jira:issue_updated` webhook tells it the field was cleared |
 | Env var | `JIRA_BLOCKED_FIELD_ID` |
