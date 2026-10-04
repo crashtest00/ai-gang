@@ -30,13 +30,24 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from . import envelope as envelope_module
-from . import redis_client, registry, store
+from . import jira_writer, project_config, redis_client, registry, status_vocabulary, store, write_gate
 from .models import BetaDeploymentRecord
 from .streams import publish
 
 logger = logging.getLogger(__name__)
 
 PIPELINE_FAILURE_AUTHOR = 'jenkins'
+
+# REQ-05's evidence comment and REQ-01's failure comment share this literal
+# author — both are canonical writes `core` makes on Jenkins' behalf, not
+# Jenkins calling out itself.
+BETA_EVIDENCE_AUTHOR = 'jenkins'
+
+# REQ-09's step name for a status write, reused here rather than invented
+# again: the webhook failure this module records for a no-legal-transition
+# or `ValidationError` outcome is, like the writer's own, a failure of the
+# "status" step.
+STEP_STATUS = jira_writer.STEP_STATUS
 
 
 def _references(payload: dict[str, Any]) -> list[str]:
@@ -130,25 +141,106 @@ def record_beta_deployment(payload: dict[str, Any], project: str, *,
     return {'deduped': False, 'workItemIds': work_item_ids}
 
 
+def evidence_comment_body(payload: dict[str, Any]) -> str:
+    """REQ-05's beta-evidence comment: "the comment carries the Beta URL,
+    deployed SHA, build identifier and build log" — the same content
+    `Jenkinsfile.template:254-278` posted directly to Jira before this
+    stage, now built here instead of by Jenkins."""
+    lines = ['Deployed to beta.']
+    beta_url = payload.get('beta_url')
+    if beta_url:
+        lines.append(f'Beta: {beta_url}')
+    lines.append(f'Deployed SHA: {payload.get("deployed_sha") or "(unknown)"}')
+    lines.append(f'Build: {payload.get("build_identifier") or "(unknown)"}')
+    build_url = payload.get('build_url')
+    if build_url:
+        lines.append(f'Build log: {build_url}')
+    return '\n'.join(lines)
+
+
 def apply_beta_deployment_to_work_item(work_item_id, payload: dict[str, Any], *,
                                         completion_key: str) -> None:
     """REQ-05's evidence comment and REQ-04's `in-review` transition for one
     resolved work item, evidence first — the ordering `Jenkinsfile.template`
     guaranteed for free with one sequential shell loop and that two
-    independently consumed events would lose.
+    independently consumed events would lose. Both calls carry the same
+    `completion_key` (`<sourceMessageId>:<workItemId>`): the comment path's
+    own step (`comment`) and `transition_status`'s push step (`status`)
+    never collide on it, and a redelivery that already completed one of the
+    two steps skips only that one.
 
-    Deliberately left unimplemented by this track: REQ-04 and REQ-05 own
-    the body (the already-`in-review` case, the `done`/`cancelled`/`failed`
-    and `ValidationError` cases, and the single webhook failure each
-    records). REQ-01 owns the dispatch branch above, the resolution, and the
-    deduplication record, which is what this module builds. Until that body
-    lands a resolved deployment is resolved and recorded and leaves the work
-    item alone — the v5.1 behaviour, not a regression."""
-    logger.info(
-        '[beta-deployment] resolved work item %s for build %s (completion key %s) — '
-        'its evidence comment and in-review transition are REQ-04/REQ-05\'s',
-        work_item_id, payload.get('build_identifier'), completion_key,
+    The handler states no mode: `store.append_comment` and
+    `store.transition_status` each ask `write_gate.route` and either record
+    or push accordingly (REQ-09). In Jira mode the comment call pushes
+    in-process before this returns, so the transition call that follows
+    cannot reach Jira first (REQ-05, "The order holds because one handler
+    makes both calls, comment first").
+
+    REQ-04's no-legal-transition handling reads the work item's *canonical
+    baseline status* (a custom status resolves to its baseline first,
+    `status_vocabulary.baseline_of`), not the project's mode:
+
+      already `in-review`  the write already took effect — do nothing
+                            further, record no webhook failure;
+      `done`/`cancelled`/`failed`  no legal transition — the evidence
+                            comment above still lands, `transition_status`
+                            is not called, and exactly one webhook failure
+                            is recorded naming this work item and the
+                            `status` step;
+      anything else         call `transition_status`; a `ValidationError`
+                            from it is treated the same as a no-legal-
+                            transition outcome (comment kept, one webhook
+                            failure recorded, nothing raised to the
+                            consumer).
+
+    A Jira-mode push's OWN missing-transition outcome (the ticket offers no
+    In Review transition) is `jira_writer`'s to record, inside
+    `transition_status`'s push branch — not duplicated here."""
+    item = store.get_work_item(work_item_id)
+    if item is None:
+        # The association that resolved this id still pointed somewhere;
+        # the work item itself is gone by the time delivery caught up. Not
+        # one of REQ-04's named outcomes — logged, not recorded as a
+        # webhook failure naming a work item that no longer exists.
+        logger.error(
+            '[beta-deployment] work item %s resolved for build %s no longer exists — '
+            'no evidence comment, no transition',
+            work_item_id, payload.get('build_identifier'),
+        )
+        return
+
+    store.append_comment(
+        work_item_id, BETA_EVIDENCE_AUTHOR, evidence_comment_body(payload),
+        source_message_id=completion_key, origin=write_gate.Origins.DIRECT,
     )
+
+    custom_statuses = project_config.get_custom_statuses(item.project)
+    baseline = status_vocabulary.baseline_of(item.status, custom_statuses)
+
+    if baseline == 'in-review':
+        return
+
+    if baseline in status_vocabulary.TERMINAL_STATUSES:
+        jira_writer.record_webhook_failure(
+            item,
+            f'beta deployment: work item {work_item_id} has no legal transition to "in-review" '
+            f'(status is "{item.status}")',
+            {'step': STEP_STATUS, 'build_identifier': payload.get('build_identifier')},
+        )
+        return
+
+    try:
+        store.transition_status(
+            work_item_id, 'in-review', actor=BETA_EVIDENCE_AUTHOR,
+            origin=write_gate.Origins.DIRECT, completion_key=completion_key,
+        )
+    except store.ValidationError as err:
+        jira_writer.record_webhook_failure(
+            item,
+            f'beta deployment: transitionStatus raised a ValidationError for work item '
+            f'{work_item_id}: {err}',
+            {'step': STEP_STATUS, 'build_identifier': payload.get('build_identifier')},
+        )
 
 
 # ---------------------------------------------------------------------------
