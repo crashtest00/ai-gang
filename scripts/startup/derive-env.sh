@@ -23,10 +23,10 @@
 #     absent from .env itself.
 #
 #   services/scrummaster/.env — updated in place, never rewritten, so a
-#     value already set directly in that file (e.g. PREVIEW_DOMAIN,
-#     services/scrummaster/.env.example) survives a re-run. Only the keys
-#     this flow owns are set. (From v5.2: scripts/create-jira-fields.sh
-#     and scripts/create-release-fields.sh write their field ids into the
+#     value already set directly in that file by hand, or by its own
+#     .env.example default, survives a re-run. Only the keys this flow
+#     owns are set. (From v5.2: scripts/create-jira-fields.sh and
+#     scripts/create-release-fields.sh write their field ids into the
 #     platform .env instead, which this script carries into
 #     services/core/.env above, not into this file —
 #     canonical-delivery-state.md REQ-10.)
