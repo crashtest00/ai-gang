@@ -79,6 +79,25 @@ release is observable through the same internal read API
 eligibility, does not trigger Jenkins, and does not change
 `work_item_release_detail`'s shape.
 
+**Corrected 2026-10-04 (v5.1 BUGFIXES.md BF-06; v5.2 Canonical Delivery
+State REQ-06, REQ-08, REQ-09).** The paragraph above describes `ba3f68b`,
+before this stage, and three of its premises no longer hold. `core`'s
+outbound writer (`workitems/jira_writer.py`) is now a running caller of
+`jira_client.py` — the client does not wait for an "outbound writer" that
+has since been built, and `views.py` and this module call it too (link
+reads, the Blocked-flag write and read). Jenkins' own Jira writes are not
+merely "remaining until v5.2": REQ-06 retires every one of them, and the
+candidate-cut writes this module's Release handling used to route to
+Jenkins instead happen as Django-side effects of REQ-09's writer. And a
+`work_item.jira_release_event` for a Jira-mode project no longer logs as
+unresolved and triggers no job: REQ-08 removes `dispatchConsumer.js`'s
+Jira-mode early return, so ScrumMaster triggers the candidate,
+production-promote and preview-teardown jobs for a Jira-mode release the
+same way it does for a local-mode one. What still holds is the
+representational point this paragraph was making: a Release ticket's own
+candidate-cut eligibility and promotion logic is Django's to decide, not
+reimplemented by republishing a generic event from this consumer.
+
 Design decision (carried over unchanged from before this amendment):
 The durability requirement itself is satisfied by
 `workitems/views.py`'s `jira_webhook` view, which now durably enqueues

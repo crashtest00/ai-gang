@@ -234,8 +234,8 @@ a2a-submit.js completed \
 ```
 
 ScrumMaster posts the PR-opened comment. Opening a PR does not transition the
-ticket or reassign it — Jenkins does that once the pipeline passes. You are
-done.
+ticket or reassign it — the platform does that once the pipeline passes. You
+are done.
 
 A non-zero exit means nothing was published: read what it says, fix the call,
 and run it again.

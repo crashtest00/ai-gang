@@ -7,6 +7,13 @@ Django/`core` holds the running platform's only Jira client
 outbound writer, besides `ensure_jira_webhook.py`'s webhook registration
 (BF-02).
 
+**Corrected 2026-10-04 (v5.1 BUGFIXES.md BF-06; v5.2 Canonical Delivery
+State REQ-09).** v5.2's writer (`workitems/jira_writer.py`) is now a
+running caller of the client, not merely a planned one, and `views.py`
+and `webhook_consumer.py` call it too (link reads and the Blocked-flag
+write/read in the inbound mirror). The client no longer has zero
+production callers.
+
 The catch-up push that used to live here is gone (v5.1): its Jira-facing half
 was ScrumMaster's jiraCatchupConsumer.js, which no longer exists.
 

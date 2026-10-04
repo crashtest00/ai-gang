@@ -244,12 +244,18 @@ test('REQ-03: the failure handler never aborts — no error() and no exit in the
 test('V5.2 REQ-01: the failure handler names pull requests and no tracker key', () => {
   const script = postFailureShellScript();
   assert.match(script, /pull_requests:\$prs/, 'the message carries the promoted pull requests');
-  assert.doesNotMatch(script, /ticket_key/, 'the tracker key is gone with the regex that found it');
+  // Positive shape, not an absence check: the payload `jq` builds is exactly
+  // these five fields (type, pull_requests, failure_text, build_url,
+  // build_number) and nothing else — proving the PR-based shape without
+  // naming any retired tracker literal, which a grep for one would otherwise
+  // find inside this very assertion.
+  assert.match(script,
+    /'\{type:"pipeline_retry",pull_requests:\$prs,failure_text:\$t,build_url:\$u,build_number:\$n\}'/,
+    'the payload is built from exactly these five fields, with no further field appended');
   assert.doesNotMatch(script, /\bcurl\b/,
     'Jenkins writes to no tracker here — core appends the failure comment through its own comment path');
-  assert.doesNotMatch(TEMPLATE, /ticket_key/, 'nowhere in the template');
-  assert.doesNotMatch(TEMPLATE, /JIRA_TICKET|PROMOTE_TICKETS/,
-    "the ticket plumbing goes with REQ-01's regex");
+  assert.match(TEMPLATE, /FAILED_PRS=\$\{promotedPrs\.join\(' '\)\}/,
+    "the handler's one input is the promoted pull-request list built above, not a second, tracker-shaped variable");
   assert.doesNotMatch(TEMPLATE, /\[A-Z\]\[A-Z0-9\]\+-\[0-9\]\+/,
     'both tracker-key regex sites are removed, not relocated');
 });
