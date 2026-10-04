@@ -222,38 +222,32 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
 // Route one release event to its Jenkins job, or log it as unresolved.
 //
 // A release event ScrumMaster can act on names a canonical work item
-// (`workItemId`), and belongs to a project whose configured mode is not
-// `jira` (core's store.py `_publish_release_event`). Two kinds cannot be
-// acted on until v5.2's writer:
+// (`workItemId`). Every release event `core` publishes does, in every mode
+// (V5.2 Canonical Delivery State REQ-08): in local mode from
+// `store.py`'s `_publish_release_event`, and in Jira mode from
+// `webhook_consumer.py`'s three release publishers
+// (`_handle_release_requested`/`_handle_release_done`/
+// `_handle_release_abandoned`), each carrying the materialized Release's
+// canonical id and, as `project`, its Target Project — the former
+// Jira-mode early return here (which used to read the project's mode and
+// decline every such event, because nothing published one with a
+// `workItemId` before this stage) is gone, so this function triggers
+// Jenkins the same way for either mode. One kind still cannot be acted on:
 //
-//  - one carrying no `workItemId`, which core publishes straight from a
-//    tracker webhook and identifies by an external key alone; and
-//  - any event for a project whose configured mode is `jira`, whose gates
-//    (a missing target project, a missing candidate SHA, a work item still
-//    awaiting acceptance) were made by reads ScrumMaster no longer performs
-//    and core does not make for it.
+//  - one carrying no `workItemId`, which `core` would publish straight
+//    from a tracker webhook it could not resolve and identify by an
+//    external key alone, if one ever reached this consumer.
 //
-// Neither is rebuilt from the canonical replica and neither is routed to its
-// local-mode sibling, because the sibling relies on Django having already run
-// those gates (REQ-04). Both are logged at error level, naming the kind, and
-// trigger no Jenkins job.
+// It is not rebuilt from the canonical replica, because the local-mode
+// sibling relies on Django having already run its own gates (REQ-04). It
+// is logged at error level, naming the kind, and triggers no Jenkins job.
 async function routeReleaseEvent(data, projectName) {
   const { kind, workItemId, project } = data;
 
   if (!workItemId) {
     console.error(
       `[dispatch] Unresolved release event (kind "${kind}") on ${projectName} — it names no canonical work item, ` +
-      `so no Jenkins job was triggered; resolving it is v5.2's`
-    );
-    return;
-  }
-
-  const mode = await canonicalWorkItems.getMode(projectName);
-  if (mode.mode === 'jira') {
-    console.error(
-      `[dispatch] Unresolved release event (kind "${kind}") for work item ${workItemId} — project ${projectName} ` +
-      `is configured for an external tracker, whose release gates ScrumMaster no longer evaluates, ` +
-      `so no Jenkins job was triggered; resolving it is v5.2's`
+      `so no Jenkins job was triggered`
     );
     return;
   }

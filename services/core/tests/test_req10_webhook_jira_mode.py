@@ -165,8 +165,8 @@ def test_a_release_ticket_materializes_under_a_jira_mode_target_project_as_today
     assert item.type == 'release'
     assert item.project == TARGET_PROJECT
     assert OutboxEvent.objects.get(event_type='work_item.jira_release_event').payload == {
-        'kind': 'requested', 'jiraIssueKey': 'REL-102',
-    }
+        'kind': 'requested', 'workItemId': str(item.id), 'project': TARGET_PROJECT,
+    }, 'carries the materialized Release\'s canonical id and, as project, its Target Project (V5.2 REQ-08)'
     assert WebhookFailure.objects.count() == 0
 
 

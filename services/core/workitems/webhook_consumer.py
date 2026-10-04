@@ -693,42 +693,115 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
 def _handle_release_requested(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
     """A Release ticket's `jira:issue_created` creates the canonical
     `release` work item and its `work_item_release_detail` row via
-    `_materialize_release` (BF-01), then republishes the existing
-    `work_item.jira_release_event` (kind `requested`, `work_item_id=None`)
-    unchanged. Nothing acts on that event until v5.2's outbound writer:
-    ScrumMaster's former Jira-mode Release branch, which used to read
-    Target Project/Candidate SHA off a fresh `jira.getIssue(issueKey)` call
-    and run the beta-queue check and Jenkins trigger itself, is deleted
-    (REQ-04), so a Jira-mode release event is logged as unresolved and
-    triggers no Jenkins job (see module docstring). `_materialize_release`
-    returns `None`, and this function publishes nothing, when REQ-10's mode
-    check declines to create or re-resolve the row — a Release filed under
-    a Target Project not in Jira mode, or one that resolves to a work item
+    `_materialize_release` (BF-01), then runs the same two release checks
+    the pre-v5.1 handler ran against a fresh `jira.getIssue` call
+    (`e39e9ab`'s `handlers.js`, `handleReleaseRequested`) before publishing
+    `work_item.jira_release_event` (kind `requested`) — this is REQ-08's
+    one trigger for a Jira-mode candidate cut:
+
+      - the Target Project field, read raw from
+        `jira_interpret.parse_release_fields` rather than from `item.project`
+        (which already carries `_materialize_release`'s own-project
+        fallback) — unset leaves the Release uncut;
+      - failing that, the canonical beta-queue query
+        (`store._release_beta_queue_outstanding`) against the Target
+        Project, which REQ-04 keeps current in Jira mode — outstanding
+        work leaves the Release uncut.
+
+    Only the Target Project check runs when it fails, so a webhook posts at
+    most one of the two comments; on either, this function publishes no
+    event, and comments instead — through `store.append_comment`
+    (REQ-09's one comment path), after this function's `transaction.atomic()`
+    block exits, keyed `<messageId>:release-check` on the webhook envelope so
+    a redelivered webhook posts it once. The published event carries the
+    materialized Release's canonical `workItemId` and, as `project`, its
+    Target Project, on the outbox stream named by this function's own
+    `project` (the ticket's own containing Jira project) — so ScrumMaster
+    triggers Jenkins for it in Jira mode exactly as it already does in local
+    mode (REQ-08). Up to v5.1 ScrumMaster's own Jira-mode branch ran these
+    two checks itself and triggered Jenkins directly; that branch is deleted
+    (REQ-04). `_materialize_release` returns `None`, and this function
+    publishes nothing and comments nothing, when REQ-10's mode check
+    declines to create or re-resolve the row — a Release filed under a
+    Target Project not in Jira mode, or one that resolves to a work item
     whose own project isn't."""
+    missing_target_project = False
+    outstanding: list[WorkItem] = []
+
     with transaction.atomic():
         item = _materialize_release(project, issue, issue_key, envelope)
         if item is None:
             return
 
-        store.write_outbox_event(
-            project=project, event_type='work_item.jira_release_event', work_item_id=None,
-            payload={'kind': 'requested', 'jiraIssueKey': issue_key},
+        fields = issue.get('fields') or {}
+        detail = jira_interpret.parse_release_fields(fields)
+        missing_target_project = not (detail.get('targetProjectName') or detail.get('targetProjectKey'))
+        if not missing_target_project:
+            outstanding = store._release_beta_queue_outstanding(item.project)
+
+        if not missing_target_project and not outstanding:
+            store.write_outbox_event(
+                project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
+                payload={'kind': 'requested', 'workItemId': str(item.id), 'project': item.project},
+            )
+
+    release_check_key = f"{envelope.get('messageId')}:release-check"
+    if missing_target_project:
+        store.append_comment(
+            item.id, 'system',
+            'Release ticket is missing the required Target Project field. Set it and re-create the Release ticket.',
+            source_message_id=release_check_key,
+        )
+    elif outstanding:
+        listing = '\n'.join(f'  - {o.external_key or o.id}' for o in outstanding)
+        store.append_comment(
+            item.id, 'system',
+            'Cannot cut a release candidate — the following tickets are still awaiting tester '
+            f'acceptance on beta:\n\n{listing}\n\nResolve these (move to Done or otherwise off '
+            "beta's queue) and re-create the Release ticket.",
+            source_message_id=release_check_key,
         )
 
 
-def _handle_release_done(project: str, issue_key: str, envelope: dict) -> None:
+def _handle_release_done(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict) -> None:
+    """Publishes `work_item.jira_release_event` (kind `done`) for a Release
+    ticket's move to Done — the single production-approval gate, which now
+    triggers `production-promote` in Jira mode too (REQ-08) — carrying the
+    materialized Release's canonical `workItemId` and, as `project`, its
+    Target Project, the same shape `_handle_release_requested` publishes.
+    `_handle_changelog_item` calls this BEFORE applying the Done transition
+    itself, so this is the one place that cuts the event; the transition
+    that follows carries `origin=JIRA_WEBHOOK`, for which
+    `store.transition_status` publishes no second one (REQ-08). `item` is
+    `None` only if this Release ticket's `jira:issue_created` was never
+    processed AND `_materialize_release` just declined it too (REQ-10) —
+    nothing to publish or transition for it, recorded as a failure rather
+    than silently dropped."""
+    if item is None:
+        record_failure(project, None, issue_key,
+                        'Release moved to Done with no canonical release work item resolved', None)
+        return
     with transaction.atomic():
         store.write_outbox_event(
-            project=project, event_type='work_item.jira_release_event', work_item_id=None,
-            payload={'kind': 'done', 'jiraIssueKey': issue_key},
+            project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
+            payload={'kind': 'done', 'workItemId': str(item.id), 'project': item.project},
         )
 
 
-def _handle_release_abandoned(project: str, issue_key: str, envelope: dict) -> None:
+def _handle_release_abandoned(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict) -> None:
+    """Publishes `work_item.jira_release_event` (kind `abandoned`) for a
+    Release ticket's resolution set to Abandoned, in the same
+    `workItemId`/`project` shape as the other two publishers (REQ-08), so
+    ScrumMaster tears down its preview container in Jira mode too. See
+    `_handle_release_done` on `item is None`."""
+    if item is None:
+        record_failure(project, None, issue_key,
+                        'Release abandoned with no canonical release work item resolved', None)
+        return
     with transaction.atomic():
         store.write_outbox_event(
-            project=project, event_type='work_item.jira_release_event', work_item_id=None,
-            payload={'kind': 'abandoned', 'jiraIssueKey': issue_key},
+            project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
+            payload={'kind': 'abandoned', 'workItemId': str(item.id), 'project': item.project},
         )
 
 
@@ -1230,8 +1303,13 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         if not to_status:
             return
         if issuetype == 'Release' and to_status == 'Done':
-            _handle_release_done(project, issue_key, envelope)
-            return
+            # Publishes `done` first (REQ-08's one trigger for
+            # production-promote in Jira mode), then falls through to the
+            # same validated-transition path any other status change takes
+            # — origin JIRA_WEBHOOK, for which `store.transition_status`
+            # publishes no second release event (store.py's
+            # `transition_status`/`_transition_status_core`).
+            _handle_release_done(project, item, issue_key, envelope)
         if item is None:
             _record_generic_event(project, None, issue_key, envelope,
                                    {'field': 'status', 'from': change.get('fromString'), 'to': to_status})
@@ -1245,7 +1323,7 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         return
 
     if field == 'resolution' and change.get('toString') == 'Abandoned' and issuetype == 'Release':
-        _handle_release_abandoned(project, issue_key, envelope)
+        _handle_release_abandoned(project, item, issue_key, envelope)
         return
 
     # Issue links, arbitrary custom fields, anything not specifically

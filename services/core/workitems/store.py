@@ -545,7 +545,19 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     (REQ-09, step 5): on `push` the writer skips any step its completion
     record already shows done, and the release gate's comment is keyed
     `<completion_key>:release-gate` so a redelivered command adds none. The
-    admin and the external API pass none."""
+    admin and the external API pass none.
+
+    For a Release, `origin=JIRA_WEBHOOK` runs no beta-queue gate and (in
+    `_transition_status_core`) publishes no release event
+    (canonical-delivery-state.md REQ-08): `webhook_consumer.py`'s own three
+    release publishers (`_handle_release_requested`/`_handle_release_done`/
+    `_handle_release_abandoned`) are the one trigger for a Jira-mode
+    candidate, production-promote or teardown; this function's local-mode
+    publish (`_publish_release_event`, below) would otherwise fire a SECOND
+    time when the writer's In Review transition echoes back on this same
+    ticket's webhook, double-cutting a candidate. This keys on the origin,
+    not the mode: `JIRA_WEBHOOK` reaches here only for a project in Jira
+    mode (`webhook_consumer.py` only passes it after its own mode check)."""
     item = get_work_item(work_item_id)
     if not item:
         raise ValidationError(f'transitionStatus: no work item {work_item_id}')
@@ -554,7 +566,8 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     if verdict == write_gate.REFUSE:
         write_gate.refuse(origin, 'changing a work item\'s status')
 
-    if item.type == 'release' and item.status == 'proposed' and new_status == 'in-review':
+    if (item.type == 'release' and item.status == 'proposed' and new_status == 'in-review'
+            and origin != write_gate.Origins.JIRA_WEBHOOK):
         outstanding = _release_beta_queue_outstanding(item.project)
         if outstanding:
             names = ', '.join(f'{o.display_name} ({o.id})' for o in outstanding)
@@ -632,17 +645,15 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
         _recompute_parent_rollup(item.parent_id, actor)
     if changed and validity['baseline'] == 'done':
         _unblock_dependents(work_item_id, actor)
-    if changed and item.type == 'release':
-        # Publish the
-        # SAME canonical event Jira-mode candidate-cut/production-promote/
-        # abandonment already publish (webhook_consumer.py's
-        # _handle_release_requested/_handle_release_done/
-        # _handle_release_abandoned), with no new Django-side handler.
-        # `workItemId` in the payload is how the two modes now diverge on
-        # ScrumMaster's side (REQ-04): this local-mode event carries it, so
-        # dispatchConsumer.js's existing consumer triggers Jenkins for it as
-        # today, while the Jira-mode events above carry none and are logged
-        # as unresolved, triggering no Jenkins job.
+    if changed and item.type == 'release' and origin != write_gate.Origins.JIRA_WEBHOOK:
+        # Local mode's own trigger for the three release jobs — the
+        # Jira-mode equivalent is `webhook_consumer.py`'s three release
+        # publishers, which call this function with `origin=JIRA_WEBHOOK`
+        # for the Release's own In Review/Done transition, AFTER already
+        # publishing the event themselves (canonical-delivery-state.md
+        # REQ-08); this branch must not publish a second one for that
+        # origin, or every Jira-mode candidate cut would be followed by a
+        # duplicate (the webhook's In Review echo landing here too).
         kind = _RELEASE_EVENT_KIND_BY_STATUS.get(new_status)
         if kind:
             _publish_release_event(item, kind)

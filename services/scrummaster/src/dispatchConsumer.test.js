@@ -395,9 +395,10 @@ test('a story_intake side effect is ignored — it has no consumer until v5.2', 
 });
 
 // ---------------------------------------------------------------------------
-// REQ-04 — release-event routing. A resolvable event triggers its job; one
-// that names no work item, and one for a project in Jira mode, are logged as
-// unresolved and trigger nothing.
+// REQ-04/REQ-08 — release-event routing. A resolvable event triggers its
+// job in EITHER mode (V5.2 Canonical Delivery State REQ-08 ends the v5.1
+// exception under which a Jira-mode release event triggered nothing); one
+// that names no work item is logged as unresolved and triggers nothing.
 // ---------------------------------------------------------------------------
 
 function releaseEnvelope(kind, data) {
@@ -409,8 +410,7 @@ for (const [kind, handlerName] of [
   ['abandoned', 'handleReleaseAbandoned'],
   ['done', 'handleDone'],
 ]) {
-  test(`a release event of kind "${kind}" for a local-mode project invokes ${handlerName} with the canonical id`, async (t) => {
-    t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local', jiraProjectKey: null }));
+  test(`a release event of kind "${kind}" invokes ${handlerName} with the canonical id, reading no mode (REQ-08: the former Jira-mode early return is gone, so the project's mode makes no difference here)`, async (t) => {
     let called = null;
     t.mock.method(handlers, handlerName, async (ref) => { called = ref; });
 
@@ -433,24 +433,6 @@ for (const [kind, handlerName] of [
     assert.equal(errors.length, 1);
     assert.match(errors[0], /Unresolved release event/);
     assert.match(errors[0], new RegExp(`kind "${kind}"`));
-  });
-
-  test(`a release event of kind "${kind}" for a Jira-mode project is unresolved and triggers no job`, async (t) => {
-    t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'jira', jiraProjectKey: 'GANG' }));
-    const calls = [];
-    for (const name of ['handleReleaseRequested', 'handleReleaseAbandoned', 'handleDone']) {
-      t.mock.method(handlers, name, async () => { calls.push(name); });
-    }
-    const errors = [];
-    t.mock.method(console, 'error', (...args) => { errors.push(args.join(' ')); });
-
-    await handleWorkItemEventEnvelope(releaseEnvelope(kind, { workItemId: 'wi-release-2', project: PROJECT }), PROJECT);
-
-    assert.deepEqual(calls, [], 'a Jira-mode release event is not routed to its local-mode sibling');
-    assert.equal(errors.length, 1);
-    assert.match(errors[0], /Unresolved release event/);
-    assert.match(errors[0], new RegExp(`kind "${kind}"`));
-    assert.match(errors[0], /wi-release-2/);
   });
 }
 

@@ -27,11 +27,11 @@
  *
  * **From v5.2 the handler publishes one message, not one per ticket**
  * (Canonical Delivery State REQ-01). The message carries the promoted pull
- * requests in place of the tracker key the deleted Jira-key regex used to
+ * requests in place of the tracker key the deleted tracker-key regex used to
  * find; `core` resolves each reference to a work item, appends the failure
  * comment there, and publishes a retry per work item with the canonical id.
  * So there is no per-ticket loop left to prove visits every ticket, and no
- * Jira `curl` left to stub — what remains is the construction, the marker,
+ * tracker `curl` left to stub — what remains is the construction, the marker,
  * and the UNSTABLE result.
  *
  * The `timeout` step that bounds the whole handler (V5.0 audit row 9) is
@@ -251,7 +251,7 @@ test('V5.2 REQ-01: the failure handler names pull requests and no tracker key', 
   assert.doesNotMatch(TEMPLATE, /JIRA_TICKET|PROMOTE_TICKETS/,
     "the ticket plumbing goes with REQ-01's regex");
   assert.doesNotMatch(TEMPLATE, /\[A-Z\]\[A-Z0-9\]\+-\[0-9\]\+/,
-    'both Jira-key regex sites are removed, not relocated');
+    'both tracker-key regex sites are removed, not relocated');
 });
 
 test('V5.2 REQ-01: the dev build publishes one beta_deployed event, and a failed publish marks it UNSTABLE', () => {

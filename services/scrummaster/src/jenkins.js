@@ -18,24 +18,25 @@ async function invoke(token, payload) {
   await axios.post(url, payload, { params: { token } });
 }
 
-// `ref` is `'GANG-42'` (a bare Jira issue key, Jira mode — unchanged) or
-// `{ workItemId }` (local mode — no
-// Jira ticket). Sent as distinct payload fields (`issueKey` vs.
-// `workItemId`), never both, so jenkins.yaml's genericTrigger can tell
-// which mode a build is for and route its writeback stage accordingly
-// (see that file's `WORK_ITEM_ID` genericVariable).
+// `ref` is always `{ workItemId }` — the canonical work-item id, the only
+// work-item identifier these three jobs take, in either mode (V5.2
+// Canonical Delivery State REQ-08; the bare-tracker-key shape a Jira-mode
+// release used to carry here is retired along with that key). Sent as the
+// payload's only work-item field, so jenkins.yaml's genericTrigger binds
+// one variable, `WORK_ITEM_ID`.
 function _refPayload(ref) {
-  return typeof ref === 'string' ? { issueKey: ref } : { workItemId: ref.workItemId };
+  return { workItemId: ref.workItemId };
 }
 
 function _refLabel(ref) {
-  return typeof ref === 'string' ? ref : ref.workItemId;
+  return ref.workItemId;
 }
 
-// Fired once `core` has confirmed beta's queue is clean for a
-// local-mode release; a Jira-mode release event triggers nothing until v5.2.
-// Jenkins pins the candidate SHA, cuts `release/<sha>`, opens the
-// `release/<sha> → prod` PR, and stands up the preview container.
+// Fired once `core` has confirmed beta's queue is clean, for a release in
+// either mode (REQ-08 ends the v5.1 exception under which a Jira-mode
+// release event triggered nothing). Jenkins pins the candidate SHA, cuts
+// `release/<sha>`, opens the `release/<sha> → prod` PR, and stands up the
+// preview container.
 async function triggerReleaseCandidate(ref, projectName) {
   await invoke('release-candidate', { ..._refPayload(ref), projectName });
   console.log(`[jenkins] Triggered release-candidate for ${_refLabel(ref)} (${projectName})`);

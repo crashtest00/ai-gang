@@ -20,24 +20,17 @@ services:
       - CASC_JENKINS_CONFIG=/var/jenkins_home/casc_configs
       # Credentials injected from the host .env at startup
       - JENKINS_ADMIN_PASSWORD
-      - JIRA_URL
-      - JIRA_EMAIL
-      - JIRA_TOKEN
       - GITHUB_TOKEN
       - JENKINS_URL
-      # Release flow environment variables
-      - JIRA_CANDIDATE_SHA_FIELD_ID
-      - JIRA_BUILD_IDENTIFIER_FIELD_ID
-      - JIRA_PREVIEW_URL_FIELD_ID
       - PREVIEW_DOMAIN
       - BETA_VM_HOST
       - PROD_VM_HOST
       - REDIS_HOST=ai-gang-redis
-      # Local-mode release-candidate/production-promote writeback target.
-      # Container DNS name on the shared ai-gang network
-      # (services/core/docker-compose.yml's `api` service), not
-      # a configurable host — same convention as REDIS_HOST above, not
-      # JIRA_URL/BETA_VM_HOST below.
+      # release-candidate/production-promote writeback target, in every
+      # mode (V5.2 Canonical Delivery State REQ-06, REQ-08). Container DNS
+      # name on the shared ai-gang network (services/core/docker-compose.yml's
+      # `api` service), not a configurable host — same convention as
+      # REDIS_HOST above, not BETA_VM_HOST below.
       - WORKITEM_SERVICE_URL=http://core:9100
       # Deploy credentials added once deployment targets are decided
     deploy:

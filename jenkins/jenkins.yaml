@@ -33,11 +33,6 @@ credentials:
   system:
     domainCredentials:
       - credentials:
-          - string:
-              scope: GLOBAL
-              id: "jira-token"
-              description: "Jira API token (service account)"
-              secret: "${JIRA_TOKEN}"
           - usernamePassword:
               scope: GLOBAL
               id: "github-token"
@@ -55,10 +50,6 @@ credentials:
 unclassified:
   location:
     url: "${JENKINS_URL}"
-  jiraGlobalConfiguration:
-    sites:
-      - url: "${JIRA_URL}"
-        credentialsId: "jira-token"
   gitHubPluginConfig:
     configs:
       - name: "github.com"
@@ -68,25 +59,27 @@ unclassified:
 
 
 jobs:
-  # dev → beta promotion is no longer a separate job triggered off a Jira
-  # transition — it happens automatically inside each project's own
-  # per-project Jenkinsfile (see setup/Jenkinsfile.template) on every merge
-  # to `dev`. The three jobs below implement the batched, deliberate release
-  # flow instead: cutting a candidate, promoting it to production, and
-  # tearing down its preview if abandoned.
+  # dev → beta promotion is no longer a separate job triggered off a
+  # tracker-status transition — it happens automatically inside each
+  # project's own per-project Jenkinsfile (see setup/Jenkinsfile.template)
+  # on every merge to `dev`. The three jobs below implement the batched,
+  # deliberate release flow instead: cutting a candidate, promoting it to
+  # production, and tearing down its preview if abandoned. Each is
+  # triggered by ScrumMaster with the Release's canonical work-item id
+  # alone, in every mode (V5.2 Canonical Delivery State REQ-08) — no
+  # external tracker key reaches this file.
 
   - script: |
       pipelineJob('release-candidate') {
-        description('Triggered by ScrumMaster when a Jira Release ticket is created and beta\'s queue is confirmed clean. Pins beta\'s HEAD as the candidate SHA, cuts release/<sha>, opens the release/<sha> → prod PR, and stands up a private SHA-pinned preview container on the Beta VM.')
+        description('Triggered by ScrumMaster when a Release work item is created and beta\'s queue is confirmed clean. Pins beta\'s HEAD as the candidate SHA, cuts release/<sha>, opens the release/<sha> → prod PR, and stands up a private SHA-pinned preview container on the Beta VM.')
         triggers {
           genericTrigger {
             token('release-candidate')
             genericVariables {
-              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
               genericVariable { key('WORK_ITEM_ID'); value('$.workItemId') }
               genericVariable { key('PROJECT_NAME'); value('$.projectName') }
             }
-            causeString('Release $ISSUE_KEY requested for $PROJECT_NAME')
+            causeString('Release $WORK_ITEM_ID requested for $PROJECT_NAME')
             printContributedVariables(true)
             printPostContent(false)
           }
@@ -118,8 +111,8 @@ jobs:
                           git checkout -B release/^${CANDIDATE_SHA} ^${CANDIDATE_SHA}
                           git push origin release/^${CANDIDATE_SHA}
                           gh pr create --base prod --head release/^${CANDIDATE_SHA} \\
-                            --title "Release ^${ISSUE_KEY}: release/^${CANDIDATE_SHA}" \\
-                            --body "Frozen release candidate for ^${ISSUE_KEY}. Do not push further commits to this branch — it is pinned to ^${CANDIDATE_SHA}." \\
+                            --title "Release ^${WORK_ITEM_ID}: release/^${CANDIDATE_SHA}" \\
+                            --body "Frozen release candidate for ^${WORK_ITEM_ID}. Do not push further commits to this branch — it is pinned to ^${CANDIDATE_SHA}." \\
                             || echo "PR already open for release/^${CANDIDATE_SHA}"
                         """
                       }
@@ -130,7 +123,7 @@ jobs:
                       // Reuses the image already built and tested on the Beta VM for this SHA —
                       // no rebuild. Runs over the restricted deploy SSH key used for the
                       // Beta VM remote-deploy mechanism.
-                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-deploy ^${PROJECT_NAME} ^${CANDIDATE_SHA} ^${ISSUE_KEY}"
+                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-deploy ^${PROJECT_NAME} ^${CANDIDATE_SHA} ^${WORK_ITEM_ID}"
                       script {
                         env.PREVIEW_URL = "https://rc-^${env.CANDIDATE_SHA}.^${env.PREVIEW_DOMAIN}"
                       }
@@ -161,39 +154,18 @@ jobs:
                   stage('Report candidate back to the release') {
                     steps {
                       script {
-                        // A local-mode-originated release carries WORK_ITEM_ID (no Jira
-                        // ticket to write onto); a Jira-mode one carries ISSUE_KEY as
-                        // before. Never both.
-                        if (env.WORK_ITEM_ID?.trim()) {
-                          sh """
-                            curl -sf -X POST \\
-                              -H 'Content-Type: application/json' \\
-                              "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/release-candidate" \\
-                              -d '{"candidateSha": "^${CANDIDATE_SHA}", "buildIdentifier": "^${BUILD_IDENTIFIER}", "previewUrl": "^${PREVIEW_URL}"}'
-                          """
-                          // Candidate SHA/Build Identifier/Preview URL recorded and a
-                          // comment posted in the same call (store.record_release_candidate)
-                          // — the work item is already `in-review` (that transition ran
-                          // before this job was ever triggered), so unlike Jira mode there
-                          // is no separate status transition to make here.
-                        } else {
-                          sh """
-                            curl -s -u "\$JIRA_EMAIL:\$JIRA_TOKEN" -X PUT \\
-                              -H 'Content-Type: application/json' \\
-                              "\$JIRA_URL/rest/api/3/issue/^${ISSUE_KEY}" \\
-                              -d '{"fields": {
-                                "${JIRA_CANDIDATE_SHA_FIELD_ID}": "'"^${CANDIDATE_SHA}"'",
-                                "${JIRA_BUILD_IDENTIFIER_FIELD_ID}": "'"^${BUILD_IDENTIFIER}"'",
-                                "${JIRA_PREVIEW_URL_FIELD_ID}": "'"^${PREVIEW_URL}"'"
-                              }}'
-                          """
-                          jiraComment(
-                            site: 'ai-gang-jira',
-                            issueKey: "^${ISSUE_KEY}",
-                            body: "Release candidate ready for review.\\n\\nPreview: ^${PREVIEW_URL}\\nRelease PR: release/^${CANDIDATE_SHA} → prod\\nSHA: ^${CANDIDATE_SHA}\\nBuild: ^${BUILD_IDENTIFIER}" + (env.NATIVE_BUILD_URL ? "\\nNative build (^${env.NATIVE_BUILD_STATUS}): ^${env.NATIVE_BUILD_URL}" : "")
-                          )
-                          jiraTransition(site: 'ai-gang-jira', issueKey: "^${ISSUE_KEY}", transitionId: 'In Review')
-                        }
+                        // The candidate fields, the comment and the In Review transition
+                        // are all Django-decided side effects of this one call
+                        // (store.record_release_candidate), in every mode (V5.2 Canonical
+                        // Delivery State REQ-06) — the work item is already `in-review`
+                        // (that transition ran before this job was ever triggered), so
+                        // there is no separate status transition to make here.
+                        sh """
+                          curl -sf -X POST \\
+                            -H 'Content-Type: application/json' \\
+                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/release-candidate" \\
+                            -d '{"candidateSha": "^${CANDIDATE_SHA}", "buildIdentifier": "^${BUILD_IDENTIFIER}", "previewUrl": "^${PREVIEW_URL}"}'
+                        """
                       }
                     }
                   }
@@ -201,20 +173,12 @@ jobs:
                 post {
                   failure {
                     script {
-                      if (env.WORK_ITEM_ID?.trim()) {
-                        sh """
-                          curl -sf -X POST \\
-                            -H 'Content-Type: application/json' \\
-                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
-                            -d '{"body": "Failed to cut a release candidate. Build log: ^${env.BUILD_URL}"}' || true
-                        """
-                      } else {
-                        jiraComment(
-                          site: 'ai-gang-jira',
-                          issueKey: "^${ISSUE_KEY}",
-                          body: "Failed to cut a release candidate. Build log: ^${env.BUILD_URL}"
-                        )
-                      }
+                      sh """
+                        curl -sf -X POST \\
+                          -H 'Content-Type: application/json' \\
+                          "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                          -d '{"body": "Failed to cut a release candidate. Build log: ^${env.BUILD_URL}"}' || true
+                      """
                     }
                   }
                 }
@@ -232,12 +196,11 @@ jobs:
           genericTrigger {
             token('production-promote')
             genericVariables {
-              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
               genericVariable { key('WORK_ITEM_ID'); value('$.workItemId') }
               genericVariable { key('PROJECT_NAME'); value('$.projectName') }
               genericVariable { key('CANDIDATE_SHA'); value('$.candidateSha') }
             }
-            causeString('Release $ISSUE_KEY approved for $PROJECT_NAME @ $CANDIDATE_SHA')
+            causeString('Release $WORK_ITEM_ID approved for $PROJECT_NAME @ $CANDIDATE_SHA')
             printContributedVariables(true)
             printPostContent(false)
           }
@@ -298,22 +261,17 @@ jobs:
                     steps {
                       script {
                         // Plain Groovy string building only (sandbox-safe) — the JSON
-                        // encoding for the local-mode path happens in the shell step
-                        // below via jq, not here, since a static
-                        // groovy.json.JsonOutput.toJson() call would need one-time
-                        // manual Script Approval before this pipeline's sandbox
+                        // encoding happens in the shell step below via jq, not here,
+                        // since a static groovy.json.JsonOutput.toJson() call would need
+                        // one-time manual Script Approval before this pipeline's sandbox
                         // (sandbox(true) above) would allow it to run at all.
                         env.CONFIRM_BODY = "Promoted to production: ^${PROJECT_NAME} @ ^${CANDIDATE_SHA}." + (env.RELEASE_TAG ? " Tagged ^${env.RELEASE_TAG} — GitHub Release publishing via release-desktop.yml." : "")
-                        if (env.WORK_ITEM_ID?.trim()) {
-                          sh """
-                            jq -n --arg body "\$CONFIRM_BODY" '{body: \$body}' | curl -sf -X POST \\
-                              -H 'Content-Type: application/json' \\
-                              "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
-                              -d @-
-                          """
-                        } else {
-                          jiraComment(site: 'ai-gang-jira', issueKey: "^${ISSUE_KEY}", body: env.CONFIRM_BODY)
-                        }
+                        sh """
+                          jq -n --arg body "\$CONFIRM_BODY" '{body: \$body}' | curl -sf -X POST \\
+                            -H 'Content-Type: application/json' \\
+                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                            -d @-
+                        """
                       }
                     }
                   }
@@ -321,20 +279,12 @@ jobs:
                 post {
                   failure {
                     script {
-                      if (env.WORK_ITEM_ID?.trim()) {
-                        sh """
-                          curl -sf -X POST \\
-                            -H 'Content-Type: application/json' \\
-                            "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
-                            -d '{"body": "Production promotion failed. Build log: ^${env.BUILD_URL}\\n\\nThe release/^${CANDIDATE_SHA} → prod PR is still open — a human can inspect or merge it manually."}' || true
-                        """
-                      } else {
-                        jiraComment(
-                          site: 'ai-gang-jira',
-                          issueKey: "^${ISSUE_KEY}",
-                          body: "Production promotion failed. Build log: ^${env.BUILD_URL}\\n\\nThe release/^${CANDIDATE_SHA} → prod PR is still open — a human can inspect or merge it manually."
-                        )
-                      }
+                      sh """
+                        curl -sf -X POST \\
+                          -H 'Content-Type: application/json' \\
+                          "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/comments" \\
+                          -d '{"body": "Production promotion failed. Build log: ^${env.BUILD_URL}\\n\\nThe release/^${CANDIDATE_SHA} → prod PR is still open — a human can inspect or merge it manually."}' || true
+                      """
                     }
                   }
                 }
@@ -352,10 +302,10 @@ jobs:
           genericTrigger {
             token('release-preview-teardown')
             genericVariables {
-              genericVariable { key('ISSUE_KEY'); value('$.issueKey') }
+              genericVariable { key('WORK_ITEM_ID'); value('$.workItemId') }
               genericVariable { key('PROJECT_NAME'); value('$.projectName') }
             }
-            causeString('Release $ISSUE_KEY abandoned for $PROJECT_NAME')
+            causeString('Release $WORK_ITEM_ID abandoned for $PROJECT_NAME')
             printContributedVariables(true)
             printPostContent(false)
           }
@@ -368,7 +318,7 @@ jobs:
                 stages {
                   stage('Tear down preview') {
                     steps {
-                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-teardown-by-issue ^${PROJECT_NAME} ^${ISSUE_KEY} || true"
+                      sh "ssh beta-deploy@\$BETA_VM_HOST preview-teardown-by-work-item ^${PROJECT_NAME} ^${WORK_ITEM_ID} || true"
                     }
                   }
                 }

@@ -17,7 +17,7 @@
 //   1. PR build  (BRANCH_NAME = PR-N, CHANGE_ID set)
 //      Install -> Test -> Build, then `gh pr merge --auto`. GitHub squash-
 //      merges the PR into `dev` once this build reports success. Nothing
-//      beta- or Jira-status-related happens here. The ticket stays In
+//      beta- or review-status-related happens here. The work item stays In
 //      Progress.
 //
 //   2. dev build (BRANCH_NAME = dev), triggered by the push that merge makes
@@ -55,7 +55,7 @@
 // Release preview and production promotion are NOT handled here -- they're
 // separate, centrally-defined Jenkins jobs (release-candidate,
 // production-promote, release-preview-teardown; see jenkins/jenkins.yaml)
-// triggered from a Jira Release ticket.
+// triggered by ScrumMaster from a Release work item's own canonical state.
 //
 // GitHub prerequisites (setup/JenkinsConfig.md §7): "Allow auto-merge" on
 // the repo; `dev` requires the status check `continuous-integration/jenkins/
@@ -68,7 +68,7 @@ pipeline {
 
   options {
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    // One dev build at a time: two of them racing on the beta push / Jira
+    // One dev build at a time: two of them racing on the beta push / status
     // transitions would be the same problem this split exists to avoid.
     disableConcurrentBuilds()
   }
@@ -76,17 +76,8 @@ pipeline {
   environment {
     // TODO: set to this project's name -- matches the PROJECT_NAME
     // convention used for the Beta URL below, the pipeline_retry gateway
-    // stream, and config/projects.json's `name` / jira.js's
-    // targetProjectName.
+    // stream, and config/projects.json's `name`.
     PROJECT_NAME = 'TODO_PROJECT_NAME'
-
-    // Bound through Jenkins credentials (jenkins/jenkins.yaml) rather than
-    // read straight from the container's env so the console log masks it --
-    // `sh` echoes every command it runs, including the `curl -u` below.
-    // JIRA_URL / JIRA_EMAIL / GITHUB_TOKEN / REDIS_HOST still come from the
-    // container env (jenkins/docker-compose.yml); `gh` picks GITHUB_TOKEN up
-    // on its own and never prints it.
-    JIRA_TOKEN = credentials('jira-token')
   }
 
   stages {
@@ -189,7 +180,7 @@ pipeline {
         }
       }
       steps {
-        // Jenkins' own test gate is the only gate -- no Jira transition is
+        // Jenkins' own test gate is the only gate -- no tracker transition is
         // needed to reach this point.
         //
         // --auto, not a direct merge: this build's final commit status is

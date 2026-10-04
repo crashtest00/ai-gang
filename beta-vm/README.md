@@ -90,6 +90,6 @@ themselves, for reference or manual fallback:
 Exposing the Docker API (even over TLS) to Jenkins would let a compromised
 Jenkins credential run arbitrary containers on this VM. A forced SSH command
 scoped to five named operations (`deploy`, `preview-deploy`,
-`preview-teardown`, `preview-teardown-by-issue`) with regex-validated
+`preview-teardown`, `preview-teardown-by-work-item`) with regex-validated
 arguments is a much smaller blast radius, matching what the release process
 requires of the Beta VM's remote-deploy mechanism.
