@@ -50,7 +50,10 @@ Human opens PR from beta → prod (requires 1 approving review)
 
 ---
 
-## The Four Agent Roles
+## The Agent Roster
+
+`services/scrummaster/config/agents.json` — the dispatch contract — declares
+five roles:
 
 | Role                 | Responsibility                                                                  |
 | -------------------- | ------------------------------------------------------------------------------- |
@@ -58,6 +61,7 @@ Human opens PR from beta → prod (requires 1 approving review)
 | **Frontend Agent**   | Implements UI subtasks in the frontend container                                |
 | **Backend Agent**    | Implements API/service subtasks in the backend container                        |
 | **DevOps Agent**     | Jenkins setup and maintenance; not on the automated path                        |
+| **Desktop Agent**    | Parked — no project enables it yet, and `setup/agents/` has no definition file for it; `agents.json`'s entry stays until a project turns the role on |
 
 Agent definitions live in `~/ai-gang/setup/agents/` and are mounted read-only into every container at `/agent-docs`. Updating an agent definition is a `git pull`, and it takes effect at the next dispatch and never inside a running session: every dispatch copies the definitions, the role handbooks and the agent commons into a snapshot of its own and points the session at that copy, so no file an agent reads can change under it mid-session.
 

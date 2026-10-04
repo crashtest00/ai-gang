@@ -196,9 +196,12 @@ pipeline {
         // raw autoMergeRequest object against "null" never matches and the
         // merge is silently skipped.
         //
-        // The squash subject is pinned to "<PR title> (#N)" so the ticket
-        // key the agent put in the PR title is always in dev's history --
-        // the dev build's last-resort fallback for finding the ticket.
+        // The squash subject is pinned to "<PR title> (#N)" so the PR's
+        // own number and title are always in dev's history for a human to
+        // read. Resolution itself doesn't depend on it: the dev build finds
+        // each promoted commit's merged PR from the commit SHA directly
+        // (`gh api commits/$sha/pulls`, below), not by parsing this subject
+        // for a tracker key (canonical-delivery-state.md REQ-01, REQ-02).
         sh '''
           AUTO_MERGE=$(gh pr view "$CHANGE_ID" --json autoMergeRequest --jq '.autoMergeRequest != null')
           if [ "$AUTO_MERGE" != "true" ]; then

@@ -303,25 +303,24 @@ curl -u "$JIRA_EMAIL:$JIRA_TOKEN" "$JIRA_URL/rest/api/3/myself"
 Custom fields are Jira instance-level resources — create them once, their IDs are stable and reused by every project.
 
 ```bash
-cd ~/ai-gang && ./scripts/create-jira-fields.sh
+cd ~/ai-gang && ./scripts/create-jira-fields.sh && ./scripts/create-release-fields.sh
 ```
 
 This creates:
-- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`)
+- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
-- Records the 9 `JIRA_*_FIELD_ID` values it created in `services/scrummaster/.env`
+- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) and its Abandoned resolution
 
-From V5.1 no running service reads that output — only the provisioning scripts
-themselves do.
+Both scripts write the `JIRA_*_FIELD_ID` values they create directly into
+`~/ai-gang/.env`, the platform `.env` — not into `services/scrummaster/.env`,
+which nothing Jira-facing has read since v5.1 moved the Jira client into
+Django/core. `derive-env.sh` carries them from there into `services/core/.env`,
+the platform's only Jira client (`canonical-delivery-state.md` REQ-10).
+There is nothing to copy by hand.
 
-- `[HUMAN]` Copy the IDs into `~/ai-gang/.env`, the platform `.env`, which
-  `derive-env.sh` carries to `core`, the platform's only Jira client (V5.1
-  REQ-01, REQ-06)
-
-Verify: `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l` should
-return `9`, and the same grep against `~/ai-gang/.env` should return `9` once the IDs
-are copied.
+Verify: `grep -cE '^JIRA_[A-Z_]+_FIELD_ID=customfield_' ~/ai-gang/.env` should
+return `14`, the full set `derive-env.sh`'s `JIRA_FIELD_ID_VARS` loop reads.
 
 When adding a new project, apply existing fields via `init-project.sh` — do not recreate them.
 
@@ -671,16 +670,17 @@ Adapt the story to match what the project's actual agents can implement.
 
 ### Validation legs
 
-**ScrumMaster leg**:
-- Verify ScrumMaster receives the webhook: `docker compose logs scrummaster`
-- Verify Agent field on the story is set to `refinement-agent`
-- Verify a comment appears: "Ticket received. Assigned to Refinement Agent for decomposition."
+**`core` leg** (ScrumMaster is not a Jira client and receives no Jira
+webhook — `canonical-delivery-state.md` REQ-09):
+- Verify `core` receives the webhook: `docker compose logs core`
+- Verify Agent field on the story is set to `refinement-agent`, by `core`'s
+  outbound writer
+- Verify a comment appears: "Ticket received. Assigned to Refinement Agent for decomposition." — posted by the writer, through `core`'s one comment path
 - Verify story passes schema validation (no block comment)
 
 **Refinement leg**:
-- Verify a message is published to the project's Redis channel
-- Verify the container subscriber picks it up and invokes Claude
-- Verify Refinement Agent creates subtasks in Jira — **only for agent types that exist in this project**
+- Verify ScrumMaster's dispatch consumer, on the story's `work_item.status_changed` to `ready`, dispatches to the Refinement Agent — the same dispatch path every agent uses, not a Jira-specific one
+- Verify Refinement Agent creates subtasks as canonical work items, which `core`'s writer mirrors into Jira as Sub-tasks — **only for agent types that exist in this project**
 - Verify a completion comment is posted on the parent story
 
 **Dev agent leg** (repeat for each subtask):
@@ -719,10 +719,11 @@ Under **Workitems → Work items**, add a work item:
 - **Status**: `proposed`
 - **Assignee agent id**: `refinement-agent`
 - **External key**: leave it empty. It is the Jira issue key a work item
-  mirrors; this flow has no Jira integration configured, so setting it
-  saves fine but makes dispatch refuse the item outright — a comment
-  explaining why, and the item moved to `needs-clarification` instead of
-  being run.
+  mirrors; this flow has no Jira integration configured, and dispatch does
+  not check it either way — a non-blank value on a local-mode work item
+  saves fine and is simply not read, so the item still dispatches and
+  displays by its canonical id. Leave it blank here since there is no Jira
+  issue for it to name.
 
 It takes three saves, in this order, and the order matters:
 

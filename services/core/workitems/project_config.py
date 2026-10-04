@@ -32,9 +32,11 @@ def set_mode(project: str, mode: str, *, jira_project_key: Optional[str] = None)
     initialization; a project must complete initialization in local mode
     and connect Jira, if at all, as a separate, later operation. This
     function does not enforce that ordering itself — the caller (the
-    connect-Jira operation, catchup.py) is the only code path that ever
-    sets mode='jira', and it is never invoked as part of project
-    creation."""
+    connect-Jira operation, the `connect_jira` management command) is the
+    only code path that ever sets mode='jira', and it is never invoked as
+    part of project creation. (From v5.2: `catchup.py`'s `connect_jira`
+    function, named here until canonical-delivery-state.md REQ-10, is
+    removed; the management command calls this function directly.)"""
     if mode not in (LOCAL, JIRA):
         raise ValueError(f'invalid mode "{mode}" — must be "{LOCAL}" or "{JIRA}"')
 

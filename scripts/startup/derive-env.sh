@@ -22,9 +22,14 @@
 #     file entirely rather than written empty, same as an unset one is
 #     absent from .env itself.
 #
-#   services/scrummaster/.env — updated in place, never rewritten, since
-#     scripts/create-jira-fields.sh and scripts/init-project.sh both write
-#     their own values there. Only the keys this flow owns are set.
+#   services/scrummaster/.env — updated in place, never rewritten, so a
+#     value already set directly in that file by hand, or by its own
+#     .env.example default, survives a re-run. Only the keys this flow
+#     owns are set. (From v5.2: scripts/create-jira-fields.sh and
+#     scripts/create-release-fields.sh write their field ids into the
+#     platform .env instead, which this script carries into
+#     services/core/.env above, not into this file —
+#     canonical-delivery-state.md REQ-10.)
 #
 #     AI_GANG_HOME is the one that matters most: ScrumMaster's compose file
 #     resolves /projects and /agent-docs from ${AI_GANG_HOME:-$HOME/ai-gang},

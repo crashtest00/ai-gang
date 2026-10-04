@@ -94,11 +94,11 @@ These fields are **instance-level** — created once for the whole Jira instance
 | Field name | `Agent` |
 | Field type | Single-select |
 | Scope | All projects |
-| Set by | Nothing in V5.1 — writing it back to Jira is v5.2's outbound writer. A human or the provisioning scripts set it |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human or the provisioning scripts may also set it |
 | Read by | `core`'s webhook interpretation, which carries the value onto the canonical work item |
 | Env var | `JIRA_AGENT_FIELD_ID` |
 
-**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`. See [Agent Roster](#agent-roster). Values must match the canonical agent catalog's entries exactly.
+**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`. See [Agent Roster](#agent-roster). Values must match the canonical agent catalog's entries exactly — all five, including `desktop-agent`, which no project's `projects.json` currently enables for dispatch but which the catalog still declares.
 
 ---
 
@@ -111,7 +111,7 @@ These fields are **instance-level** — created once for the whole Jira instance
 | Field name | `Blocked` |
 | Field type | Single-select (one option: `Yes`) |
 | Scope | All projects |
-| Set by | No AI Gang component from V5.1 until v5.2's outbound writer does; a human may set it |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human may also set it |
 | Cleared by | Human only |
 | Read by | `core` — the `jira:issue_updated` webhook tells it the field was cleared |
 | Env var | `JIRA_BLOCKED_FIELD_ID` |
@@ -161,20 +161,28 @@ themselves are `backlog`, `ready`, `in-progress`, `in-review` and `done`.
 
 ### Who Moves a Ticket
 
-Status changes are made on the canonical work item; writing them back to Jira
-is v5.2's outbound writer, with one exception that exists today. The
-transitions this configuration must permit, and who will make each:
+Status changes are made on the canonical work item; `core`'s outbound writer
+(Canonical Delivery State REQ-09) makes the equivalent Jira write for a
+project in Jira mode, and the canonical status follows from Jira's webhook —
+no canonical row changes before the webhook returns. Jenkins holds no Jira
+credential and writes to no tracker: it reports a beta deployment as a
+canonical event carrying no ticket key, and `core` makes the transition
+(REQ-04, REQ-05, REQ-06). The transitions this configuration must permit, and
+who makes each:
 
-| Transition | Who / What | Written to Jira in V5.1? |
+| Transition | Who / What | Written to Jira |
 |---|---|---|
-| `Backlog` → `Shovel Ready` | Refinement Agent, via the ScrumMaster gateway | No — v5.2 |
-| `Shovel Ready` → `In Progress` | ScrumMaster, on dispatch, as a canonical command to `core` | No — v5.2 |
-| `In Progress` → `In Review` | Jenkins, on PR open | **Yes** — Jenkins' own Jira plugin, keyed by the branch name's ticket key |
-| `In Review` → `In Progress` | Jenkins, on pipeline failure | **Yes** — same path |
-| `In Review` → `Done` | Jenkins, on merge | **Yes** — same path |
+| `Backlog` → `Shovel Ready` | Refinement Agent, via the ScrumMaster gateway, through `core`'s writer | Yes |
+| `Shovel Ready` → `In Progress` | ScrumMaster, on dispatch, as a canonical command to `core`, through the writer | Yes |
+| `In Progress` → `In Review` | `core`, on a beta deployment Jenkins reports as a canonical event, through the writer | Yes |
+| `In Review` → `Done` | A human, in Jira — moving a ticket to Done is no longer any automation rule's action | By the human directly |
 
-A human may of course move a ticket in Jira; `core` interprets the resulting
-webhook for a project in Jira mode.
+A human may of course move a ticket in Jira directly; `core` interprets the
+resulting webhook for a project in Jira mode. From v5.2 no component moves a
+ticket back out of `In Review` on a failed build: Jenkins' pipeline-failure
+handler appends the failure comment through `core`'s comment path and
+leaves the ticket's status as it is (REQ-01); only a human, or a later
+beta deployment reaching `In Review` again, changes it further.
 
 ---
 
@@ -219,7 +227,22 @@ The Refinement Agent creates subtasks under the parent story — as canonical wo
 
 ## Automation Rules
 
-### Rule 1: PR Merged → Done
+**Retired, v5.2 (Canonical Delivery State REQ-04; product owner, October 2,
+2026, preliminary review decision 7.1).** The instance ran three automation
+rules through v5.1; none is enabled from v5.2, and `core` takes over none of
+them — the live Jira-mode proof (§5 of the specification) confirms no rule is
+enabled. They are kept below as a record of what the instance no longer
+runs, not as current configuration.
+
+Rule 1 moved a ticket to Done at merge, before its human review on beta —
+before `core`'s writer existed to make that transition deliberately, and
+colliding with the beta-queue-clean check once one did. Done remains a
+human's move, made in Jira and read back through the webhook ("Who Moves a
+Ticket", above). Rules 2 and 3 only added and removed a label for board
+visibility; the board now shows the Blocked field itself on ticket cards
+(see Board Configuration, above), so no label mirror is needed.
+
+### Rule 1: PR Merged → Done (retired)
 
 | Attribute | Value |
 |-----------|-------|
@@ -228,7 +251,7 @@ The Refinement Agent creates subtasks under the parent story — as canonical wo
 | Action | Transition issue to Done |
 | Notes | Requires GitHub for Jira app installed and connected |
 
-### Rule 2: Blocked Field Set → Add Board Indicator
+### Rule 2: Blocked Field Set → Add Board Indicator (retired)
 
 | Attribute | Value |
 |-----------|-------|
@@ -237,7 +260,7 @@ The Refinement Agent creates subtasks under the parent story — as canonical wo
 | Action | Add label `blocked` to ticket for board visibility |
 | Notes | Visual only — does not affect workflow status |
 
-### Rule 3: Blocked Field Cleared → Remove Board Indicator
+### Rule 3: Blocked Field Cleared → Remove Board Indicator (retired)
 
 | Attribute | Value |
 |-----------|-------|
@@ -246,7 +269,9 @@ The Refinement Agent creates subtasks under the parent story — as canonical wo
 | Action | Remove label `blocked` from ticket |
 | Notes | `core` interprets the same change separately, and the assigned agent is re-dispatched from the canonical work item |
 
-> Note: the Agent field is not maintained by a Jira automation rule. Nothing writes it back to Jira in V5.1; v5.2's outbound writer does.
+> Note: the Agent field is not maintained by a Jira automation rule. `core`'s
+> outbound writer writes it back to Jira, for a project in Jira mode
+> (Canonical Delivery State REQ-09).
 
 ---
 
