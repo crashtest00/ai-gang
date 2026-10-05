@@ -416,12 +416,12 @@ docker exec scrummaster node -e \
 ```
 
 This builds and starts the Jenkins container, installs plugins, and applies JCasC config. Key behaviors:
-- Sources `.env` before `docker compose up` so JCasC env vars (`JIRA_URL`, `JENKINS_URL`, etc.) are available at first boot
+- Sources `.env` before `docker compose up` so JCasC env vars (`JENKINS_URL`, etc.) are available at first boot
 - Waits for "Jenkins is fully up and running" in logs before declaring success
 
 **Critical configuration decisions**:
 
-- **Credential type**: Use `usernamePassword`, never `string`, for GitHub PAT credentials. The Git plugin cannot use a bare `string` secret for HTTPS authentication. For a GitHub PAT: `username: x-access-token`, `password: <PAT>`. This is already set correctly in `jenkins.yaml` — do not change it.
+- **Credential type**: Use `usernamePassword` for the GitHub PAT credential that git operations use (`github-token`). The Git plugin cannot use a bare `string` secret for HTTPS authentication. For a GitHub PAT: `username: x-access-token`, `password: <PAT>`. The one exception is `github-api-token`, a deliberate `string` (Secret Text) credential holding the same PAT, because the classic github plugin's webhook/status-check management accepts only Secret Text. Both are already set correctly in `jenkins.yaml` — do not change them.
 
 - **JCasC live reload**: `POST /configuration-as-code/reload` works for most config changes but cannot change an existing credential's type. If you need to change a credential type, wipe the volume and restart clean: `docker volume rm jenkins_jenkins-data && docker compose up -d`.
 
@@ -432,7 +432,6 @@ This builds and starts the Jenkins container, installs plugins, and applies JCas
 After Jenkins is up:
 
 - `[HUMAN]` Verify UI: `curl http://localhost:8080`
-- `[HUMAN]` Verify Jira connection: **Manage Jenkins → System → Jira → Test Connection**
 - Wire `JENKINS_URL` into ScrumMaster config so ScrumMaster can trigger builds
 
 **Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule.
@@ -453,7 +452,7 @@ After Jenkins is up:
 **Branch protection** (see `setup/JenkinsConfig.md` §7 for the full settings and `gh api` commands):
 - `dev`: require status checks to pass + branch up to date + do not allow bypassing
 - `beta`: no direct pushes — Jenkins only, fast-forward from `dev` only
-- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review.
+- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release work item to Done, not a GitHub review.
 
 ### 2.5 Beta VM Bootstrap
 

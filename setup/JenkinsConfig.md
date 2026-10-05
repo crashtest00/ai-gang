@@ -77,7 +77,7 @@ generic permissions error, not an obvious one:
 
 | Permission | Classic PAT scope | Fine-grained PAT permission | Needed for |
 |---|---|---|---|
-| Read/write commit statuses | `repo:status` | Commit statuses: Read and write | PR checks showing up at all (§2.3 above) |
+| Read/write commit statuses | `repo:status` | Commit statuses: Read and write | PR checks showing up at all (§2 above: the GitHub plugin) |
 | Merge PRs | `repo` | Pull requests: Read and write | Auto-merge to `dev`; merging the frozen `release/<sha> → prod` PR |
 | Trigger workflows | `workflow` | Actions: Read and write | `gh workflow run build-desktop.yml` |
 | Push tags | `repo` | Contents: Read and write | Pushing the `vX.Y.Z` release tag on production approval |
@@ -405,7 +405,7 @@ Projects with Jenkinsfile in place:
 
 End-to-end verification after setup is complete.
 
-- [ ] Create a test branch `feature/GANG-TEST-jenkins-smoke`
+- [ ] Create a test branch `feature/jenkins-smoke`
 - [ ] Open a PR against `dev`
 - [ ] Confirm Jenkins pipeline triggers and runs
 - [ ] Confirm test pass → PR auto-merges to `dev`, `beta` fast-forwards, and the
@@ -498,5 +498,4 @@ _Log actual values and decisions here as setup is completed._
 |---|---|---|
 | Droplet IP | | |
 | Jenkins version | | |
-| Jira org URL | | |
 | GitHub org | | |

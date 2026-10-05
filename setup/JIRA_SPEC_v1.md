@@ -30,10 +30,11 @@ source of truth for all work in the AI Gang system is the canonical work item
 in Django/`core`; a Jira ticket is a projection of one, for a project the
 operator has put in Jira mode.
 
-Jira mode is **off for V5.1's release**: every project runs in local mode, so
-nothing in the configuration below is exercised at runtime yet. It is set up
-now because it is one-time instance work, and because v5.2 — which builds the
-outbound writer and turns Jira mode back on — needs it already in place.
+A project runs in local mode until the operator runs `connect_jira` for it
+(Canonical Delivery State REQ-10), the only path that puts a project into Jira
+mode; nothing in the configuration below is exercised at runtime for a project
+that is still local. It is one-time instance work, and `connect_jira` refuses to
+run until it is in place.
 
 What the configuration supports, once a project is in Jira mode:
 
@@ -46,20 +47,21 @@ Human creates Story in Jira
   → the work item closes on merge
 ```
 
-Story-field validation and the missing-fields comment are **v5.2's**: the
-required-field list below describes what a Story should carry, and from v5.1
-no component blocks a ticket or comments on one for missing fields.
+For a Jira-mode project, `core` validates a newly created Story against the
+required-field list below: a Story with an empty required field is recorded as
+`proposed`, flagged Blocked, and given a comment on the ticket naming the
+missing fields (`webhook_consumer.py`, `_handle_story_created`).
 
 ### Jira Access by Role
 
 | Role | Jira Access | Notes |
 |------|-------------|-------|
 | Human | Full | Creates tickets, responds to blockers, clears Blocked field |
-| Django/`core` | Full read/write | The running platform's only Jira client (V5.1 REQ-01). Inbound: receives the instance webhook. Outbound: no running consumer calls the client until v5.2's writer, besides `ensure_jira_webhook`'s own registration |
+| Django/`core` | Full read/write | The running platform's only Jira client (V5.1 REQ-01). Inbound: receives the instance webhook. Outbound: `core`'s writer (`jira_writer.py`) makes every Jira write for a Jira-mode project; `ensure_jira_webhook` (registration) and `connect_jira` (the push) also call the client |
 | ScrumMaster | None | Not a Jira client. Reads canonical work items from `core` and publishes canonical commands back to it (V5.1 REQ-04) |
 | Dev Agents | None | Submit to the ScrumMaster gateway Redis Stream (`aigang:gateway:{project-name}`); ScrumMaster publishes the canonical command to `core` on their behalf |
 | Refinement Agent | None | Same as dev agents |
-| Jenkins | Comment + status | Posts pipeline results directly via its own Jira plugin, keyed by the branch name's ticket key. This path is unchanged in V5.1 and retires in v5.2 |
+| Jenkins | None | Not a Jira client: it holds no Jira credential, plugin or configuration. It reports pipeline results to `core` as canonical events, and `core` makes any Jira write |
 
 ---
 
@@ -73,17 +75,16 @@ no component blocks a ticket or comments on one for missing fields.
 
 | Consumer | Purpose | Scope |
 |----------|---------|-------|
-| Django/`core` | Register the instance webhook; read tickets, post comments, update fields and create subtasks from v5.2's outbound writer | All projects |
-| Jenkins | Post comments, update status | All projects |
+| Django/`core` | Register the instance webhook; read tickets, post comments, update fields and create subtasks through its outbound writer | All projects |
 | Provisioning scripts | Create and reconcile instance fields and per-project configuration | All projects |
 
-One token serves all of them. It is generated at `https://id.atlassian.com/manage-profile/security/api-tokens` and set once in the platform `.env` as `JIRA_TOKEN`; `derive-env.sh` carries it to `core`, and Jenkins reads it from its own credential (`jira-token`). See DevOps Handbook for secrets storage procedure.
+One token serves all of them. It is generated at `https://id.atlassian.com/manage-profile/security/api-tokens` and set once in the platform `.env` as `JIRA_TOKEN`; `derive-env.sh` carries it to `core`. See DevOps Handbook for secrets storage procedure.
 
 ---
 
 ## Custom Fields
 
-These fields are **instance-level** — created once for the whole Jira instance via `scripts/create-jira-fields.sh`, which records the IDs it created in `services/scrummaster/.env`. From V5.1 no running service reads that output; the operator copies the IDs into the platform `.env`, which `derive-env.sh` carries to `core`. The IDs are stable. When adding a new project, these fields are applied to the project's screens by `scripts/init-project.sh`.
+These fields are **instance-level** — created once for the whole Jira instance via `scripts/create-jira-fields.sh`, which writes the IDs it created directly into the platform `.env`, which `derive-env.sh` carries to `core`; the operator does not copy them. The IDs are stable. When adding a new project, these fields are applied to the project's screens by `scripts/init-project.sh`.
 
 ### Field: Agent
 
@@ -122,7 +123,7 @@ To set: `{ "value": "Yes" }`. To clear: `null`.
 
 ## Story Schema Fields
 
-These fields define the required structure of a Story before it can be refined. **Nothing enforces them in V5.1**: no component validates them, blocks a ticket or comments on one for missing fields. v5.2's outbound writer posts the missing-fields comment; until then the list is a convention for whoever writes the Story.
+These fields define the required structure of a Story before it can be refined. **For a Jira-mode project, `core` enforces the five required ones** (Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) when a Story is created: an empty one leaves the Story `proposed`, sets its Blocked field, and `core` comments the missing fields on the ticket through its writer; a human who fills them and clears Blocked is checked again, and re-blocked with a comment if any is still empty (`webhook_consumer.py`, `_handle_story_created`, `_missing_fields_comment`, `_reblock_comment`; `jira_interpret.REQUIRED_STORY_FIELDS`).
 
 All story schema fields are paragraph (textarea) type. All are **instance-level** custom fields created by `scripts/create-jira-fields.sh`.
 
@@ -136,7 +137,7 @@ All story schema fields are paragraph (textarea) type. All are **instance-level*
 | `Edge Cases` | **Yes** | `JIRA_EDGE_CASES_FIELD_ID` | Invalid input, partial failure, duplicates, timeouts, state inconsistencies. Enter `N/A` if none. |
 | `Out of Scope` | **Yes** | `JIRA_OUT_OF_SCOPE_FIELD_ID` | Explicitly what is NOT included in this story. Enter `N/A` if none. |
 
-**Which fields the validation gate will cover** (v5.2): Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope. Value Hypothesis and Test & Measurement are informational and are not part of it.
+**Which fields the validation gate covers**: Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope. Value Hypothesis and Test & Measurement are informational and are not part of it.
 
 **Refinement Agent context**: Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope reach the Refinement Agent's prompt, from the canonical work item's own story fields. Value Hypothesis and Test & Measurement are not passed through.
 
@@ -152,10 +153,10 @@ themselves are `backlog`, `ready`, `in-progress`, `in-review` and `done`.
 | Status | Meaning |
 |--------|---------|
 | `Backlog` | Ticket created, not yet refined |
-| `Shovel Ready` | Refined, subtasks assigned, ready for dev |
+| `Shovel Ready` | Ready for an agent to take (canonical `ready`) |
 | `In Progress` | Agent actively working |
-| `In Review` | PR open, pipeline running |
-| `Done` | Merged and deployed to beta |
+| `In Review` | Delivered to beta (canonical `in-review`), awaiting human review; set by `core` when it records a beta deployment |
+| `Done` | Accepted after review on beta; a human's move |
 
 `Blocked` is a field state (the Blocked custom field set to `Yes`), not a standalone workflow status. A ticket can be `In Progress` and blocked simultaneously.
 
@@ -221,7 +222,7 @@ Epic
               └── assigned to a single dev agent via Agent field
 ```
 
-The Refinement Agent creates subtasks under the parent story — as canonical work items, which v5.2's writer mirrors into Jira. Each subtask is assigned to exactly one agent. The subtask description contains the full build prompt written by the Refinement Agent. Dev agent dispatch operates at the subtask level.
+The Refinement Agent creates subtasks under the parent story — as canonical work items, which `core` mirrors into Jira as Sub-tasks for a Jira-mode project (Canonical Delivery State REQ-11). Each subtask is assigned to exactly one agent. The subtask description contains the full build prompt written by the Refinement Agent. Dev agent dispatch operates at the subtask level.
 
 ---
 
@@ -295,17 +296,22 @@ into `services/core/.env`.
 
 ### Registered Events
 
-Two, both set by `ensure_jira_webhook`:
+Four, all set by `ensure_jira_webhook` (`WEBHOOK_EVENTS`):
 
 | Event | Jira `webhookEvent` value | What `core` does with it |
 |-------|--------------------------|---------------------|
 | Story created | `jira:issue_created` | Interprets the payload and records the canonical work item |
 | Any issue update — status change, Blocked field cleared, Release transition | `jira:issue_updated` | Interprets the change and applies it to the canonical work item |
+| Comment created | `comment_created` | Records the comment on the canonical work item; a comment `core` posted comes back with its author. Comment edits (`comment_updated`) are deliberately not subscribed |
+| Issue link created | `issuelink_created` | Reconciles a Blocks link a person makes in Jira into the canonical `blocks` link (Sub-task link mirror); without it such a link reaches `core` only on the dependent's next `jira:issue_updated` |
 
-From V5.1 `core` applies a Jira webhook only to a project in Jira mode, and
-never applies a Jira change to a work item of a local-mode project (V5.1
-REQ-10). With every project local, as V5.1 ships, each delivered event is
-recorded and nothing is applied.
+`connect_jira` refuses to connect a project unless a webhook registered at
+`core`'s own path carries all four, so a webhook registered by hand must
+subscribe to every one.
+
+`core` applies a Jira webhook only to a project in Jira mode, and never applies
+a Jira change to a work item of a local-mode project; for a local-mode project
+each delivered event is recorded and nothing is applied.
 
 ### Event Filtering
 

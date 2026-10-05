@@ -30,7 +30,7 @@
 
 ScrumMaster is a persistent service running on the AI Gang HQ droplet. It has two jobs: listen for canonical work-item events from Django/`core` and route them to the correct agent, and listen for messages from agents and publish the canonical commands they imply back to `core`.
 
-No agent, and no ScrumMaster module, has direct access to Jira: Django/`core` is the running platform's only Jira client (V5.1 REQ-01), and no running consumer calls it until v5.2's outbound writer. ScrumMaster reads canonical work items from `core` and publishes canonical commands back to it on agents' behalf — formatting, error handling, rate limiting, and audit logging for that path live here.
+No agent, and no ScrumMaster module, has direct access to Jira: Django/`core` is the running platform's only Jira client (V5.1 REQ-01), and `core`'s outbound writer makes every Jira write for a Jira-mode project. ScrumMaster reads canonical work items from `core` and publishes canonical commands back to it on agents' behalf — formatting, error handling, rate limiting, and audit logging for that path live here.
 
 ScrumMaster does not make decisions about work. It routes, fetches context, constructs prompts, and relays. The Refinement Agent makes decisions about tickets. Dev agents make decisions about code.
 
@@ -52,7 +52,7 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 - Ticket content decisions (Refinement Agent)
 - Code (dev agents)
 - Receiving or interpreting Jira webhooks, or calling the Jira API (Django/`core`, V5.1 REQ-01)
-- CI/CD pipeline results (Jenkins posts directly to Jira)
+- CI/CD pipeline results (Jenkins publishes them to `core` as canonical events and writes to no tracker)
 - Infrastructure (Cloud Engineering)
 
 ---
@@ -149,11 +149,11 @@ specification beside this document on the `/agent-docs` mount is the full
 configuration reference; these are prerequisites defined in PDI-8, and
 creating them is nobody's job at runtime — the provisioning scripts do it.
 
-Jira mode is off for V5.1's release, so no project exercises any of it.
+A project exercises any of it only once the operator has put it in Jira mode with `connect_jira`.
 
 ### Custom Fields
 
-All custom fields are instance-level resources created by `scripts/create-jira-fields.sh`, which records the IDs it created in `services/scrummaster/.env`. From V5.1 no running service reads that output; the operator copies the IDs into the platform `.env`, which `derive-env.sh` carries to `core`.
+All custom fields are instance-level resources created by `scripts/create-jira-fields.sh`, which writes the IDs it created directly into the platform `.env`, which `derive-env.sh` carries to `core`; the operator does not copy them.
 
 **Routing and control fields:**
 
@@ -185,11 +185,11 @@ status onto. ScrumMaster's own vocabulary is the canonical one — `backlog`,
 | Status         | Meaning                                                                           |
 | -------------- | --------------------------------------------------------------------------------- |
 | `Backlog`      | Ticket created, not yet refined                                                   |
-| `Shovel Ready` | Refined, subtasks assigned, agent can begin work                                  |
+| `Shovel Ready` | Ready for an agent to take (canonical `ready`)                                    |
 | `In Progress`  | Agent actively working                                                            |
 | `Blocked`      | Agent waiting for human clarification — note: also reflected in the Blocked field |
-| `In Review`    | PR open, awaiting review                                                          |
-| `Done`         | Merged and deployed                                                               |
+| `In Review`    | Delivered to beta (canonical `in-review`), awaiting human review                  |
+| `Done`         | Accepted after review on beta; a human's move                                     |
 
 ### Webhook Triggers
 

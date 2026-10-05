@@ -1,8 +1,8 @@
 # Desktop App Handbook (v1)
 
 This handbook is the source of truth for Electron and Tauri projects in AI Gang.
-It supplements `/agent-docs/DEVOPS_HANDBOOK_v1.md`; the Jira/Jenkins release workflow remains
-authoritative for release state and promotion.
+It supplements `/agent-docs/DEVOPS_HANDBOOK_v1.md`; the canonical Release work item in `core` remains
+authoritative for release state, and the Jenkins release jobs for promotion.
 
 ## Build strategy
 
@@ -27,7 +27,7 @@ preview, during the release-candidate job's "Trigger native validation build"
 stage — via `jenkins/scripts/trigger-native-build.sh`, which detects a desktop
 project by the presence of this workflow file itself, so no separate per-project
 config is needed. Agents and humans do not run the workflow or create release
-tags. The Jenkins integration and artifact-link Jira comment are defined by
+tags. The Jenkins integration is defined by
 the release-flow tooling shared with the rest of the release pipeline and should be
 changed with that flow, not inside an application repository.
 
@@ -118,11 +118,12 @@ The workflow calls `npm run build:desktop` when `src-tauri/` is absent.
 - SHA mismatch: stop. Jenkins must dispatch a full commit SHA that exists in the
   repository; never silently build the default branch instead.
 - Native build dispatched but never found: `trigger-native-build.sh` polls for
-  up to a minute for the run to appear before giving up and reporting
-  `STATUS=unknown` on the Release ticket — this doesn't fail the release
+  up to a minute for the run to appear before giving up and printing
+  `STATUS=unknown` to the `release-candidate` job, which records it as
+  `NATIVE_BUILD_STATUS` — this doesn't fail the release
   candidate; check the repo's Actions tab directly if it recurs.
 - Tag push fails on production approval: `tag-desktop-release.sh` fails the
-  `production-promote` job (reported via the same failure Jira comment as any
-  other promotion failure) rather than silently skipping the release — check
+  `production-promote` job (reported by the job's failure comment on the Release
+  work item, as for any other promotion failure) rather than silently skipping the release — check
   that `GITHUB_TOKEN` still has Contents: Read and write and that the computed
   `vX.Y.Z` doesn't already exist on the remote.
