@@ -114,7 +114,7 @@ The workflow calls `npm run build:desktop` when `src-tauri/` is absent.
 - No artifacts: confirm bundle targets and output paths have not been customized;
   update artifact globs alongside any intentional output change.
 - Update server unreachable: verify the endpoint separately, keep startup working,
-  and report the Release ticket blocked if update validation is a stated gate.
+  and report the Release work item blocked if update validation is a stated gate.
 - SHA mismatch: stop. Jenkins must dispatch a full commit SHA that exists in the
   repository; never silently build the default branch instead.
 - Native build dispatched but never found: `trigger-native-build.sh` polls for

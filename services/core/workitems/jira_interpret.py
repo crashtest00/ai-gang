@@ -59,8 +59,8 @@ def _text_field(fields: dict, env_name: str) -> Optional[str]:
 
 # The same five fields V1's handlers.js REQUIRED_STORY_FIELDS gated, with
 # the same human-readable labels — used verbatim in the missing-fields
-# comment v5.2's outbound writer will post, not one ScrumMaster posts: no
-# AI Gang component posts that comment from v5.1 (REQ-04, REQ-08).
+# comment the webhook consumer appends through the comment path, not one
+# ScrumMaster posts: no ScrumMaster code posts that comment (REQ-04, REQ-08).
 REQUIRED_STORY_FIELDS = (
     ('behavior', 'Behavior'),
     ('acceptanceCriteria', 'Acceptance Criteria'),

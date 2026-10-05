@@ -174,7 +174,7 @@ All custom fields are instance-level resources created by `scripts/create-jira-f
 | `Edge Cases` | **Yes** | Invalid input, partial failures, timeouts |
 | `Out of Scope` | **Yes** | Explicitly what is NOT included |
 
-Django/`core` validates Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope on every `jira:issue_created` event (`workitems/webhook_consumer.py`'s `_handle_story_created`); the `story_intake` side effect it records from that check has no ScrumMaster consumer until v5.2's outbound writer (see Inbound Webhook Handling).
+Django/`core` validates Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope on every `jira:issue_created` event (`workitems/webhook_consumer.py`'s `_handle_story_created`); the `story_intake` side effect it records from that check has no ScrumMaster consumer: `core`'s outbound writer sets the Agent field and the Blocked flag on the Jira ticket, and the acknowledgement or missing-fields comment goes through `core`'s comment path (see Inbound Webhook Handling).
 
 ### Workflow Statuses
 
@@ -207,8 +207,9 @@ API — on the same path):
 
 A `work_item.jira_side_effect` of kind `story_intake` — `core`'s record of a
 newly-created Story and whether its schema fields are complete — has no
-ScrumMaster consumer in v5.1; posting the acknowledgement or
-missing-fields comment it implies is v5.2's outbound writer's job.
+ScrumMaster consumer: `core`'s outbound writer applies it to the Jira
+ticket, and the acknowledgement or missing-fields comment it implies goes
+through `core`'s comment path.
 
 ---
 
@@ -261,9 +262,9 @@ ScrumMaster runs one durable Streams consumer per project on that project's gate
 
 Nothing here writes to Jira. Each operation below resolves to a canonical
 command ScrumMaster publishes to `core`, which applies it to the work item and
-is the sole authority on what the item then is (V5.1 REQ-01, REQ-04). From
-v5.2, `core`'s outbound writer mirrors what it applied onto the Jira ticket of
-a project in Jira mode; in v5.1 nothing is mirrored anywhere.
+is the sole authority on what the item then is (V5.1 REQ-01, REQ-04).
+`core`'s outbound writer mirrors what it applied onto the Jira ticket of a
+project in Jira mode.
 
 ### Supported Operations
 
