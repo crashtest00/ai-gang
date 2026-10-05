@@ -52,13 +52,40 @@ function scopeFiles() {
   return files;
 }
 
-// A capitalized role-shaped phrase ending in "Agent" — up to four leading
-// capitalized words, so "The Engineering Lead Agent" is captured whole.
-// Lower-case "agent" (generic: "a dev agent", "the agent", "each agent") is
-// deliberately not matched — this scope's own convention capitalizes a
-// specific role's name ("Refinement Agent", "DevOps Agent") and does not
-// capitalize the generic noun.
-const ROLE_PHRASE = /\b(?:[A-Z][a-zA-Z]*)(?:\s+[A-Z][a-zA-Z]*){0,3}\s+Agent\b/g;
+// A capitalized role-shaped phrase ending in "Agent" or "agent" — up to four
+// leading capitalized words, so "The Engineering Lead Agent" and "The
+// Engineering Lead agent" are both captured whole. The lower-case form
+// matters: BF-04 row 62's drift was "The Engineering Lead agent interprets",
+// which a capital-only "Agent" never saw (v5.2 audit row 31). A phrase whose
+// only capitalized word is leading filler ("Each agent", "The agent", "An
+// agent") is the generic noun and is not a role name — see isGenericPhrase.
+// A lower-case qualifier ("a dev agent") is still not matched: it is not
+// shaped like a role name.
+// Horizontal whitespace only: a phrase never spans a line break (a heading
+// "Assign Work To" above a paragraph "The agent" is not one role phrase).
+const ROLE_PHRASE = /\b(?:[A-Z][a-zA-Z]*)(?:[ \t]+[A-Z][a-zA-Z]*){0,3}[ \t]+[Aa]gent\b/g;
+
+// Case-insensitive on purpose: "Refinement agent" names the same role as
+// "Refinement Agent".
+function isGenericPhrase(phrase) {
+  const stripped = phrase.replace(LEADING_FILLER, '');
+  return /^agent$/i.test(stripped);
+}
+
+// The phrases in `text` that look like a role name and that no catalog
+// display name accounts for. `known` is a Set of agents.json displayNames.
+function findUnresolvedRoles(text, known) {
+  const knownLower = new Set([...known].map((n) => n.toLowerCase()));
+  const unresolved = [];
+  for (const phrase of new Set(text.match(ROLE_PHRASE) || [])) {
+    if (isGenericPhrase(phrase)) continue;
+    const candidates = [phrase, phrase.replace(LEADING_FILLER, '')].map((c) => c.toLowerCase());
+    const resolves = candidates.some((c) => knownLower.has(c))
+      || [...knownLower].some((name) => candidates[0].endsWith(` ${name}`));
+    if (!resolves) unresolved.push(phrase);
+  }
+  return unresolved;
+}
 
 test('every capitalized "<Role> Agent" phrase in DEVOPS_HANDBOOK_v1.md and setup/agents/*.md names a role the agent catalog still declares', () => {
   const known = knownDisplayNames();
@@ -66,15 +93,34 @@ test('every capitalized "<Role> Agent" phrase in DEVOPS_HANDBOOK_v1.md and setup
 
   for (const file of scopeFiles()) {
     const text = fs.readFileSync(file, 'utf8');
-    const matches = new Set(text.match(ROLE_PHRASE) || []);
-    for (const phrase of matches) {
-      const stripped = phrase.replace(LEADING_FILLER, '');
-      const resolves = known.has(phrase) || known.has(stripped)
-        || [...known].some((name) => phrase === name || phrase.endsWith(` ${name}`));
-      assert.ok(
-        resolves,
-        `${path.relative(REPO_ROOT, file)} names "${phrase}", which is not a role services/scrummaster/config/agents.json declares (known: ${[...known].join(', ')})`
-      );
-    }
+    const unresolved = findUnresolvedRoles(text, known);
+    assert.deepEqual(
+      unresolved,
+      [],
+      `${path.relative(REPO_ROOT, file)} names ${unresolved.map((p) => `"${p}"`).join(', ')}, which is not a role services/scrummaster/config/agents.json declares (known: ${[...known].join(', ')})`
+    );
+  }
+});
+
+test('the guard flags the drift it was written for: "The Engineering Lead agent" is unresolved against the catalog', () => {
+  const known = knownDisplayNames();
+  assert.deepEqual(
+    findUnresolvedRoles('The Engineering Lead agent interprets the request.', known),
+    ['The Engineering Lead agent']
+  );
+  // The capital-"Agent" spelling is flagged too.
+  assert.deepEqual(
+    findUnresolvedRoles('The Engineering Lead Agent interprets the request.', known),
+    ['The Engineering Lead Agent']
+  );
+});
+
+test('the guard passes a correct display name and generic filler plus "agent"', () => {
+  const known = knownDisplayNames();
+  const [displayName] = [...known];
+  assert.deepEqual(findUnresolvedRoles(`The ${displayName} reads the issue.`, known), []);
+  assert.deepEqual(findUnresolvedRoles(`Each ${displayName.toLowerCase()} reads the issue.`, known), []);
+  for (const generic of ['Each agent', 'The agent', 'An agent', 'Any agent', 'This agent', 'Every agent', 'Your agent']) {
+    assert.deepEqual(findUnresolvedRoles(`${generic} reads the issue.`, known), [], generic);
   }
 });

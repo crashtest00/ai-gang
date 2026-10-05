@@ -200,7 +200,7 @@ pipeline {
         // own number and title are always in dev's history for a human to
         // read. Resolution itself doesn't depend on it: the dev build finds
         // each promoted commit's merged PR from the commit SHA directly
-        // (`gh api commits/$sha/pulls`, below), not by parsing this subject
+        // (`gh api commits/$sha/pulls`, above), not by parsing this subject
         // for a tracker key (canonical-delivery-state.md REQ-01, REQ-02).
         sh '''
           AUTO_MERGE=$(gh pr view "$CHANGE_ID" --json autoMergeRequest --jq '.autoMergeRequest != null')

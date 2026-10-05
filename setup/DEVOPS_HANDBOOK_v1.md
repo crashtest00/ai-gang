@@ -61,7 +61,7 @@ Each project lives entirely on its own droplet. There is no shared CI/CD infrast
 ┌─────────────────────────────────┐   ┌────────────────────────────────────┐
 │ GitHub                          │   │ Project Droplet — Jenkins          │
 │  - Branch created per ticket    │   │  - release-candidate: pins beta's  │
-│  - Dev agent commits code       │   │    SHA, cuts release/<sha>, opens  │
+│  - Agent commits code           │   │    SHA, cuts release/<sha>, opens  │
 │  - PR opened → triggers Jenkins │   │    the frozen PR, deploys preview  │
 └────────────────┬────────────────┘   │  - production-promote: merges the │
                                        │    frozen PR, redeploys the same  │

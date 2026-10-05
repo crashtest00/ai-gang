@@ -505,6 +505,7 @@ class BetaDeploymentRecord(models.Model):
     # command's sourceMessageId (REQ-01) — recorded for an operator tracing
     # one deployment back to the Jenkins build that published it.
     source_message_id = models.TextField(null=True, blank=True)
+    # Recorded for an operator tracing a deployment; no code reads it.
     work_item_ids = models.JSONField(default=list)
     recorded_at = models.DateTimeField(default=timezone.now)
 

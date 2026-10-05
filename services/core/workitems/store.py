@@ -669,9 +669,9 @@ def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
                               preview_url: Optional[str] = None, actor: Optional[str] = None) -> WorkItem:
     """Writes the release-candidate Jenkins job's results back onto a
     release work item's canonical fields once the candidate is cut, and
-    posts a comment recording it — the local-mode equivalent of what
-    Jenkins already does directly to a Jira Release ticket's custom fields
-    today (`scripts/create-release-fields.sh`). Write-once-per-candidate: a
+    posts a comment recording it — the one place these fields are
+    recorded, in every mode; Jenkins contains no tracker code and only
+    calls the endpoint that reaches this function. Write-once-per-candidate: a
     new candidate cut replaces these three fields, it does not append.
 
     The three field writes and their event are atomic; the note is appended

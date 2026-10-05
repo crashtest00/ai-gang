@@ -455,11 +455,11 @@ def get_blocks_link_type_id() -> str:
     the id explicitly; otherwise it is discovered once from Jira's
     built-in "Blocks" link type and cached for the life of the process.
 
-    JIRA_BLOCKS_LINK_TYPE_ID is not plumbed into derive-env.sh or
-    .env.template by this track — that is v5.2's, with the client's first
-    link-writing caller (REQ-06). This function still reads it, so an
-    operator override already works the moment v5.2 wires the variable
-    through."""
+    JIRA_BLOCKS_LINK_TYPE_ID is read from the environment when set and
+    otherwise discovered through the Jira link-type listing; discovery is
+    the supported path. Nothing plumbs the variable into derive-env.sh or
+    .env.template. The first link-writing callers are REQ-11's
+    (jira_writer.py's `push_link` and connect_jira.py)."""
     cached = _link_type_cache.get('id')
     if cached:
         return cached

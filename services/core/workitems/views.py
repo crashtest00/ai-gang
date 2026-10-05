@@ -319,10 +319,10 @@ def admin_transition_work_item(request, work_item_id):
 def admin_record_release_candidate(request, work_item_id):
     """The writeback target for the release-candidate Jenkins job's results
     (Candidate SHA, Build Identifier, Preview URL), called by Jenkins in
-    every mode (canonical-delivery-state.md REQ-06): `jenkins.yaml`'s
-    Jira-mode reporting branch calls this endpoint the same way its
-    local-mode branch always has, rather than writing the three fields
-    directly onto a Jira Release ticket itself. `record_release_candidate`
+    every mode (canonical-delivery-state.md REQ-06): `jenkins.yaml` makes
+    one unconditional POST to this endpoint, with no per-mode branch, and
+    never writes the three fields to a tracker itself.
+    `record_release_candidate`
     records them here first, in every mode, before REQ-09's writer sets
     them in Jira for a Jira-mode project."""
     try:

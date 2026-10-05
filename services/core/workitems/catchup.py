@@ -10,9 +10,14 @@ outbound writer, besides `ensure_jira_webhook.py`'s webhook registration
 **Corrected 2026-10-04 (v5.1 BUGFIXES.md BF-06; v5.2 Canonical Delivery
 State REQ-09).** v5.2's writer (`workitems/jira_writer.py`) is now a
 running caller of the client, not merely a planned one, and `views.py`
-and `webhook_consumer.py` call it too (link reads and the Blocked-flag
-write/read in the inbound mirror). The client no longer has zero
-production callers.
+and `webhook_consumer.py` call it directly too (`views.py`'s
+`jira_client.get_issue`; `webhook_consumer.py`'s
+`get_blocks_link_type_id` and `get_issue`, for Blocks link-type and
+issue-key lookups). The Blocked-flag write goes through `jira_writer`
+(`set_blocked_field`, called from `jira_writer.py` and `connect_jira.py`
+only). The client no longer has zero production callers. The webhook
+registration (`ensure_jira_webhook.py`) still has its own HTTP helper,
+`_jira_request`, and does not use the client.
 
 The catch-up push that used to live here is gone (v5.1): its Jira-facing half
 was ScrumMaster's jiraCatchupConsumer.js, which no longer exists.

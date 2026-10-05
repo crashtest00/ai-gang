@@ -5,7 +5,7 @@ const axios = require('axios');
 // dev → beta promotion is no longer triggered here — it happens automatically,
 // per-project, inside each project's own Jenkinsfile pipeline on merge to `dev`.
 // ScrumMaster's role in the release
-// flow is now limited to the three jobs below, all fired from a Release ticket.
+// flow is now limited to the three jobs below, all fired from a Release work item.
 
 async function invoke(token, payload) {
   const jenkinsUrl = process.env.JENKINS_URL;

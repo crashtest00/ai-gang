@@ -191,7 +191,7 @@ jobs:
 
   - script: |
       pipelineJob('production-promote') {
-        description('Triggered by ScrumMaster when a Release ticket moves to Done — the single production-approval gate. Merges the frozen release/<sha> → prod PR and redeploys the exact previewed artifact, never rebuilding, then tears down the preview.')
+        description('Triggered by ScrumMaster when a Release work item moves to Done — the single production-approval gate. Merges the frozen release/<sha> → prod PR and redeploys the exact previewed artifact, never rebuilding, then tears down the preview.')
         triggers {
           genericTrigger {
             token('production-promote')
@@ -297,7 +297,7 @@ jobs:
 
   - script: |
       pipelineJob('release-preview-teardown') {
-        description('Triggered by ScrumMaster when a Release ticket reaches a terminal state without shipping (resolution set to Abandoned). Tears down that release\'s preview container on the Beta VM.')
+        description('Triggered by ScrumMaster when a Release work item reaches a terminal state without shipping (resolution set to Abandoned). Tears down that release\'s preview container on the Beta VM.')
         triggers {
           genericTrigger {
             token('release-preview-teardown')

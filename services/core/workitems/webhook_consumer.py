@@ -84,8 +84,13 @@ State REQ-06, REQ-08, REQ-09).** The paragraph above describes `ba3f68b`,
 before this stage, and three of its premises no longer hold. `core`'s
 outbound writer (`workitems/jira_writer.py`) is now a running caller of
 `jira_client.py` — the client does not wait for an "outbound writer" that
-has since been built, and `views.py` and this module call it too (link
-reads, the Blocked-flag write and read). Jenkins' own Jira writes are not
+has since been built, and `views.py` and this module call it directly too
+(`views.py`'s `jira_client.get_issue`; this module's
+`get_blocks_link_type_id` and `get_issue`, for Blocks link-type and
+issue-key lookups; the Blocked-flag write goes through `jira_writer`'s
+`set_blocked_field`). The webhook registration (`ensure_jira_webhook.py`)
+still has its own HTTP helper, `_jira_request`, and does not use the
+client. Jenkins' own Jira writes are not
 merely "remaining until v5.2": REQ-06 retires every one of them, and the
 candidate-cut writes this module's Release handling used to route to
 Jenkins instead happen as Django-side effects of REQ-09's writer. And a

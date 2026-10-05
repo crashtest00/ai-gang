@@ -115,6 +115,7 @@ async function main() {
 // while the first is still shutting down.
 let shuttingDown = false;
 
+// Relies on process.exit to close the retention setInterval and the Redis client.
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
