@@ -326,11 +326,18 @@ async function handlePipelineRetry(msg, envelope, projectName) {
     return { workItemId, skipped: true };
   }
 
-  await redispatchImplementationOwner(workItemId, {
-    kind: 'pipeline_failure',
-    build_url: build_url || null,
-    build_number: build_number || null,
-  });
+  // If the redispatch throws, give the key back. Otherwise the redelivery is
+  // skipped as a duplicate and nobody is dispatched for the next hour.
+  try {
+    await redispatchImplementationOwner(workItemId, {
+      kind: 'pipeline_failure',
+      build_url: build_url || null,
+      build_number: build_number || null,
+    });
+  } catch (err) {
+    await redis.releaseOnce(dedupeKey);
+    throw err;
+  }
   return { workItemId, skipped: false };
 }
 

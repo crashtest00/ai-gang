@@ -911,6 +911,36 @@ test("core's pipeline_retry redispatches the canonical work item's owner, once p
   ], 'the dedupe key is built from the canonical id, never from a tracker key');
 });
 
+test("core's pipeline_retry whose redispatch throws gives its dedupe key back, so the redelivery dispatches the owner", async (t) => {
+  const held = new Set();
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async (key) => {
+    if (held.has(key)) return false;
+    held.add(key);
+    return true;
+  });
+  t.mock.method(redis, 'releaseOnce', async (key) => { held.delete(key); });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'backend-agent',
+    display_name: 'A task', comments: [], history: [], artifacts: [],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ project: PROJECT_NAME, mode: 'local', jiraProjectKey: null }));
+  let attempts = 0;
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issueLike, agent) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('Redis went away');
+    dispatched.push(agent.id);
+  });
+
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await assert.rejects(() => handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME), /Redis went away/);
+  const redelivered = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.deepEqual(redelivered, { workItemId: WORK_ITEM_ID, skipped: false });
+  assert.deepEqual(dispatched, ['backend-agent'], 'the redelivery dispatched the owner');
+});
+
 test("core's pipeline_retry for a work item with no assignee dispatches nobody and logs it as unresolved", async (t) => {
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(redis, 'acquireOnce', async () => true);

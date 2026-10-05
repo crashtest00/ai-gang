@@ -38,4 +38,9 @@ async function acquireOnce(key, ttlSeconds) {
   return result === 'OK';
 }
 
-module.exports = { connect, getClient, acquireOnce };
+// Give back a key acquireOnce claimed, so the work it guarded can run again.
+async function releaseOnce(key) {
+  await getClient().del(key);
+}
+
+module.exports = { connect, getClient, acquireOnce, releaseOnce };
