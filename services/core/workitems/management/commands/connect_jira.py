@@ -240,8 +240,17 @@ def push_project(project: str, jira_project_key: str, *, stdout=None) -> _Failur
         if item.external_key:
             continue
         parent = WorkItem.objects.filter(id=item.parent_id).first() if item.parent_id else None
+        if item.parent_id and not (parent is not None and parent.external_key):
+            # REQ-10: "an item with a parent becomes a Sub-task under its
+            # parent's issue". The parent has no key because its own create
+            # failed this run (parents are pushed first), so a create here
+            # would key the child as a standalone issue that a re-run, which
+            # skips every keyed item, would never re-parent. Recorded and
+            # left unkeyed; the re-run creates the parent, then this child.
+            failures.record(item, STEP_CREATE, 'its parent has no Jira issue yet, so it cannot become a Sub-task')
+            continue
         try:
-            if parent is not None and parent.external_key:
+            if parent is not None:
                 issue_key = jira_client.create_subtask(
                     parent.external_key, jira_project_key, item.display_name,
                     item.description or item.display_name, item.assignee_agent_id,

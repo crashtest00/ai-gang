@@ -281,7 +281,7 @@ def _publish_side_effect(project: str, work_item_id, jira_issue_key: str, kind: 
     atomically with whatever canonical write (if any) it accompanies."""
     store.write_outbox_event(
         project=project, event_type='work_item.jira_side_effect', work_item_id=work_item_id,
-        payload={'kind': kind, 'jiraIssueKey': jira_issue_key, 'detail': detail},
+        payload={'kind': kind, 'externalKey': jira_issue_key, 'detail': detail},
     )
 
 

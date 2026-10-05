@@ -234,10 +234,14 @@ def apply_beta_deployment_to_work_item(work_item_id, payload: dict[str, Any], *,
             work_item_id, 'in-review', actor=BETA_EVIDENCE_AUTHOR,
             origin=write_gate.Origins.DIRECT, completion_key=completion_key,
         )
-    except store.ValidationError as err:
+    except (store.ValidationError, jira_writer.JiraWriteRejectedError) as err:
+        # REQ-04: a Jira-mode project whose map writes no Jira status for
+        # `in-review` has its push rejected by the writer as a validation
+        # (`JiraWriteRejectedError`, which is not a `store.ValidationError`),
+        # and the handler records it the same way.
         jira_writer.record_webhook_failure(
             item,
-            f'beta deployment: transitionStatus raised a ValidationError for work item '
+            f'beta deployment: transitionStatus raised a {type(err).__name__} for work item '
             f'{work_item_id}: {err}',
             {'step': STEP_STATUS, 'build_identifier': payload.get('build_identifier')},
         )

@@ -510,14 +510,41 @@ def test_a_status_changed_event_makes_no_jira_write(clean_db, permissive_jira):
     assert permissive_jira.received == [], 'in Jira mode a status is recorded only from Jira'
 
 
-def test_a_story_intake_side_effect_sets_the_agent_field_and_the_blocked_flag(clean_db, permissive_jira):
-    item_id = make_item(external_key='WT-S', item_type='story', display_name='Story')
-    jira_mode()
+def test_a_story_intake_side_effect_sets_the_agent_field_and_the_blocked_flag(clean_db, permissive_jira, redis_client):
+    """The envelope is the real producer's, end to end: the webhook consumer
+    writes the `story_intake` OutboxEvent for a Story created in Jira, the
+    relay publishes it, and the writer is fed the stream entry. A hand-built
+    envelope here once carried `externalKey` while the producer still emitted
+    `jiraIssueKey` (REQ-09, v5.2 audit row 21)."""
+    import json
 
-    jira_writer.handle_event_envelope(_event_envelope(
-        'work_item.jira_side_effect', PROJECT, item_id,
-        {'kind': 'story_intake', 'externalKey': 'WT-S', 'detail': {'ok': False, 'missing': ['Behavior']}},
+    from workitems import registry
+    from workitems.envelope import Kind, build_envelope
+    from workitems.relay import relay_once
+    from workitems.stream_topology import event_stream_name
+    from workitems.webhook_consumer import handle_webhook_envelope
+
+    jira_mode()
+    body = {'webhookEvent': 'jira:issue_created', 'issue': {'key': 'WT-S', 'fields': {
+        'summary': 'Story', 'issuetype': {'name': 'Story'}, 'project': {'name': PROJECT, 'key': 'WT'},
+    }}}
+    handle_webhook_envelope(build_envelope(
+        Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT),
+        payload={'event': 'jira:issue_created', 'issue': body['issue'], 'body': body},
     ))
+    item = WorkItem.objects.get(external_key='WT-S')
+
+    relay_once(redis_client)
+    entries = [json.loads(fields['data']) for _, fields in redis_client.xrange(event_stream_name(PROJECT), '-', '+')]
+    side_effects = [e for e in entries if e['payload']['eventType'] == 'work_item.jira_side_effect'
+                    and e['payload']['workItemId'] == str(item.id)]
+    assert len(side_effects) == 1
+    assert side_effects[0]['payload']['data']['externalKey'] == 'WT-S'
+    assert 'jiraIssueKey' not in side_effects[0]['payload']['data']
+    assert side_effects[0]['payload']['data']['detail']['ok'] is False
+
+    permissive_jira.received.clear()  # the webhook's own comment posts are not this writer's.
+    jira_writer.handle_event_envelope(side_effects[0])
 
     fields = {}
     for request in requests_to('PUT', '/issue/WT-S'):

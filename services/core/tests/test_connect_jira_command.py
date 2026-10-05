@@ -329,6 +329,53 @@ def test_a_failed_create_leaves_the_project_local_and_a_rerun_resumes(clean_db, 
     _ = first, second
 
 
+def test_a_child_whose_parents_create_failed_is_not_created_and_a_rerun_makes_it_a_subtask(
+        clean_db, jira_env):
+    """REQ-10: "an item with a parent becomes a Sub-task under its parent's
+    issue"; "Re-running it skips every item that already has a key, so it
+    resumes"; acceptance "a re-run after the cause is fixed pushes it and
+    switches". The parent's create is rejected by the fixture Jira; the child
+    must not be created as a standalone issue (a re-run skips keyed items, so
+    it would never be re-parented), is recorded as its own failed create, and
+    the re-run creates the parent and then the child under it."""
+    parent = make_item(display_name='Parent', item_type='story', assignee='refinement-agent')
+    child = make_item(display_name='Child', parent_id=parent, assignee='backend-agent')
+
+    create_route = jira_env.handler.routes[('POST', '/rest/api/3/issue')]
+    # Only the parent's own create is rejected; anything else Jira would accept,
+    # so a child created on its own would succeed and show up in `created`.
+    jira_env.handler.routes[('POST', '/rest/api/3/issue')] = lambda q, b: (
+        (400, {'errorMessages': ['the Story type is not allowed here']})
+        if b['fields']['issuetype']['name'] == 'Story' else create_route(q, b)
+    )
+
+    with pytest.raises(CommandError) as err:
+        run()
+
+    assert 'Parent' in str(err.value) and 'Child' in str(err.value)
+    assert mode()['mode'] == 'local'
+    assert jira_env.created == [], 'the rejected parent was not created, and the child was not created on its own'
+    assert store.get_work_item(parent).external_key is None
+    assert store.get_work_item(child).external_key is None
+    failed = {failure.work_item_id: failure for failure in WebhookFailure.objects.all()}
+    assert set(failed) == {parent, child}, 'a failed create is recorded for the parent and for the child'
+    assert {failure.payload['step'] for failure in failed.values()} == {'connect-jira-create'}
+
+    # The cause is fixed; the re-run resumes.
+    jira_env.handler.routes[('POST', '/rest/api/3/issue')] = create_route
+    run()
+
+    parent_row = store.get_work_item(parent)
+    child_row = store.get_work_item(child)
+    assert parent_row.external_key and child_row.external_key
+    created = {entry['key']: entry['fields'] for entry in jira_env.created}
+    assert list(created) == [parent_row.external_key, child_row.external_key], 'the parent first, then the child'
+    assert created[parent_row.external_key]['issuetype'] == {'name': 'Story'}
+    assert created[child_row.external_key]['issuetype'] == {'name': 'Sub-task'}
+    assert created[child_row.external_key]['parent'] == {'key': parent_row.external_key}
+    assert mode()['mode'] == 'jira'
+
+
 # ---------------------------------------------------------------------------
 # The re-sync (REQ-10's own outcomes over the writer's status rules)
 # ---------------------------------------------------------------------------

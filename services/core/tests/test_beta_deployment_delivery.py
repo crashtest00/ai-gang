@@ -271,6 +271,44 @@ def test_a_jira_mode_work_item_with_no_legal_transition_records_its_own_missing_
     assert 'offers no transition' in failures.get().reason
 
 
+def test_a_jira_mode_project_whose_map_writes_no_in_review_status_records_one_failure_and_raises_nothing(
+        clean_db, fixture_jira):
+    """REQ-04: "For a project whose map writes no Jira status for
+    `in-review`, the push is rejected as a validation and the handler
+    records it" as a webhook failure, "the same way" as a `ValidationError`.
+    In Jira mode `transition_status` routes the write to
+    `jira_writer.push_status`, whose rejection is a
+    `JiraWriteRejectedError`, not a `store.ValidationError`. Driven through
+    `handle_command`: it raises nothing (a raise would be dead-lettered by
+    the consumer as a permanent rejection, with no failure recorded and no
+    `BetaDeploymentRecord` written), keeps the evidence comment, and makes
+    no Jira transition call."""
+    from workitems.models import BetaDeploymentRecord, ProjectStatusConfig
+
+    # This project declares its own rows, and none of them writes a Jira
+    # status for `in-review`, so its map covers no Jira status for it.
+    ProjectStatusConfig.objects.create(
+        project=PROJECT, status='in-progress', baseline_status='in-progress', jira_status_name='In Progress')
+    item_id = make_item(external_key='WT-NOMAP', status='in-progress')
+    jira_mode()
+    store.attach_artifact(item_id, 'pull_request', PR_URL)
+    allow_comment(fixture_jira, 'WT-NOMAP')
+    posted = offer_transition(fixture_jira, 'WT-NOMAP', 'In Review')
+
+    handle_command(command(_beta_deployed('gw-nomap')))  # raises nothing.
+
+    assert store.get_work_item(item_id).status == 'in-progress'
+    comment_texts = posted_comment_texts()
+    assert len(comment_texts) == 1, 'the evidence comment is kept (in Jira mode it is posted to the issue)'
+    assert 'deadbeef' in comment_texts[0]
+    failures = WebhookFailure.objects.filter(work_item_id=item_id)
+    assert failures.count() == 1
+    assert failures.get().payload['step'] == jira_writer.STEP_STATUS
+    assert 'in-review' in failures.get().reason
+    assert posted == [], 'the rejection is made before any Jira transition call'
+    assert BetaDeploymentRecord.objects.count() == 1, 'the delivery was recorded, not dead-lettered'
+
+
 def test_the_evidence_comment_appears_once_in_core_in_both_modes(clean_db, fixture_jira):
     local_item = make_item(display_name='Local')
     store.attach_artifact(local_item, 'pull_request', PR_URL)

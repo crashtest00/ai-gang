@@ -68,7 +68,7 @@ def test_req11_jira_change_violating_dependency_gate_is_rejected_and_recorded(cl
     assert item.status == 'proposed', 'the invalid transition must never have been applied'
 
 
-def test_req02_per_project_jira_status_mapping_overrides_the_default_map(clean_db, redis_client, redis_factory):
+def test_req02_a_declared_jira_status_name_maps_to_its_canonical_status(clean_db, redis_client, redis_factory):
     item_id = uuid.uuid4()
     store.create_work_item({'id': item_id, 'project': PROJECT, 'type': 'task', 'displayName': 'X', 'externalKey': 'TP-4'})
     project_config.set_mode(PROJECT, 'jira')

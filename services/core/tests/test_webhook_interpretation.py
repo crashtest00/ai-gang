@@ -106,7 +106,8 @@ def test_story_created_with_complete_fields_is_dispatch_eligible_immediately(cle
     assert item.story_detail.behavior == 'Users can log in.'
 
     side_effect = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item.id)
-    assert side_effect.payload == {'kind': 'story_intake', 'jiraIssueKey': 'TP-1', 'detail': {'ok': True, 'missing': []}}
+    assert side_effect.payload == {'kind': 'story_intake', 'externalKey': 'TP-1', 'detail': {'ok': True, 'missing': []}}
+    assert 'jiraIssueKey' not in side_effect.payload
 
     created_event = OutboxEvent.objects.get(event_type='work_item.created', work_item_id=item.id)
     assert created_event.payload['status'] == 'ready'
@@ -231,7 +232,8 @@ def test_blocked_cleared_on_a_dev_agent_ticket_does_not_touch_status_and_signals
     assert item.status == 'in-progress', "clearing Blocked on a non-story must not itself change canonical status"
     event = OutboxEvent.objects.get(event_type='work_item.jira_side_effect', work_item_id=item_id)
     assert event.payload['kind'] == 'blocked_cleared'
-    assert event.payload['jiraIssueKey'] == 'TP-7'
+    assert event.payload['externalKey'] == 'TP-7'
+    assert 'jiraIssueKey' not in event.payload
 
 
 # ---------------------------------------------------------------------------
