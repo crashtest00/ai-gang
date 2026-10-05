@@ -531,6 +531,125 @@ def test_release_done_is_recorded_and_republished_exactly_once_and_the_canonical
     assert not WebhookFailure.objects.exists()
 
 
+# REQ-08 acceptance clauses the tests above leave unproven (v5.2 audit row 25).
+
+def _release_changelog_envelope(issue_key, changelog_items, *, fields=None):
+    body = {'webhookEvent': 'jira:issue_updated',
+            'issue': {'key': issue_key, 'fields': fields if fields is not None else _release_fields()},
+            'changelog': {'items': changelog_items}}
+    return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
+        'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
+    })
+
+
+def _create_jira_release(monkeypatch, issue_key):
+    """A Jira-mode Release created through its own `jira:issue_created`
+    webhook, filed under a Target Project (`engineering-app`) that differs
+    from the ticket's own project (`test-project`), with no beta queue
+    outstanding, so the create publishes its one `requested` event."""
+    _set_release_field_env(monkeypatch)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
+    handle_webhook_envelope(envelope_for(issue_key, 'jira:issue_created', _release_fields()))
+    return WorkItem.objects.get(external_key=issue_key)
+
+
+def test_a_releases_in_review_echo_cuts_no_second_candidate(clean_db, monkeypatch, permissive_jira):
+    """REQ-08 — "One path cuts a Jira-mode candidate": the creation cuts it,
+    and the ticket's later `proposed` to `in-review` Jira status echo is
+    recorded with origin JIRA_WEBHOOK, for which `store.transition_status`
+    publishes no release event. (Its Done twin is above.) Without that, the
+    echo of the status the candidate cut moved the ticket to would cut a
+    second one."""
+    item = _create_jira_release(monkeypatch, 'TP-30')
+    assert OutboxEvent.objects.filter(event_type='work_item.jira_release_event').count() == 1, \
+        'the creation published its one `requested` event'
+
+    handle_webhook_envelope(_release_changelog_envelope(
+        'TP-30', [{'field': 'status', 'fromString': 'Backlog', 'toString': 'In Review'}]))
+
+    item.refresh_from_db()
+    assert item.status == 'in-review', 'the echo is recorded'
+    releases = OutboxEvent.objects.filter(event_type='work_item.jira_release_event')
+    assert [r.payload['kind'] for r in releases] == ['requested'], 'and cuts no second candidate'
+    echo = OutboxEvent.objects.get(event_type='work_item.status_changed', work_item_id=item.id,
+                                    payload__status='in-review')
+    assert echo.payload['origin'] == write_gate.Origins.JIRA_WEBHOOK
+    assert not WebhookFailure.objects.exists()
+
+
+def test_an_unset_target_project_posts_only_its_own_comment_even_with_a_story_in_review(
+        clean_db, monkeypatch, permissive_jira):
+    """REQ-08 — "It runs the Target Project check first and, when that fails,
+    runs no queue check, so a webhook posts at most one of the two
+    comments." The Release falls back to its own project, where a story is
+    awaiting acceptance, so a queue check run first (or at all) would post
+    the beta-queue comment: the earlier test with no target project seeds
+    nothing outstanding and cannot tell the orders apart."""
+    _set_release_field_env(monkeypatch)
+    outstanding_id = uuid.uuid4()
+    store.create_work_item({'id': outstanding_id, 'project': PROJECT, 'type': 'task',
+                             'displayName': 'Still in review', 'status': 'in-review'})
+    project_config.set_mode(PROJECT, 'jira')
+    assert [o.id for o in store._release_beta_queue_outstanding(PROJECT)] == [outstanding_id], \
+        'precondition: the project the Release falls back to has an outstanding beta queue'
+
+    handle_webhook_envelope(envelope_for('TP-31', 'jira:issue_created', _release_fields(target_project=None)))
+
+    assert not OutboxEvent.objects.filter(event_type='work_item.jira_release_event').exists()
+    texts = posted_comment_texts()
+    assert texts == ['[system] Release ticket is missing the required Target Project field. '
+                      'Set it and re-create the Release ticket.'], \
+        'exactly one comment, the Target Project one, and no beta-queue comment'
+
+
+def test_the_release_events_are_published_on_the_tickets_own_projects_stream(clean_db, monkeypatch, permissive_jira):
+    """REQ-08 — each publisher carries the Release's Target Project as the
+    payload's `project`, while "the outbox row stays on the ticket's own
+    project's stream": the `OutboxEvent.project` column, which the relay
+    publishes by, is the ticket's own project and not the Target Project."""
+    item = _create_jira_release(monkeypatch, 'TP-32')
+    assert item.project == 'engineering-app', 'precondition: the Target Project differs from the ticket\'s own'
+
+    handle_webhook_envelope(_release_changelog_envelope(
+        'TP-32', [{'field': 'status', 'fromString': 'In Review', 'toString': 'Done'}]))
+    handle_webhook_envelope(_release_changelog_envelope(
+        'TP-32', [{'field': 'resolution', 'toString': 'Abandoned'}]))
+
+    rows = {r.payload['kind']: r for r in OutboxEvent.objects.filter(event_type='work_item.jira_release_event')}
+    assert set(rows) == {'requested', 'done', 'abandoned'}
+    for kind, row in rows.items():
+        assert row.project == registry.normalize_project_name(PROJECT), \
+            f"`{kind}`: the row is on the ticket's own project's stream"
+        assert row.payload['project'] == 'engineering-app', f'`{kind}`: the payload names the Target Project'
+        assert row.work_item_id == item.id
+        assert row.payload['workItemId'] == str(item.id)
+
+
+def test_a_release_done_is_recorded_with_origin_jira_webhook(clean_db, monkeypatch, permissive_jira):
+    """REQ-08 — on `done`, `_handle_changelog_item` "applies
+    `_apply_validated_status_change`, so the Release's canonical status moves
+    to `done`, origin `JIRA_WEBHOOK`". The earlier Done test asserts only the
+    status; this asserts the origin on the status event and the actor on the
+    history row the same write recorded."""
+    from workitems.models import WorkItemHistory
+
+    item = _create_jira_release(monkeypatch, 'TP-33')
+
+    handle_webhook_envelope(_release_changelog_envelope(
+        'TP-33', [{'field': 'status', 'fromString': 'In Review', 'toString': 'Done'}]))
+
+    item.refresh_from_db()
+    assert item.status == 'done'
+    changed = OutboxEvent.objects.get(event_type='work_item.status_changed', work_item_id=item.id,
+                                       payload__status='done')
+    assert changed.payload['origin'] == write_gate.Origins.JIRA_WEBHOOK
+    history = WorkItemHistory.objects.get(work_item_id=item.id, field='status', new_value='done')
+    assert history.actor == 'jira-webhook:TP-33'
+    assert OutboxEvent.objects.filter(event_type='work_item.jira_release_event',
+                                      payload__kind='done').count() == 1, 'and still one `done` release event'
+
+
 # ---------------------------------------------------------------------------
 # Catch-all — an issue-link changelog entry, previously silently
 # discarded, must be durably recorded and republished.

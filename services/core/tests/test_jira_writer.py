@@ -497,6 +497,87 @@ def test_a_release_candidate_recorded_event_sets_the_three_fields_and_transition
     assert posted == [{'transition': {'id': '10'}}]
 
 
+def _post_release_candidate(item_id, **body):
+    import json
+
+    from django.test import Client
+
+    return Client().post(f'/admin/work-items/{item_id}/release-candidate', data=json.dumps(body),
+                         content_type='application/json')
+
+
+def test_the_release_candidate_endpoint_publishes_the_canonical_event_once_in_jira_mode(
+        clean_db, permissive_jira):
+    """REQ-06 acceptance: `work_item.release_candidate_recorded` is
+    published in both modes. The local-mode half is
+    test_views_http_api.py's; this is the Jira-mode half, through the real
+    endpoint rather than a hand-built envelope."""
+    from workitems.models import OutboxEvent
+
+    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release')
+    jira_mode()
+
+    response = _post_release_candidate(item_id, candidateSha='abc1234', buildIdentifier='b-7',
+                                       previewUrl='https://preview.example.com')
+    assert response.status_code == 200
+
+    rows = OutboxEvent.objects.filter(event_type='work_item.release_candidate_recorded', work_item_id=item_id)
+    assert rows.count() == 1
+    row = rows.get()
+    assert row.project == PROJECT
+    assert row.payload == {'id': str(item_id), 'candidateSha': 'abc1234', 'buildIdentifier': 'b-7',
+                           'previewUrl': 'https://preview.example.com'}
+
+
+def test_a_jira_mode_release_candidate_posted_to_the_endpoint_reaches_jira_with_fields_comment_and_transition(
+        clean_db, permissive_jira, redis_client, monkeypatch):
+    """REQ-06 acceptance: "a Jira-mode release candidate still receives its
+    fields, its comment and its In Review transition". The whole production
+    path: the endpoint records the candidate and posts the comment (the
+    comment path, in-process), publishes the outbox row; the real relay
+    carries that row to the project's event stream; the writer handles the
+    envelope the relay built and sets the fields and transitions."""
+    import json
+
+    from workitems.relay import relay_once
+    from workitems.stream_topology import event_stream_name
+
+    for name, field_id in (('JIRA_CANDIDATE_SHA_FIELD_ID', 'cf_sha'),
+                            ('JIRA_BUILD_IDENTIFIER_FIELD_ID', 'cf_build'),
+                            ('JIRA_PREVIEW_URL_FIELD_ID', 'cf_preview')):
+        monkeypatch.setenv(name, field_id)
+
+    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release')
+    jira_mode()
+    posted = offer_transition(permissive_jira, 'WT-R', 'In Review')
+
+    response = _post_release_candidate(item_id, candidateSha='abc1234', buildIdentifier='b-7',
+                                       previewUrl='https://preview.example.com')
+    assert response.status_code == 200
+
+    # The comment reached Jira from the endpoint's own call; the writer has
+    # not run yet, so no field or transition has.
+    assert posted_comment_texts() == [
+        '[jenkins] Release candidate cut: abc1234 (build b-7)\nPreview: https://preview.example.com'
+    ]
+    assert requests_to('PUT', '/issue/WT-R') == []
+    assert posted == []
+
+    relay_once(redis_client)
+    entries = redis_client.xrange(event_stream_name(PROJECT), '-', '+')
+    envelopes = [json.loads(fields['data']) for _, fields in entries]
+    [envelope] = [e for e in envelopes if e['payload']['eventType'] == 'work_item.release_candidate_recorded']
+
+    jira_writer.handle_event_envelope(envelope)
+
+    fields = {}
+    for request in requests_to('PUT', '/issue/WT-R'):
+        fields.update(request['body']['fields'])
+    assert fields == {'cf_sha': 'abc1234', 'cf_build': 'b-7', 'cf_preview': 'https://preview.example.com'}
+    assert posted == [{'transition': {'id': '10'}}], 'the transition to In Review, offered as the only one'
+    assert len(posted_comment_texts()) == 1, 'the writer posts no second comment'
+
+
 def test_a_status_changed_event_makes_no_jira_write(clean_db, permissive_jira):
     item_id = make_item()
     jira_mode()

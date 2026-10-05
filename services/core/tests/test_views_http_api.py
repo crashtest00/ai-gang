@@ -183,6 +183,26 @@ def test_admin_record_release_candidate_success(clean_db):
     assert any('abc123' in c['body'] for c in full['comments'])
 
 
+def test_admin_record_release_candidate_publishes_the_canonical_event_once_in_local_mode(clean_db):
+    """REQ-06 acceptance: `work_item.release_candidate_recorded` is
+    published in both modes. This is the local-mode half, through the real
+    endpoint (the Jira-mode half is in test_jira_writer.py)."""
+    client = Client()
+    item_id = _create_release(client)
+
+    res = client.post(f'/admin/work-items/{item_id}/release-candidate', data=json.dumps({
+        'candidateSha': 'abc123', 'buildIdentifier': 'build-9', 'previewUrl': 'https://preview.example/abc123',
+    }), content_type='application/json')
+    assert res.status_code == 200
+
+    rows = OutboxEvent.objects.filter(event_type='work_item.release_candidate_recorded', work_item_id=item_id)
+    assert rows.count() == 1
+    row = rows.get()
+    assert row.project == PROJECT
+    assert row.payload == {'id': str(item_id), 'candidateSha': 'abc123', 'buildIdentifier': 'build-9',
+                           'previewUrl': 'https://preview.example/abc123'}
+
+
 def test_admin_record_release_candidate_missing_sha_rejected(clean_db):
     client = Client()
     item_id = _create_release(client)
