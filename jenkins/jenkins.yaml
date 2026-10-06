@@ -157,14 +157,21 @@ jobs:
                         // The candidate fields, the comment and the In Review transition
                         // are all Django-decided side effects of this one call
                         // (store.record_release_candidate), in every mode (V5.2 Canonical
-                        // Delivery State REQ-06) — the work item is already `in-review`
-                        // (that transition ran before this job was ever triggered), so
-                        // there is no separate status transition to make here.
+                        // Delivery State REQ-06) — the work item is still `in-progress`
+                        // when this job runs (a request moves it there, V5.3 REQ-09), and
+                        // `core` moves it to `in-review` on this report, so there is no
+                        // separate status transition to make here. The native build's
+                        // URL and status ride along only when a native build ran (V5.3
+                        // REQ-12); a report without one carries neither field.
+                        def nativeFields = ''
+                        if (env.NATIVE_BUILD_STATUS && env.NATIVE_BUILD_STATUS != 'skipped') {
+                          nativeFields = ', "nativeBuildUrl": "' + env.NATIVE_BUILD_URL + '", "nativeBuildStatus": "' + env.NATIVE_BUILD_STATUS + '"'
+                        }
                         sh """
                           curl -sf -X POST \\
                             -H 'Content-Type: application/json' \\
                             "\$WORKITEM_SERVICE_URL/admin/work-items/^${WORK_ITEM_ID}/release-candidate" \\
-                            -d '{"candidateSha": "^${CANDIDATE_SHA}", "buildIdentifier": "^${BUILD_IDENTIFIER}", "previewUrl": "^${PREVIEW_URL}"}'
+                            -d '{"candidateSha": "^${CANDIDATE_SHA}", "buildIdentifier": "^${BUILD_IDENTIFIER}", "previewUrl": "^${PREVIEW_URL}"^${nativeFields}}'
                         """
                       }
                     }
@@ -297,7 +304,7 @@ jobs:
 
   - script: |
       pipelineJob('release-preview-teardown') {
-        description('Triggered by ScrumMaster when a Release work item reaches a terminal state without shipping (resolution set to Abandoned). Tears down that release\'s preview container on the Beta VM.')
+        description('Triggered by ScrumMaster when a Release work item is abandoned without shipping (moved to the Abandoned status, canonical `cancelled`). Tears down that release\'s preview container on the Beta VM.')
         triggers {
           genericTrigger {
             token('release-preview-teardown')

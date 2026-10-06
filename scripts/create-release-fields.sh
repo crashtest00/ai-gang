@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # create-release-fields.sh
 #
-# Creates the Jira "Release" issue type, its dedicated fields, and the
-# "Abandoned" resolution used to close a release that will not ship — then
+# Creates the Jira "Release" issue type and its dedicated fields, then
 # writes the field IDs to the platform .env (~/ai-gang/.env), where
 # scripts/startup/derive-env.sh reads them. Sibling to create-jira-fields.sh,
 # same idempotent pattern.
@@ -131,26 +130,6 @@ else
   echo ""
   echo "  NOTE: add it to each target project — Project Settings → Issue types →"
   echo "        Add issue type → Release (not scripted; see header comment)."
-fi
-
-echo ""
-
-# Abandoned resolution — the terminal state for a Release ticket that won't ship.
-echo "Checking the Abandoned resolution..."
-EXISTING_RES=$(jira_get "/resolution" | jq -r 'if type == "array" then . else (.values // []) end | .[] | select(.name == "Abandoned") | .id' | head -1)
-if [[ -n "$EXISTING_RES" ]]; then
-  echo "  Abandoned resolution already exists: $EXISTING_RES"
-else
-  echo "  Creating Abandoned resolution..."
-  RES_RESPONSE=$(jira_post "/resolution" '{"name": "Abandoned", "description": "Release ticket closed without shipping — its preview is torn down."}')
-  EXISTING_RES=$(echo "$RES_RESPONSE" | jq -r '.id // empty')
-  if [[ -z "$EXISTING_RES" ]]; then
-    echo "  Warning: could not create Abandoned resolution:"
-    echo "$RES_RESPONSE" | jq .
-    echo "  Create manually: Jira Settings → Issues → Resolutions."
-  else
-    echo "  Created: $EXISTING_RES"
-  fi
 fi
 
 echo ""
