@@ -281,11 +281,12 @@ It creates:
 
 > **Manual step required — configure board columns**
 >
-> `init-project.sh` applies the AI Gang Kanban workflow (`Backlog → Shovel Ready → In Progress → In Review → Done`) to your Jira project, but Jira's board column configuration cannot be updated via API. Without this step your board will show the wrong columns and statuses will appear unmapped.
+> `init-project.sh` applies the AI Gang Kanban workflow (`Backlog → Shovel Ready → In Progress → In Review → Done`, plus an `Abandoned` status in the Done category, reachable from every status) to your Jira project, but Jira's board column configuration cannot be updated via API. Without this step your board will show the wrong columns and statuses will appear unmapped.
 >
 > Go to your board → **Board Settings → Columns** and:
 >
 > - **Add** columns for **Shovel Ready** and **In Review**
+> - **Add** a column for **Abandoned**, in the Done category's column or its own, so abandoned tickets are not left unmapped
 > - **Remove** the default **Selected for Development** column
 >
 > This is a one-time step per project and takes about two minutes.

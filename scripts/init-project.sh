@@ -555,7 +555,7 @@ setup_project_workflow() {
   echo ""
   echo "Configuring project workflow..."
   ensure_workflow_statuses
-  echo "    Backlog($STATUS_BACKLOG) → Shovel Ready($STATUS_SHOVEL_READY) → In Progress($STATUS_IN_PROGRESS) → In Review($STATUS_IN_REVIEW) → Done($STATUS_DONE)"
+  echo "    Backlog($STATUS_BACKLOG) → Shovel Ready($STATUS_SHOVEL_READY) → In Progress($STATUS_IN_PROGRESS) → In Review($STATUS_IN_REVIEW) → Done($STATUS_DONE); Abandoned($STATUS_ABANDONED) from any status"
   ensure_ai_gang_workflow && assign_workflow_to_project
 }
 
