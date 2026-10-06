@@ -318,23 +318,34 @@ def admin_transition_work_item(request, work_item_id):
 @require_http_methods(['POST'])
 def admin_record_release_candidate(request, work_item_id):
     """The writeback target for the release-candidate Jenkins job's results
-    (Candidate SHA, Build Identifier, Preview URL), called by Jenkins in
+    (Candidate SHA, Build Identifier, Preview URL, and — when a native build
+    ran — `nativeBuildUrl` and `nativeBuildStatus`), called by Jenkins in
     every mode (canonical-delivery-state.md REQ-06): `jenkins.yaml` makes
     one unconditional POST to this endpoint, with no per-mode branch, and
-    never writes the three fields to a tracker itself.
-    `record_release_candidate`
-    records them here first, in every mode, before REQ-09's writer sets
-    them in Jira for a Jira-mode project."""
+    never writes to a tracker itself.
+
+    `store.report_release_candidate` routes it, origin EXTERNAL_API
+    (release-mode-parity.md REQ-13): in local mode it records the candidate
+    and moves the Release to `in-review` (REQ-09); in Jira mode the writer
+    pushes the three fields to the Release ticket in one edit and records
+    nothing, and this returns 202, since the canonical row changes only when
+    Jira's webhook returns. Either way the native build becomes one comment
+    (REQ-12). This view holds no transaction, so a failed push returns its
+    error to the job."""
     try:
         actor = request.headers.get('X-Actor', 'jenkins')
         body = json.loads(request.body or b'{}')
         if not body.get('candidateSha'):
             return JsonResponse({'error': 'VALIDATION_ERROR', 'message': 'candidateSha is required'}, status=400)
-        item = store.record_release_candidate(
+        result = store.report_release_candidate(
             work_item_id, candidate_sha=body['candidateSha'], build_identifier=body.get('buildIdentifier'),
-            preview_url=body.get('previewUrl'), actor=actor,
+            preview_url=body.get('previewUrl'), native_build_url=body.get('nativeBuildUrl'),
+            native_build_status=body.get('nativeBuildStatus'), actor=actor,
+            origin=write_gate.Origins.EXTERNAL_API,
         )
-        return JsonResponse(serialize_work_item(item))
+        if isinstance(result, dict):
+            return JsonResponse(result, status=202)
+        return JsonResponse(serialize_work_item(result))
     except Exception as err:
         return _error_response(err)
 

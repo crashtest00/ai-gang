@@ -48,8 +48,11 @@ payload:
       - the configured `JIRA_BLOCKED_FIELD_ID` custom field going from
         truthy to falsy ("Blocked cleared"): matches handlers.js's
         `handleBlockedCleared` — see `_handle_blocked_field_change`.
-      - `field == 'resolution'` to `Abandoned` for a Release: a
-        `work_item.jira_release_event` (kind `abandoned`).
+      - a Release's move to Done or to Abandoned (a status change, through
+        the project's map, to `done` or `cancelled`): the status and its
+        `work_item.jira_release_event` (kind `done` or `abandoned`) in one
+        transaction, only when the webhook changes the canonical status
+        (release-mode-parity.md REQ-10, REQ-14).
       - anything else (issue links, arbitrary custom fields): durably
         recorded and republished as a generic `work_item.jira_event_received`
         event rather than dropped — a consumer with no use for a
@@ -161,6 +164,10 @@ DEFAULT_JIRA_STATUS_MAP = {
     'In Review': 'in-review',
     'Done': 'done',
     'Backlog': 'proposed',
+    # release-mode-parity.md REQ-14: abandonment, both ways and for every
+    # issue type — inbound a move to Abandoned records `cancelled`, outbound
+    # the writer writes `cancelled` as Abandoned (no longer the Blocked flag).
+    'Abandoned': 'cancelled',
 }
 
 
@@ -222,6 +229,11 @@ def jira_status_to_canonical(project: str, jira_status_name: str) -> Optional[st
 # acknowledgement), `:153-156` (missing fields) and `:245-248` (the reblock).
 # Each is a step keyed `<messageId>:<name>` on the webhook envelope.
 STORY_INTAKE_COMMENT_AUTHOR = 'system'
+
+# The author of the candidate note the recording step posts when a Release's
+# webhook records a new candidate (release-mode-parity.md REQ-13) — the
+# webhook does not say whether the job or a person set the SHA.
+RELEASE_AUTHOR = 'system'
 STORY_INTAKE_ACKNOWLEDGEMENT = 'Ticket received. Assigned to Refinement Agent for decomposition.'
 
 
@@ -330,15 +342,23 @@ def _sync_story_detail(item: WorkItem, fields: dict) -> None:
     )
 
 
-def _sync_release_detail(item: WorkItem, fields: dict) -> None:
+def _sync_release_detail(item: WorkItem, fields: dict) -> Optional[dict]:
     """Re-parse the release fields from a webhook's current `issue`
     snapshot and persist them — mirrors `_sync_story_detail`. No-op for a
     non-release item. Target Project is deliberately not written here: it
     maps onto `item.project` (set once, at materialization time — REQ-01),
-    not a `work_item_release_detail` column."""
+    not a `work_item_release_detail` column.
+
+    Returns the recorded candidate (`candidateSha`, `buildIdentifier`,
+    `previewUrl`) when this sync recorded a candidate SHA that is non-empty
+    and differs from the one `core` held, and None otherwise — the trigger
+    for the recording step (release-mode-parity.md REQ-13), which the caller
+    runs or not depending on whether this webhook materialized the
+    Release."""
     if item.type != 'release':
-        return
+        return None
     detail = jira_interpret.parse_release_fields(fields)
+    held = WorkItemReleaseDetail.objects.filter(work_item_id=item.id).values_list('candidate_sha', flat=True).first()
     WorkItemReleaseDetail.objects.update_or_create(
         work_item_id=item.id,
         defaults={
@@ -348,6 +368,26 @@ def _sync_release_detail(item: WorkItem, fields: dict) -> None:
             'preview_url': detail.get('previewUrl'),
         },
     )
+    candidate_sha = detail.get('candidateSha')
+    if candidate_sha and candidate_sha != held:
+        return {'candidateSha': candidate_sha, 'buildIdentifier': detail.get('buildIdentifier'),
+                'previewUrl': detail.get('previewUrl')}
+    return None
+
+
+def _sync_existing_release(item: WorkItem, fields: dict) -> None:
+    """The Release sync for a webhook that did NOT materialize the Release
+    (REQ-13, "The record"): the fields from the snapshot, and — when that
+    recorded a new, non-empty candidate SHA — the candidate's recording
+    step, `store.record_release_candidate_step`, the same step local mode's
+    report runs. Must be called inside the caller's `transaction.atomic()`
+    block, so the fields and the step's event commit together."""
+    candidate = _sync_release_detail(item, fields)
+    if candidate is not None:
+        store.record_release_candidate_step(
+            item, candidate_sha=candidate['candidateSha'], build_identifier=candidate['buildIdentifier'],
+            preview_url=candidate['previewUrl'], author=RELEASE_AUTHOR,
+        )
 
 
 def _apply_validated_status_change(item: WorkItem, jira_status_name: str, issue_key: str, envelope: dict) -> None:
@@ -467,11 +507,14 @@ def _handle_story_created(project: str, issue: dict, issue_key: str, envelope: d
 # custom field going from truthy to falsy.
 # ---------------------------------------------------------------------------
 
-# The three canonical statuses Jira shows as one Blocked flag. The writer
-# pushes each of them as `set_blocked_field(true)` (REQ-09, "A status write
-# to `needs-clarification`, `failed` or `cancelled`"), so the flag coming
-# back is read as `needs-clarification` — which is why `failed` and
-# `cancelled` are recorded as `needs-clarification` in Jira mode (§4).
+# The statuses a Blocked flag set in Jira does not move. The writer pushes
+# `needs-clarification` and `failed` as `set_blocked_field(true)` (v5.2
+# REQ-09), so the flag coming back is read as `needs-clarification` — which
+# is why `failed` is recorded as `needs-clarification` in Jira mode (§4) —
+# and an item already in either keeps it. From v5.3 the writer writes
+# `cancelled` as the Abandoned status instead (release-mode-parity.md
+# REQ-14); a cancelled item still keeps its status when a person flags it,
+# as it did before.
 _BLOCKED_FLAG_BASELINES = ('needs-clarification', 'failed', 'cancelled')
 
 
@@ -711,7 +754,8 @@ def _handle_comment_event(project: str, issue_key: str, body: dict, resolve_work
         )
 
 
-def _materialize_release(project: str, issue: dict, issue_key: str, envelope: dict) -> Optional[WorkItem]:
+def _materialize_release(project: str, issue: dict, issue_key: str,
+                          envelope: dict) -> tuple[Optional[WorkItem], bool]:
     """Creates the canonical `release` work item and its
     `work_item_release_detail` row from a Release ticket's current field
     snapshot, if one doesn't already exist for `issue_key` — idempotent on
@@ -729,7 +773,14 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
     for a Release ticket that was never materialized — BUGFIXES.md BF-01
     Pass 1 audit row 2, REQ-01 "create or update webhook"). Must be called
     from inside an existing `transaction.atomic()` block, same requirement
-    as `_publish_side_effect`."""
+    as `_publish_side_effect`.
+
+    Returns `(item, created)`: `created` is True only when this call
+    created the Release (release-mode-parity.md REQ-10, REQ-11, REQ-13) —
+    only that webhook may publish `requested`, and only a webhook that did
+    NOT create it runs the candidate's recording step on a changed SHA, so
+    a Release created with a Candidate SHA already set records it as a field
+    and publishes no `work_item.release_candidate_recorded`."""
     fields = issue.get('fields') or {}
     detail = jira_interpret.parse_release_fields(fields)
     display_name = fields.get('summary') or issue_key
@@ -751,15 +802,15 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
         if project_config.get_mode(item.project)['mode'] != project_config.JIRA:
             _record_generic_event(project, item.id, issue_key, envelope,
                                    {'event': 'release_materialize', 'ignored': 'resolved work item project not in Jira mode'})
-            return None
-        _sync_release_detail(item, fields)
-        return item
+            return None, False
+        _sync_existing_release(item, fields)
+        return item, False
 
     # REQ-10: a Jira Release is never filed under a Target Project not in
     # Jira mode.
     if project_config.get_mode(target_project)['mode'] != project_config.JIRA:
         record_failure(target_project, None, issue_key, 'release target project not in Jira mode', fields)
-        return None
+        return None, False
 
     item = store.create_work_item(
         {
@@ -769,122 +820,150 @@ def _materialize_release(project: str, issue: dict, issue_key: str, envelope: di
         actor=f'jira-webhook:{issue_key}', origin=write_gate.Origins.JIRA_WEBHOOK,
     )
     _sync_release_detail(item, fields)
-    return item
+    return item, True
+
+
+def _target_project_set(issue: dict) -> bool:
+    """Whether the Release ticket's own Target Project field is set, read
+    raw from `parse_release_fields` — before `_materialize_release`'s
+    fallback to the ticket's own project, which `item.project` already
+    carries (v5.2 REQ-08, kept by release-mode-parity.md REQ-11)."""
+    detail = jira_interpret.parse_release_fields(issue.get('fields') or {})
+    return bool(detail.get('targetProjectName') or detail.get('targetProjectKey'))
+
+
+RELEASE_CHECK_STEP = 'release-check'
+RELEASE_IN_PROGRESS_STEP = 'release-in-progress'
 
 
 def _handle_release_requested(project: str, issue: dict, issue_key: str, envelope: dict) -> None:
-    """A Release ticket's `jira:issue_created` creates the canonical
-    `release` work item and its `work_item_release_detail` row via
-    `_materialize_release` (BF-01), then runs the same two release checks
-    the pre-v5.1 handler ran against a fresh `jira.getIssue` call
-    (`e39e9ab`'s `handlers.js`, `handleReleaseRequested`) before publishing
-    `work_item.jira_release_event` (kind `requested`) — this is REQ-08's
-    one trigger for a Jira-mode candidate cut:
+    """A Jira-mode release request: a Release ticket's `jira:issue_created`
+    (release-mode-parity.md REQ-09 … REQ-11).
 
-      - the Target Project field, read raw from
-        `jira_interpret.parse_release_fields` rather than from `item.project`
-        (which already carries `_materialize_release`'s own-project
-        fallback) — unset leaves the Release uncut;
-      - failing that, the canonical beta-queue query
-        (`store._release_beta_queue_outstanding`) against the Target
-        Project, which REQ-04 keeps current in Jira mode — outstanding
-        work leaves the Release uncut.
+    Inside one `transaction.atomic()` block, and only when this webhook
+    materializes the Release (`_materialize_release`, BF-01):
 
-    Only the Target Project check runs when it fails, so a webhook posts at
-    most one of the two comments; on either, this function publishes no
-    event, and comments instead — through `store.append_comment`
-    (REQ-09's one comment path), after this function's `transaction.atomic()`
-    block exits, keyed `<messageId>:release-check` on the webhook envelope so
-    a redelivered webhook posts it once. The published event carries the
-    materialized Release's canonical `workItemId` and, as `project`, its
-    Target Project, on the outbox stream named by this function's own
-    `project` (the ticket's own containing Jira project) — so ScrumMaster
-    triggers Jenkins for it in Jira mode exactly as it already does in local
-    mode (REQ-08). Up to v5.1 ScrumMaster's own Jira-mode branch ran these
-    two checks itself and triggered Jenkins directly; that branch is deleted
-    (REQ-04). `_materialize_release` returns `None`, and this function
-    publishes nothing and comments nothing, when REQ-10's mode check
-    declines to create or re-resolve the row — a Release filed under a
-    Target Project not in Jira mode, or one that resolves to a work item
-    whose own project isn't."""
-    missing_target_project = False
-    outstanding: list[WorkItem] = []
+      - the one release gate, `store.release_request_refusal`, with whether
+        the ticket's own Target Project field is set (REQ-11);
+      - when it passes, `requested` through `store.publish_release_event` on
+        the ticket's own project's stream (REQ-10), so the Release and its
+        event commit together, and the In Progress push registered as the
+        writer step `<messageId>:release-in-progress` (REQ-09);
+      - when it refuses, the comment registered as the step
+        `<messageId>:release-check`.
+
+    After the block: the refusal posted with `store.post_release_rejection`,
+    and the In Progress push made by `jira_writer.push_release_in_progress`
+    — each only while its step is registered and not complete.
+
+    A redelivered creation webhook materializes nothing, so it runs neither
+    check again and publishes nothing; it runs only the steps a previous
+    delivery registered and did not complete. A requested Release therefore
+    never receives a rejection, a refused one is never pushed In Progress,
+    and a replay after the candidate moves nothing (REQ-09). The text of a
+    rejection whose post failed is re-derived for its retry from the same
+    read-only gate, which writes nothing.
+
+    `_materialize_release` returns no item, and this function publishes and
+    comments nothing, when v5.2 REQ-10's mode check declines the Release."""
+    message_id = envelope.get('messageId')
+    check_key = f'{message_id}:{RELEASE_CHECK_STEP}' if message_id else None
+    progress_key = f'{message_id}:{RELEASE_IN_PROGRESS_STEP}' if message_id else None
+    target_project_set = _target_project_set(issue)
+    refusal = None
+    resume_check = False
 
     with transaction.atomic():
-        item = _materialize_release(project, issue, issue_key, envelope)
+        item, created = _materialize_release(project, issue, issue_key, envelope)
         if item is None:
             return
 
-        fields = issue.get('fields') or {}
-        detail = jira_interpret.parse_release_fields(fields)
-        missing_target_project = not (detail.get('targetProjectName') or detail.get('targetProjectKey'))
-        if not missing_target_project:
-            outstanding = store._release_beta_queue_outstanding(item.project)
+        if created:
+            refusal = store.release_request_refusal(item, target_project_set=target_project_set)
+            if refusal is None:
+                store.publish_release_event(item, 'requested', stream_project=project)
+                if progress_key:
+                    jira_writer.register_step(progress_key, item.id, jira_writer.STEP_STATUS)
+            elif check_key:
+                jira_writer.register_step(check_key, item.id, jira_writer.STEP_COMMENT)
+        else:
+            resume_check = jira_writer.is_step_pending(check_key, item.id, jira_writer.STEP_COMMENT)
 
-        if not missing_target_project and not outstanding:
-            store.write_outbox_event(
-                project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
-                payload={'kind': 'requested', 'workItemId': str(item.id), 'project': item.project},
-            )
+    if resume_check:
+        refusal = store.release_request_refusal(item, target_project_set=target_project_set)
+        if refusal is None:
+            # The cause has cleared since the post failed; there is nothing
+            # left to say, and the Release stays `proposed` either way.
+            jira_writer.mark_step_complete(check_key, item.id, jira_writer.STEP_COMMENT)
 
-    release_check_key = f"{envelope.get('messageId')}:release-check"
-    if missing_target_project:
-        store.append_comment(
-            item.id, 'system',
-            'Release ticket is missing the required Target Project field. Set it and re-create the Release ticket.',
-            source_message_id=release_check_key,
-        )
-    elif outstanding:
-        listing = '\n'.join(f'  - {o.external_key or o.id}' for o in outstanding)
-        store.append_comment(
-            item.id, 'system',
-            'Cannot cut a release candidate — the following tickets are still awaiting tester '
-            f'acceptance on beta:\n\n{listing}\n\nResolve these (move to Done or otherwise off '
-            "beta's queue) and re-create the Release ticket.",
-            source_message_id=release_check_key,
-        )
+    if refusal is not None:
+        store.post_release_rejection(item, refusal, source_message_id=check_key)
+
+    jira_writer.push_release_in_progress(item, completion_key=progress_key)
 
 
-def _handle_release_done(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict) -> None:
-    """Publishes `work_item.jira_release_event` (kind `done`) for a Release
-    ticket's move to Done — the single production-approval gate, which now
-    triggers `production-promote` in Jira mode too (REQ-08) — carrying the
-    materialized Release's canonical `workItemId` and, as `project`, its
-    Target Project, the same shape `_handle_release_requested` publishes.
-    `_handle_changelog_item` calls this BEFORE applying the Done transition
-    itself, so this is the one place that cuts the event; the transition
-    that follows carries `origin=JIRA_WEBHOOK`, for which
-    `store.transition_status` publishes no second one (REQ-08). `item` is
-    `None` only if this Release ticket's `jira:issue_created` was never
-    processed AND `_materialize_release` just declined it too (REQ-10) —
-    nothing to publish or transition for it, recorded as a failure rather
-    than silently dropped."""
+def _apply_release_terminal_status(project: str, item: WorkItem, target_status: str, kind: str,
+                                    issue_key: str, envelope: dict, jira_status_name: str) -> None:
+    """A Jira-mode Release's move to `done` or `cancelled`, and its release
+    event, in ONE `transaction.atomic()` block (release-mode-parity.md
+    REQ-10), so a crash between them loses neither: a `done` recorded
+    without its event would never be promoted, since its redelivery changes
+    nothing.
+
+    Only a webhook that CHANGES the Release's canonical status publishes. A
+    Release `core` already holds at the target publishes nothing — which is
+    what makes `connect_jira`'s re-sync of a done or cancelled Release safe
+    (REQ-14) — while a Release moved to Done, reopened and moved to Done
+    again publishes `done` each time.
+
+    The change goes through `store.transition_status`, origin JIRA_WEBHOOK,
+    which publishes no event of its own (v5.2 REQ-08's guard). A refused
+    change is recorded as one webhook failure and publishes nothing, as
+    every other validated Jira status change is."""
+    with transaction.atomic():
+        current = WorkItem.objects.select_for_update().filter(id=item.id).first()
+        if current is None or current.status == target_status:
+            return
+        try:
+            with transaction.atomic():
+                store.transition_status(item.id, target_status, actor=f'jira-webhook:{issue_key}',
+                                         origin=write_gate.Origins.JIRA_WEBHOOK)
+        except Exception as err:  # noqa: BLE001 - recorded, as _apply_validated_status_change_to does
+            record_failure(item.project, item.id, issue_key, str(err),
+                            {'jiraStatusName': jira_status_name, 'envelopeId': envelope.get('messageId')})
+            return
+        store.publish_release_event(current, kind, stream_project=project)
+
+
+def _handle_release_done(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict,
+                          jira_status_name: str) -> None:
+    """A Release ticket's move to Done — the single production-approval gate
+    (v5.2 REQ-08) — records `done` and publishes `done` together, only on a
+    change (REQ-10). `item` is `None` only if the Release was never
+    materialized AND `_materialize_release` just declined it too (v5.2
+    REQ-10): recorded as a failure rather than silently dropped."""
     if item is None:
         record_failure(project, None, issue_key,
                         'Release moved to Done with no canonical release work item resolved', None)
         return
-    with transaction.atomic():
-        store.write_outbox_event(
-            project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
-            payload={'kind': 'done', 'workItemId': str(item.id), 'project': item.project},
-        )
+    _apply_release_terminal_status(project, item, 'done', 'done', issue_key, envelope, jira_status_name)
 
 
-def _handle_release_abandoned(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict) -> None:
-    """Publishes `work_item.jira_release_event` (kind `abandoned`) for a
-    Release ticket's resolution set to Abandoned, in the same
-    `workItemId`/`project` shape as the other two publishers (REQ-08), so
-    ScrumMaster tears down its preview container in Jira mode too. See
-    `_handle_release_done` on `item is None`."""
+def _handle_release_abandoned(project: str, item: Optional[WorkItem], issue_key: str, envelope: dict,
+                               jira_status_name: str) -> None:
+    """A Release ticket's move to Abandoned (release-mode-parity.md REQ-14)
+    records `cancelled` and publishes `abandoned` together, only on a change
+    (REQ-10), so ScrumMaster tears down its preview and nothing is promoted.
+    See `_handle_release_done` on `item is None`."""
     if item is None:
         record_failure(project, None, issue_key,
                         'Release abandoned with no canonical release work item resolved', None)
         return
-    with transaction.atomic():
-        store.write_outbox_event(
-            project=project, event_type='work_item.jira_release_event', work_item_id=item.id,
-            payload={'kind': 'abandoned', 'workItemId': str(item.id), 'project': item.project},
-        )
+    _apply_release_terminal_status(project, item, 'cancelled', 'abandoned', issue_key, envelope,
+                                    jira_status_name)
+
+
+_RELEASE_TERMINAL_HANDLERS = {'done': _handle_release_done, 'cancelled': _handle_release_abandoned}
 
 
 # ---------------------------------------------------------------------------
@@ -1342,19 +1421,24 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         # audit row 2); without this branch, every later update for that
         # ticket falls through to `_record_generic_event` forever.
         # `_materialize_release` is idempotent on `external_key`, the same
-        # helper `_handle_release_requested` uses for the create path.
+        # helper `_handle_release_requested` uses for the create path. A
+        # Release it creates here records its fields and runs no recording
+        # step (release-mode-parity.md REQ-13).
         with transaction.atomic():
-            item = _materialize_release(project, issue, issue_key, envelope)
+            item, _created = _materialize_release(project, issue, issue_key, envelope)
         work_item_id = item.id if item is not None else None
     elif issuetype == 'Release' and item is not None and item.type == 'release':
         # The webhook's `issue` snapshot always carries the ticket's FULL
         # current field values, not just the one `change` names — re-sync
         # once per changelog item (idempotent; same value if nothing
         # release-related changed) so a Candidate SHA/Build
-        # Identifier/Preview URL writeback lands regardless of which
-        # changelog field the webhook happens to report it under.
+        # Identifier/Preview URL edit lands regardless of which changelog
+        # field the webhook happens to report it under — and, on a new
+        # candidate SHA, the recording step runs in the same transaction
+        # (release-mode-parity.md REQ-13). Idempotent across the webhook's
+        # changelog items: only the first sees the SHA change.
         with transaction.atomic():
-            _sync_release_detail(item, issue.get('fields') or {})
+            _sync_existing_release(item, issue.get('fields') or {})
     elif issuetype == 'Sub-task':
         # canonical-delivery-state.md REQ-11. Two things, in this order,
         # before the field-specific handling below:
@@ -1384,14 +1468,18 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
         to_status = change.get('toString')
         if not to_status:
             return
-        if issuetype == 'Release' and to_status == 'Done':
-            # Publishes `done` first (REQ-08's one trigger for
-            # production-promote in Jira mode), then falls through to the
-            # same validated-transition path any other status change takes
-            # — origin JIRA_WEBHOOK, for which `store.transition_status`
-            # publishes no second release event (store.py's
-            # `transition_status`/`_transition_status_core`).
-            _handle_release_done(project, item, issue_key, envelope)
+        if issuetype == 'Release':
+            # A Release's move to a Jira status its project's map reads as
+            # `done` (Done) or `cancelled` (Abandoned): the status and its
+            # release event in one block, only on a change
+            # (release-mode-parity.md REQ-10, REQ-14). Any other Release
+            # status falls through to the validated path below, which
+            # publishes nothing.
+            mapped = jira_status_to_canonical(item.project if item is not None else project, to_status)
+            handler = _RELEASE_TERMINAL_HANDLERS.get(mapped)
+            if handler is not None:
+                handler(project, item, issue_key, envelope, to_status)
+                return
         if item is None:
             _record_generic_event(project, None, issue_key, envelope,
                                    {'field': 'status', 'from': change.get('fromString'), 'to': to_status})
@@ -1407,10 +1495,6 @@ def _handle_changelog_item(project: str, issue: dict, issue_key: str, work_item_
     agent_field_id = os.environ.get('JIRA_AGENT_FIELD_ID')
     if agent_field_id and change.get('fieldId') == agent_field_id:
         _handle_agent_field_change(project, issue, issue_key, work_item_id, envelope)
-        return
-
-    if field == 'resolution' and change.get('toString') == 'Abandoned' and issuetype == 'Release':
-        _handle_release_abandoned(project, item, issue_key, envelope)
         return
 
     # Issue links, arbitrary custom fields, anything not specifically

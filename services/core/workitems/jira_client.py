@@ -274,11 +274,18 @@ def post_comment(key: str, text: str) -> None:
 
 # --- setField (jira.js:151-154) --------------------------------------------
 
+def set_fields(key: str, fields: dict[str, Any]) -> None:
+    """Update several fields on an issue in ONE `PUT /issue/{key}` — one
+    edit, so one webhook (release-mode-parity.md REQ-13: the candidate SHA,
+    build identifier and preview URL reach Jira together)."""
+    _request('PUT', f'/issue/{key}', json={'fields': dict(fields)})
+
+
 def set_field(key: str, field_id: str, value: Any) -> None:
-    """Update a single custom field on an issue. Internal to this client
-    (not exported by jira.js either), ported because REQ-01 names it as
-    one of the 17."""
-    _request('PUT', f'/issue/{key}', json={'fields': {field_id: value}})
+    """Update a single custom field on an issue — a one-field call of
+    `set_fields` (REQ-13). Ported because V5.1 REQ-01 names it as one of
+    the 17."""
+    set_fields(key, {field_id: value})
 
 
 # --- setAgentField (jira.js:156-161) ---------------------------------------

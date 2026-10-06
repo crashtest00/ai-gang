@@ -110,9 +110,11 @@ class UnresolvedArtifactError(Exception):
 
 
 class ReleaseGateError(Exception):
-    """A release work item's
-    `proposed` -> `in-review` transition (candidate cut) is rejected
-    because the target project's beta queue is not clean."""
+    """A release request — a local Release's `proposed` -> `in-progress`
+    (release-mode-parity.md REQ-09) — refused by the one release gate
+    (`release_request_refusal`, REQ-11). `outstanding` holds the ids of the
+    work items still awaiting acceptance on beta, empty when the cause is
+    something else."""
     code = 'RELEASE_GATE_REJECTED'
 
     def __init__(self, message: str, outstanding: list):
@@ -501,10 +503,41 @@ def _recompute_parent_rollup(parent_id, actor: Optional[str]) -> None:
 
 
 RELEASE_EVENT_TYPE = 'work_item.jira_release_event'
-_RELEASE_EVENT_KIND_BY_STATUS = {'in-review': 'requested', 'done': 'done', 'cancelled': 'abandoned'}
+RELEASE_CANDIDATE_RECORDED_EVENT_TYPE = 'work_item.release_candidate_recorded'
 
 
-def _release_beta_queue_outstanding(project: str) -> list[WorkItem]:
+def publish_release_event(item: WorkItem, kind: str, *, stream_project: str) -> None:
+    """**The one writer of every `work_item.jira_release_event`**
+    (release-mode-parity.md REQ-10), in both modes: `requested`, `done` or
+    `abandoned`. Its two callers are `_transition_status_core` (a Release
+    change whose origin is not JIRA_WEBHOOK) and `webhook_consumer.py`'s
+    release handlers, and each passes the stream the outbox row goes on:
+    `item.project` in local mode, the Release ticket's own containing
+    project in Jira mode (v5.2 Pass 9). The payload's `project` is always
+    the Release's Target Project, `item.project`.
+
+    Must be called inside the caller's `transaction.atomic()` block, beside
+    the change the event describes, so a crash between them loses neither."""
+    _write_outbox_event(
+        project=stream_project, event_type=RELEASE_EVENT_TYPE, work_item_id=item.id,
+        payload={'kind': kind, 'workItemId': str(item.id), 'project': item.project},
+    )
+
+
+def _release_event_kind(previous_status: str, new_status: str) -> Optional[str]:
+    """Which release event a recorded change of a Release publishes, keyed on
+    the MOVE rather than on the new status alone (REQ-10): `requested` on
+    `proposed` -> `in-progress` only — the move the release gate guards — so
+    a Release moved back to `in-progress` from `in-review` cuts no second
+    candidate; `done` on any change to `done`; `abandoned` on any change to
+    `cancelled`."""
+    if previous_status == 'proposed' and new_status == 'in-progress':
+        return 'requested'
+    if new_status == 'done':
+        return 'done'
+    if new_status == 'cancelled':
+        return 'abandoned'
+    return None
     """Local-mode equivalent of
     `services/scrummaster/src/handlers.js`'s `handleReleaseRequested` JQL check
     (`issuetype != Release AND status = "In Review"`): any non-release work
@@ -516,10 +549,78 @@ def _release_beta_queue_outstanding(project: str) -> list[WorkItem]:
     return list(WorkItem.objects.filter(project=project, status='in-review').exclude(type='release'))
 
 
-def _publish_release_event(item: WorkItem, kind: str) -> None:
-    _write_outbox_event(
-        project=item.project, event_type=RELEASE_EVENT_TYPE, work_item_id=item.id,
-        payload={'kind': kind, 'workItemId': str(item.id), 'project': item.project},
+class ReleaseRefusal:
+    """What `release_request_refusal` returns when a release request is
+    refused: the message, and the work items still awaiting acceptance on
+    beta when the beta queue is the cause (empty otherwise)."""
+
+    def __init__(self, message: str, outstanding: Optional[list] = None):
+        self.message = message
+        self.outstanding = list(outstanding or [])
+
+
+RELEASE_REJECTION_AUTHOR = 'system'
+
+
+def release_request_refusal(item: WorkItem, *, target_project_set: bool = True) -> Optional[ReleaseRefusal]:
+    """**The one release gate** (release-mode-parity.md REQ-11), in both
+    modes. Runs the two checks in turn — the Target Project is set, then
+    the Target Project's beta queue is clear — writes nothing, and returns
+    the refusal, or None when the request may proceed.
+
+    `target_project_set` is the caller's: `_handle_release_requested` passes
+    whether `parse_release_fields` found the field, read before
+    `_materialize_release`'s fallback to the ticket's own project (v5.2
+    REQ-08); a local Release's project is its Target Project, so local mode
+    passes nothing. Only the first failing check is reported, so a request
+    is refused for one reason at a time."""
+    if not target_project_set:
+        return ReleaseRefusal('Target Project is not set')
+    outstanding = _release_beta_queue_outstanding(item.project)
+    if outstanding:
+        return ReleaseRefusal(f'{len(outstanding)} work item(s) are still awaiting acceptance on beta', outstanding)
+    return None
+
+
+def _release_rejection_text(refusal: ReleaseRefusal) -> str:
+    """v5.2's rejection format ("Rejections, in every mode"), the one text a
+    refused release request gets in either mode: the rejection line, the
+    outstanding items when the beta queue is the cause, and the closing
+    instruction (REQ-11)."""
+    body = f'[system] release request rejected: {refusal.message}'
+    if refusal.outstanding:
+        body += '\n\n' + '\n'.join(
+            f'  - {o.display_name} ({o.external_key or o.id})' for o in refusal.outstanding
+        )
+    return body + '\n\nResolve this and request the release again.'
+
+
+def post_release_rejection(item: WorkItem, refusal: ReleaseRefusal, *, source_message_id: Optional[str]) -> dict:
+    """**The one poster of a release refusal** (REQ-11): one comment, through
+    the one comment path, keyed `source_message_id` so a redelivered request
+    adds none — `<completion_key>:release-gate` from `check_release_request`,
+    `<messageId>:release-check` from the Jira webhook consumer. Called with
+    no transaction open by both, so a Jira-mode post is made in-process and
+    its failure fails the caller's message."""
+    return append_comment(
+        item.id, RELEASE_REJECTION_AUTHOR, _release_rejection_text(refusal),
+        source_message_id=source_message_id, origin=write_gate.Origins.DIRECT,
+    )
+
+
+def check_release_request(item: WorkItem, *, source_message_id: Optional[str]) -> None:
+    """Local mode's release gate (REQ-11): runs `release_request_refusal`
+    and, on a refusal, posts it with `post_release_rejection` and then raises
+    `ReleaseGateError`. `transition_status` calls it OUTSIDE
+    `_transition_status_core`'s atomic block, so the comment survives the
+    raise that refuses the transition."""
+    refusal = release_request_refusal(item)
+    if refusal is None:
+        return
+    post_release_rejection(item, refusal, source_message_id=source_message_id)
+    raise ReleaseGateError(
+        f'{item.id}: release request rejected: {refusal.message}',
+        [str(o.id) for o in refusal.outstanding],
     )
 
 
@@ -530,16 +631,15 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     JIRA_WEBHOOK after its own pre-validation; direct callers
     (Streams commands, admin UI in local mode) pass DIRECT/ADMIN_UI.
 
-    A `release` work item's
-    `proposed` -> `in-review` transition (candidate cut) additionally
-    requires the target project's beta queue to be clean. Checked and, if
-    rejected, commented on HERE — outside `_transition_status_core`'s
-    atomic block — because a comment written inside the same atomic block
-    as a subsequent raise would roll back along with it; this way the
-    rejection comment survives even though the transition itself doesn't.
-    Every internal-API surface (Django Admin, external HTTP API, Streams
-    command) reaches this same router, since all three call this function
-    rather than the atomic core directly.
+    A Release's request — its `proposed` -> `in-progress` move
+    (release-mode-parity.md REQ-09) — additionally passes the one release
+    gate, `check_release_request` (REQ-11), which comments and raises on a
+    refusal. It runs HERE, outside `_transition_status_core`'s atomic
+    block, because a comment written inside the same atomic block as a
+    subsequent raise would roll back along with it. Every internal-API
+    surface (Django Admin, external HTTP API, Streams command) reaches this
+    same gate, since all three call this function rather than the atomic
+    core directly.
 
     `completion_key`, when given, is the command or event's `messageId`
     (REQ-09, step 5): on `push` the writer skips any step its completion
@@ -547,17 +647,14 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     `<completion_key>:release-gate` so a redelivered command adds none. The
     admin and the external API pass none.
 
-    For a Release, `origin=JIRA_WEBHOOK` runs no beta-queue gate and (in
+    For a Release, `origin=JIRA_WEBHOOK` runs no release gate and (in
     `_transition_status_core`) publishes no release event
-    (canonical-delivery-state.md REQ-08): `webhook_consumer.py`'s own three
-    release publishers (`_handle_release_requested`/`_handle_release_done`/
-    `_handle_release_abandoned`) are the one trigger for a Jira-mode
-    candidate, production-promote or teardown; this function's local-mode
-    publish (`_publish_release_event`, below) would otherwise fire a SECOND
-    time when the writer's In Review transition echoes back on this same
-    ticket's webhook, double-cutting a candidate. This keys on the origin,
-    not the mode: `JIRA_WEBHOOK` reaches here only for a project in Jira
-    mode (`webhook_consumer.py` only passes it after its own mode check)."""
+    (canonical-delivery-state.md REQ-08, kept by release-mode-parity.md
+    REQ-10): `webhook_consumer.py`'s release handlers are Jira mode's
+    publishers, and a Jira status echo must not publish a second event.
+    This keys on the origin, not the mode: `JIRA_WEBHOOK` reaches here only
+    for a project in Jira mode (`webhook_consumer.py` only passes it after
+    its own mode check)."""
     item = get_work_item(work_item_id)
     if not item:
         raise ValidationError(f'transitionStatus: no work item {work_item_id}')
@@ -566,23 +663,11 @@ def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = N
     if verdict == write_gate.REFUSE:
         write_gate.refuse(origin, 'changing a work item\'s status')
 
-    if (item.type == 'release' and item.status == 'proposed' and new_status == 'in-review'
+    if (item.type == 'release' and item.status == 'proposed' and new_status == 'in-progress'
             and origin != write_gate.Origins.JIRA_WEBHOOK):
-        outstanding = _release_beta_queue_outstanding(item.project)
-        if outstanding:
-            names = ', '.join(f'{o.display_name} ({o.id})' for o in outstanding)
-            append_comment(
-                work_item_id, actor or 'system',
-                'Cannot cut a release candidate — the following work items are still '
-                f'awaiting tester acceptance on beta: {names}. Resolve these (move to '
-                '\'done\' or otherwise off the beta queue) and retry.',
-                source_message_id=f'{completion_key}:release-gate' if completion_key else None,
-            )
-            raise ReleaseGateError(
-                f'{work_item_id} cannot cut a release candidate — {len(outstanding)} '
-                'work item(s) still in \'in-review\'',
-                [str(o.id) for o in outstanding],
-            )
+        check_release_request(
+            item, source_message_id=f'{completion_key}:release-gate' if completion_key else None,
+        )
 
     if verdict == write_gate.PUSH:
         # Every validation local mode runs apart from the gate (the release
@@ -646,17 +731,15 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
     if changed and validity['baseline'] == 'done':
         _unblock_dependents(work_item_id, actor)
     if changed and item.type == 'release' and origin != write_gate.Origins.JIRA_WEBHOOK:
-        # Local mode's own trigger for the three release jobs — the
-        # Jira-mode equivalent is `webhook_consumer.py`'s three release
-        # publishers, which call this function with `origin=JIRA_WEBHOOK`
-        # for the Release's own In Review/Done transition, AFTER already
-        # publishing the event themselves (canonical-delivery-state.md
-        # REQ-08); this branch must not publish a second one for that
-        # origin, or every Jira-mode candidate cut would be followed by a
-        # duplicate (the webhook's In Review echo landing here too).
-        kind = _RELEASE_EVENT_KIND_BY_STATUS.get(new_status)
+        # The first of `publish_release_event`'s two callers (REQ-10). The
+        # other is `webhook_consumer.py`'s release handlers, which apply a
+        # Jira-mode Release's change through this function with
+        # `origin=JIRA_WEBHOOK`; this branch publishes nothing for that
+        # origin, so a Jira status echo cuts no second candidate and
+        # promotes nothing twice (canonical-delivery-state.md REQ-08).
+        kind = _release_event_kind(changed['previous'], new_status)
         if kind:
-            _publish_release_event(item, kind)
+            publish_release_event(item, kind, stream_project=item.project)
 
     return get_work_item(work_item_id)
 
@@ -665,43 +748,78 @@ def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[st
 # Release-candidate writeback
 # ---------------------------------------------------------------------------
 
+def release_candidate_note(candidate_sha: str, build_identifier: Optional[str] = None,
+                            preview_url: Optional[str] = None) -> str:
+    """The one candidate note, in both modes (release-mode-parity.md
+    REQ-12): the build and preview lines only when their values are
+    present, and the release PR, which is built from the SHA."""
+    first = f'Release candidate cut: {candidate_sha}'
+    if build_identifier:
+        first += f' (build {build_identifier})'
+    lines = [first]
+    if preview_url:
+        lines.append(f'Preview: {preview_url}')
+    lines.append(f'Release PR: release/{candidate_sha} → prod')
+    return '\n'.join(lines)
+
+
+def record_release_candidate_step(item: WorkItem, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                                   preview_url: Optional[str] = None, author: str = 'jenkins') -> None:
+    """**The candidate's recording step** (REQ-13): publish
+    `work_item.release_candidate_recorded` and post REQ-12's note. One step,
+    two callers: `record_release_candidate` in local mode, and
+    `webhook_consumer.py`'s Release sync in Jira mode, once the webhook has
+    recorded a new, non-empty candidate SHA.
+
+    Must be called inside the caller's `transaction.atomic()` block, beside
+    the recorded fields, so the fields and their event commit together: a
+    field recorded without its event would never publish, since the
+    redelivered webhook then changes nothing. The note goes through the one
+    comment path, which records it in the same transaction in local mode
+    and, in Jira mode, registers its post for after the commit (no Jira call
+    is made inside an open transaction)."""
+    _write_outbox_event(
+        project=item.project, event_type=RELEASE_CANDIDATE_RECORDED_EVENT_TYPE, work_item_id=item.id,
+        payload={'id': str(item.id), 'candidateSha': candidate_sha, 'buildIdentifier': build_identifier,
+                 'previewUrl': preview_url},
+    )
+    append_comment(item.id, author, release_candidate_note(candidate_sha, build_identifier, preview_url))
+
+
 def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifier: Optional[str] = None,
                               preview_url: Optional[str] = None, actor: Optional[str] = None) -> WorkItem:
-    """Writes the release-candidate Jenkins job's results back onto a
-    release work item's canonical fields once the candidate is cut, and
-    posts a comment recording it — the one place these fields are
-    recorded, in every mode; Jenkins contains no tracker code and only
-    calls the endpoint that reaches this function. Write-once-per-candidate: a
-    new candidate cut replaces these three fields, it does not append.
+    """Local mode's record of a candidate the release-candidate job reports
+    (REQ-13, "In local mode the endpoint records directly"): the three
+    fields, then the recording step, in one transaction.
+    Write-once-per-candidate: a new candidate replaces the three fields, it
+    does not append.
 
-    The three field writes and their event are atomic; the note is appended
-    AFTER that block commits (REQ-09, "One comment path"), because in Jira
-    mode the comment path posts to Jira in-process and a Jira call must not
-    run inside an open transaction. Up to v5.1 this whole function was one
-    `@transaction.atomic`, which recorded the comment in the same
-    transaction — correct while the only destination was this database."""
-    item = _record_release_candidate_fields(
-        work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
-        preview_url=preview_url,
-    )
-
-    note = f'Release candidate cut: {candidate_sha}'
-    if build_identifier:
-        note += f' (build {build_identifier})'
-    if preview_url:
-        note += f'\nPreview: {preview_url}'
-    append_comment(item.id, actor or 'jenkins', note)
-
+    In Jira mode the report records nothing (`report_release_candidate`
+    pushes the fields to Jira) and the same recording step runs from the
+    Release's webhook instead."""
+    with transaction.atomic():
+        item = _record_release_candidate_fields(
+            work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url,
+        )
+        record_release_candidate_step(
+            item, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url, author=actor or 'jenkins',
+        )
     return get_work_item(work_item_id)
 
 
-@transaction.atomic
+def _get_release(work_item_id, what: str) -> WorkItem:
+    item = get_work_item(work_item_id)
+    if not item or item.type != 'release':
+        raise ValidationError(f'{what}: no release work item {work_item_id}')
+    return item
+
+
 def _record_release_candidate_fields(work_item_id, *, candidate_sha: str,
                                       build_identifier: Optional[str] = None,
                                       preview_url: Optional[str] = None) -> WorkItem:
-    item = get_work_item(work_item_id)
-    if not item or item.type != 'release':
-        raise ValidationError(f'recordReleaseCandidate: no release work item {work_item_id}')
+    item = _get_release(work_item_id, 'recordReleaseCandidate')
 
     detail = WorkItemReleaseDetail.objects.filter(work_item_id=item.id).first() \
         or WorkItemReleaseDetail(work_item=item)
@@ -709,13 +827,67 @@ def _record_release_candidate_fields(work_item_id, *, candidate_sha: str,
     detail.build_identifier = build_identifier
     detail.preview_url = preview_url
     detail.save()
-
-    _write_outbox_event(
-        project=item.project, event_type='work_item.release_candidate_recorded', work_item_id=item.id,
-        payload={'id': str(item.id), 'candidateSha': candidate_sha, 'buildIdentifier': build_identifier,
-                 'previewUrl': preview_url},
-    )
     return item
+
+
+def native_build_comment_text(native_build_url: Optional[str], native_build_status: Optional[str]) -> Optional[str]:
+    """REQ-12's native-build comment, `Native build (<status>): <URL>`, or
+    None when the report carries neither field (the release-candidate job
+    sends both only when a native build ran)."""
+    if not native_build_url and not native_build_status:
+        return None
+    return f'Native build ({native_build_status or "unknown"}): {native_build_url or "(no URL)"}'
+
+
+def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                              preview_url: Optional[str] = None, native_build_url: Optional[str] = None,
+                              native_build_status: Optional[str] = None, actor: Optional[str] = None,
+                              origin: str = write_gate.Origins.EXTERNAL_API):
+    """The release-candidate job's report (`/admin/work-items/<id>/release-candidate`),
+    routed like every other machine write (release-mode-parity.md REQ-13,
+    "The report"; v5.2 REQ-09's `write_gate.route`). Called with no
+    transaction open.
+
+      push    (Jira mode) the writer sends the three candidate fields to the
+              Release ticket in ONE edit, then the native-build comment is
+              posted through the comment path (REQ-12), and NOTHING is
+              recorded: the fields come back on the ticket's webhook, which
+              runs the recording step. A failed push raises to the job, which
+              fails visibly. Returns the writer's posted result.
+      record  (local mode) the native-build comment, then the fields and the
+              recording step (`record_release_candidate`), then the move to
+              `in-review` (REQ-09), origin `origin` — the same order Jira mode
+              reaches them in. Returns the work item.
+
+    The native-build comment is keyed `release-candidate:<sha>:native-build`,
+    so a repeated report with the same SHA posts it once, in either mode."""
+    item = _get_release(work_item_id, 'reportReleaseCandidate')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'recording a release candidate')
+
+    native_text = native_build_comment_text(native_build_url, native_build_status)
+    author = actor or 'jenkins'
+
+    def post_native_build_comment():
+        if native_text is not None:
+            append_comment(item.id, author, native_text,
+                           source_message_id=f'release-candidate:{candidate_sha}:native-build', origin=origin)
+
+    if verdict == write_gate.PUSH:
+        result = jira_writer.push_release_candidate_fields(
+            item, candidate_sha=candidate_sha, build_identifier=build_identifier, preview_url=preview_url,
+        )
+        post_native_build_comment()
+        return result
+
+    post_native_build_comment()
+    record_release_candidate(
+        work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+        preview_url=preview_url, actor=author,
+    )
+    return transition_status(work_item_id, 'in-review', actor=author, origin=origin)
 
 
 def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:

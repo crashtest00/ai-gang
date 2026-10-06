@@ -168,10 +168,14 @@ def permissive_jira(monkeypatch):
 
 BLOCKS_LINK_TYPE_ID = '10001'
 
-# The statuses the provisioned workflow offers from anywhere: the workflow
-# `scripts/init-project.sh` creates makes every transition global
-# (`:436-440`), which is the behaviour several requirements reason about.
-GLOBAL_STATUSES = ('Backlog', 'Shovel Ready', 'In Progress', 'In Review', 'Done')
+# The statuses the provisioned workflow offers: the workflow
+# `scripts/init-project.sh` creates makes every transition global, which is
+# the behaviour several requirements reason about — with v5.3's `Abandoned`
+# status and its global `Abandon` transition, and its `Done` transition
+# offered from every status EXCEPT `Abandoned` (release-mode-parity.md
+# REQ-14). `NOT_OFFERED_FROM` is that one exception.
+GLOBAL_STATUSES = ('Backlog', 'Shovel Ready', 'In Progress', 'In Review', 'Done', 'Abandoned')
+NOT_OFFERED_FROM = {'Done': ('Abandoned',)}
 
 
 class FakeJiraInstance:
@@ -275,8 +279,8 @@ class FakeJiraInstance:
             lambda q, b, key=key: self._set_fields(key, b)
         self.handler.routes[('GET', f'/rest/api/3/issue/{key}/transitions')] = \
             lambda q, b, key=key: (200, {'transitions': [
-                {'id': str(100 + i), 'to': {'name': name}}
-                for i, name in enumerate(self.issues[key]['offered'])
+                {'id': transition_id, 'to': {'name': name}}
+                for transition_id, name in self._offered_now(key)
             ]})
         self.handler.routes[('POST', f'/rest/api/3/issue/{key}/transitions')] = \
             lambda q, b, key=key: self._transition(key, b)
@@ -308,11 +312,22 @@ class FakeJiraInstance:
         self.issues[key]['fields'].update(((body or {}).get('fields') or {}))
         return 204, None
 
+    def _offered_now(self, key):
+        """The transitions the issue offers from its CURRENT status, as
+        `(id, target status)`: its `offered` list, less any target the
+        workflow does not offer from where the issue is (Done from
+        Abandoned)."""
+        issue = self.issues[key]
+        return [
+            (str(100 + i), name) for i, name in enumerate(issue['offered'])
+            if issue['status'] not in NOT_OFFERED_FROM.get(name, ())
+        ]
+
     def _transition(self, key, body):
         transition_id = ((body or {}).get('transition') or {}).get('id')
         issue = self.issues[key]
-        for i, name in enumerate(issue['offered']):
-            if str(100 + i) == str(transition_id):
+        for offered_id, name in self._offered_now(key):
+            if offered_id == str(transition_id):
                 issue['status'] = name
                 return 204, None
         return 400, {'errorMessages': [f'transition {transition_id} not available']}
