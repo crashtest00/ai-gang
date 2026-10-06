@@ -500,7 +500,10 @@ def push_release_candidate_fields(item: WorkItem, *, candidate_sha: str, build_i
     Called by `store.report_release_candidate` with no transaction open, so
     the edit is made now and a failure propagates to the release-candidate
     job, which fails visibly. A field whose id is not configured is left out
-    of the edit, as v5.2's per-field writes left it out."""
+    of the edit, as v5.2's per-field writes left it out — but when none of the
+    three ids is configured the push would write nothing, and that fails the
+    same way a failed edit does (one webhook failure recorded, the error
+    propagating; nothing is recorded and no native-build comment follows)."""
     import os
 
     step = STEP_RELEASE_FIELDS
@@ -526,7 +529,8 @@ def push_release_candidate_fields(item: WorkItem, *, candidate_sha: str, build_i
                           item.external_key)
             record_webhook_failure(item, 'no release-candidate field id is configured — the candidate '
                                          'was not written to Jira', {'step': step})
-            return
+            raise RuntimeError('no release-candidate field id is configured — the candidate was not '
+                               'written to Jira')
         jira_client.set_fields(item.external_key, fields)
 
     return _push(item, call, step=step, deferred_failure_reason='pushing the release candidate to Jira failed')

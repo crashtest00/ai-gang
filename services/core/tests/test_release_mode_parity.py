@@ -497,6 +497,35 @@ def test_local_a_report_without_a_native_build_leaves_the_note_alone(clean_db):
     ], 'the build and preview lines appear only when their values are present'
 
 
+def test_jira_a_report_with_no_candidate_field_id_configured_fails_the_job_and_records_nothing(
+        clean_db, jira_instance, monkeypatch):  # noqa: F811
+    """REQ-13, "The report": a failed push returns the error to the job and
+    nothing is recorded. A push that would write nothing because none of the
+    three candidate field ids is configured is a failed push: an error
+    status, no native-build comment, nothing recorded, the failure kept."""
+    for name, field_id in FIELD_IDS.items():
+        if name in ('JIRA_CANDIDATE_SHA_FIELD_ID', 'JIRA_BUILD_IDENTIFIER_FIELD_ID', 'JIRA_PREVIEW_URL_FIELD_ID'):
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, field_id)
+    project_config.set_mode(PROJECT, 'jira')
+    key = jira_release(jira_instance, status='In Progress')
+    handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    release_id = WorkItem.objects.get(external_key=key).id
+
+    response = report(release_id, candidateSha='abc1234', buildIdentifier='b-7',
+                      nativeBuildUrl='https://ci.example/native/12', nativeBuildStatus='success')
+
+    assert response.status_code == 500, 'the job sees an error, as it does for a failed set_fields'
+    assert posted_comment_texts() == [], 'no native-build comment follows a failed push'
+    assert requests_to('PUT', f'/issue/{key}') == [], 'nothing was written to Jira'
+    assert WorkItemComment.objects.count() == 0
+    assert candidate_events(release_id) == []
+    assert WorkItemReleaseDetail.objects.filter(work_item_id=release_id).exclude(candidate_sha=None).count() == 0
+    [failure] = WebhookFailure.objects.all()
+    assert 'no release-candidate field id is configured' in failure.reason
+
+
 def test_jira_the_native_build_comment_precedes_the_note_and_is_recorded_only_from_its_webhook(
         clean_db, release_fields, jira_instance, redis_client):  # noqa: F811
     project_config.set_mode(PROJECT, 'jira')
@@ -668,7 +697,13 @@ def test_disconnect_local_cancel_connect_shows_abandoned_and_a_resynced_done_pub
     """REQ-14's acceptance across the round trip: after `disconnect_jira`, a
     local cancel and `connect_jira`, the Release shows Abandoned and a later
     move to Done is impossible without a person first reopening it; and a
-    re-synced `done` Release's webhook publishes nothing."""
+    re-synced `done` Release's webhook publishes nothing.
+
+    Starts in Jira mode and runs the real `disconnect_jira`, which refuses
+    while a Release is open, so both Releases are closed when it runs: one
+    `failed` (the closed state a person can still cancel), one `done`."""
+    import io
+
     from tests.test_connect_jira_command import register_webhook
     from workitems.management.commands.connect_jira import JIRA_FIELD_ID_VARS
 
@@ -677,17 +712,21 @@ def test_disconnect_local_cancel_connect_shows_abandoned_and_a_resynced_done_pub
             monkeypatch.setenv(name, f'customfield_3{index:04d}')
     register_webhook(jira_instance)
     jira_instance.add_issue('TP-80', issuetype='Release', status='In Review')
-    jira_instance.add_issue('TP-81', issuetype='Release', status='In Review')
-    abandoned = make_item(item_type='release', status='in-review', external_key='TP-80')
-    shipped = make_item(item_type='release', status='in-review', external_key='TP-81')
+    jira_instance.add_issue('TP-81', issuetype='Release', status='Done')
+    abandoned = make_item(item_type='release', status='failed', external_key='TP-80')
+    shipped = make_item(item_type='release', status='done', external_key='TP-81')
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
 
-    # Closed in core while the project is local, as a disconnect requires
-    # every Release to be closed first.
+    call_command('disconnect_jira', PROJECT, stdout=io.StringIO())
+    assert project_config.get_mode(PROJECT)['mode'] == 'local'
+
+    # Cancelled in core while the project is local.
     store.transition_status(abandoned, 'cancelled', actor='an-operator')
-    store.transition_status(shipped, 'done', actor='an-operator')
+    assert store.get_work_item(abandoned).status == 'cancelled'
+    assert jira_instance.status_of('TP-80') == 'In Review', 'a local cancel writes nothing to Jira'
     events_before = kinds()
 
-    call_command('connect_jira', PROJECT, 'TP', stdout=__import__('io').StringIO())
+    call_command('connect_jira', PROJECT, 'TP', stdout=io.StringIO())
 
     assert project_config.get_mode(PROJECT)['mode'] == 'jira'
     assert jira_instance.status_of('TP-80') == 'Abandoned'
