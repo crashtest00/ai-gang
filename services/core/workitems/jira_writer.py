@@ -52,11 +52,14 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-# The three canonical statuses Jira shows as one Blocked flag rather than as
-# a status of their own (REQ-09, "A status write to `needs-clarification`,
-# `failed` or `cancelled`"). §4 records the cost: in Jira mode `failed` and
-# `cancelled` are both read back as `needs-clarification`.
-BLOCKED_FLAG_STATUSES = ('needs-clarification', 'failed', 'cancelled')
+# The canonical statuses Jira shows as one Blocked flag rather than as a
+# status of their own (v5.2 REQ-09, "A status write to `needs-clarification`,
+# `failed` or `cancelled`"). §4 records the cost: in Jira mode `failed` is
+# read back as `needs-clarification`. From v5.3 `cancelled` is not one of
+# them: it is written as the Jira status the project's map writes for it —
+# Abandoned with `DEFAULT_JIRA_STATUS_MAP` — for every issue type
+# (release-mode-parity.md REQ-14).
+BLOCKED_FLAG_STATUSES = ('needs-clarification', 'failed')
 
 # Step names used in completion records and webhook-failure reasons. One per
 # kind of Jira write, so a redelivery can skip exactly the step that already
@@ -486,8 +489,26 @@ WRITER_GROUP = 'jira-writer'
 STORY_INTAKE_AGENT = 'refinement-agent'
 
 
-def _set_release_fields(item: WorkItem, data: dict) -> None:
+def push_release_candidate_fields(item: WorkItem, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                                   preview_url: Optional[str] = None) -> dict:
+    """The candidate fields' push (release-mode-parity.md REQ-13, "The
+    report"): the SHA, build identifier and preview URL sent to the Release
+    ticket in ONE edit (`jira_client.set_fields`), so they reach `core`
+    together on one webhook, which records them and runs the recording step.
+    Nothing is recorded here.
+
+    Called by `store.report_release_candidate` with no transaction open, so
+    the edit is made now and a failure propagates to the release-candidate
+    job, which fails visibly. A field whose id is not configured is left out
+    of the edit, as v5.2's per-field writes left it out."""
     import os
+
+    step = STEP_RELEASE_FIELDS
+    if _no_issue_to_write(item, step):
+        return {'posted': True, 'workItemId': str(item.id), 'skipped': 'no-external-key'}
+
+    values = {'candidateSha': candidate_sha, 'buildIdentifier': build_identifier, 'previewUrl': preview_url}
+    fields = {}
     for env_name, key in (
         ('JIRA_CANDIDATE_SHA_FIELD_ID', 'candidateSha'),
         ('JIRA_BUILD_IDENTIFIER_FIELD_ID', 'buildIdentifier'),
@@ -495,22 +516,31 @@ def _set_release_fields(item: WorkItem, data: dict) -> None:
     ):
         field_id = os.environ.get(env_name)
         if field_id:
-            jira_client.set_field(item.external_key, field_id, data.get(key))
+            fields[field_id] = values[key] or None
+
+    def call():
+        if not _still_jira_mode(item.project):
+            return
+        if not fields:
+            logger.error('[jira-writer] no candidate field id is configured — nothing to write to %s',
+                          item.external_key)
+            record_webhook_failure(item, 'no release-candidate field id is configured — the candidate '
+                                         'was not written to Jira', {'step': step})
+            return
+        jira_client.set_fields(item.external_key, fields)
+
+    return _push(item, call, step=step, deferred_failure_reason='pushing the release candidate to Jira failed')
 
 
 def _handle_release_candidate_recorded(item: WorkItem, data: dict, completion_key: Optional[str]) -> None:
-    """`set_field` for the candidate SHA, build identifier and preview URL,
-    then `transition_issue` to the Jira status the project's map writes for
-    `in-review`. `record_release_candidate` has already recorded the three
-    fields in `core`, in every mode — the one Jenkins write recorded before
-    Jira has it, a Release-specific exception to Key Principle 6's
-    push-first rule that ends at v5.3 (§4). Its comment is
-    `record_release_candidate`'s own call to the comment path, made after
-    its commit, so it reaches Jira once and is not this handler's."""
-    if not is_step_complete(completion_key, item.id, STEP_RELEASE_FIELDS):
-        _set_release_fields(item, data)
-        mark_step_complete(completion_key, item.id, STEP_RELEASE_FIELDS)
-
+    """`transition_issue` to the Jira status the project's map writes for
+    `in-review` — and nothing else (release-mode-parity.md REQ-13, "The
+    writer"). The three candidate fields are already in Jira: in Jira mode
+    the report pushed them first (`push_release_candidate_fields`) and this
+    event was published from their webhook; in local mode this handler makes
+    no Jira call at all (`handle_event_envelope`'s mode check). The note is
+    the recording step's own call to the comment path, so it reaches Jira
+    once and is not this handler's."""
     if is_step_complete(completion_key, item.id, STEP_STATUS):
         return
     jira_status = canonical_to_jira_status(item.project, 'in-review')
@@ -522,6 +552,43 @@ def _handle_release_candidate_recorded(item: WorkItem, data: dict, completion_ke
         mark_step_complete(completion_key, item.id, STEP_STATUS)
         return
     _transition_or_record_outcome(item, jira_status, completion_key=completion_key, step=STEP_STATUS)
+
+
+def is_step_pending(completion_key: Optional[str], work_item_id, step: str) -> bool:
+    """A step this key REGISTERED and has not completed — the redelivery
+    rule for a step registered ahead of its work (v5.2 REQ-09)."""
+    if not completion_key:
+        return False
+    return JiraWriteCompletion.objects.filter(
+        completion_key=completion_key, work_item_id=work_item_id, step=step, completed_at__isnull=True,
+    ).exists()
+
+
+def push_release_in_progress(item: WorkItem, *, completion_key: Optional[str]) -> Optional[dict]:
+    """A Jira-mode release request's In Progress push (release-mode-parity.md
+    REQ-09): the Jira status the project's map writes for `in-progress`, as
+    a step keyed `<messageId>:release-in-progress` that
+    `_handle_release_requested` registers in the block that publishes
+    `requested`. `core` records `in-progress` from the ticket's webhook and
+    publishes nothing for it (v5.2 REQ-08's guard).
+
+    Made only when the step is registered and not complete, so a push that
+    failed is made on redelivery, one that succeeded is not repeated, and a
+    refused request — which registers none — is never pushed. A Release
+    `core` no longer holds at `proposed` (a creation webhook replayed after
+    its candidate) has its step recorded complete with no push, so the
+    ticket never moves back. It does not go through
+    `store.transition_status`, so the release gate does not run twice.
+
+    Called with no transaction open, so the push is made now and a failure
+    propagates: the webhook message is redelivered."""
+    if not is_step_pending(completion_key, item.id, STEP_STATUS):
+        return None
+    current = WorkItem.objects.filter(id=item.id).first()
+    if current is None or current.status != 'proposed':
+        mark_step_complete(completion_key, item.id, STEP_STATUS)
+        return None
+    return push_status(current, 'in-progress', completion_key=completion_key)
 
 
 def _handle_story_intake_side_effect(item: WorkItem, detail: dict, completion_key: Optional[str]) -> None:

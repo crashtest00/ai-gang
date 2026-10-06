@@ -165,11 +165,12 @@ def test_a_routed_status_write_transitions_the_issue_and_records_nothing(clean_d
 
 
 def test_a_status_write_to_a_blocked_flag_status_sets_the_flag_instead(clean_db, permissive_jira):
-    """REQ-09 — a status write to `needs-clarification`, `failed` or
-    `cancelled` is `set_blocked_field(true)`: Jira shows all three as one
-    flag (§4), which is why all three are read back as
-    `needs-clarification`."""
-    statuses = ('needs-clarification', 'failed', 'cancelled')
+    """REQ-09 — a status write to `needs-clarification` or `failed` is
+    `set_blocked_field(true)`: Jira shows both as one flag (§4), which is
+    why both are read back as `needs-clarification`. From v5.3 `cancelled`
+    is a mapped status instead (release-mode-parity.md REQ-14), tested in
+    test_release_mode_parity.py."""
+    statuses = ('needs-clarification', 'failed')
     item_ids = {status: make_item(external_key=f'WT-flag-{status}') for status in statuses}
     jira_mode()
     for status in statuses:
@@ -474,7 +475,12 @@ def _event_envelope(event_type, project, work_item_id, data, message_id='msg-eve
     }
 
 
-def test_a_release_candidate_recorded_event_sets_the_three_fields_and_transitions(clean_db, permissive_jira, monkeypatch):
+def test_a_release_candidate_recorded_event_makes_the_in_review_transition_alone(
+        clean_db, permissive_jira, monkeypatch):
+    """release-mode-parity.md REQ-13, "The writer": the
+    `release_candidate_recorded` case "becomes the In Review transition
+    alone; its three `set_field` calls are removed, since the fields are
+    already in Jira"."""
     for name, field_id in (('JIRA_CANDIDATE_SHA_FIELD_ID', 'cf_sha'),
                             ('JIRA_BUILD_IDENTIFIER_FIELD_ID', 'cf_build'),
                             ('JIRA_PREVIEW_URL_FIELD_ID', 'cf_preview')):
@@ -490,10 +496,7 @@ def test_a_release_candidate_recorded_event_sets_the_three_fields_and_transition
          'previewUrl': 'https://preview.example.com'},
     ))
 
-    fields = {}
-    for request in requests_to('PUT', '/issue/WT-R'):
-        fields.update(request['body']['fields'])
-    assert fields == {'cf_sha': 'abc1234', 'cf_build': 'b-7', 'cf_preview': 'https://preview.example.com'}
+    assert requests_to('PUT', '/issue/WT-R') == [], 'no field write'
     assert posted == [{'transition': {'id': '10'}}]
 
 
@@ -506,76 +509,55 @@ def _post_release_candidate(item_id, **body):
                          content_type='application/json')
 
 
-def test_the_release_candidate_endpoint_publishes_the_canonical_event_once_in_jira_mode(
-        clean_db, permissive_jira):
-    """REQ-06 acceptance: `work_item.release_candidate_recorded` is
-    published in both modes. The local-mode half is
-    test_views_http_api.py's; this is the Jira-mode half, through the real
-    endpoint rather than a hand-built envelope."""
-    from workitems.models import OutboxEvent
-
-    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release')
-    jira_mode()
-
-    response = _post_release_candidate(item_id, candidateSha='abc1234', buildIdentifier='b-7',
-                                       previewUrl='https://preview.example.com')
-    assert response.status_code == 200
-
-    rows = OutboxEvent.objects.filter(event_type='work_item.release_candidate_recorded', work_item_id=item_id)
-    assert rows.count() == 1
-    row = rows.get()
-    assert row.project == PROJECT
-    assert row.payload == {'id': str(item_id), 'candidateSha': 'abc1234', 'buildIdentifier': 'b-7',
-                           'previewUrl': 'https://preview.example.com'}
-
-
-def test_a_jira_mode_release_candidate_posted_to_the_endpoint_reaches_jira_with_fields_comment_and_transition(
-        clean_db, permissive_jira, redis_client, monkeypatch):
-    """REQ-06 acceptance: "a Jira-mode release candidate still receives its
-    fields, its comment and its In Review transition". The whole production
-    path: the endpoint records the candidate and posts the comment (the
-    comment path, in-process), publishes the outbox row; the real relay
-    carries that row to the project's event stream; the writer handles the
-    envelope the relay built and sets the fields and transitions."""
-    import json
-
-    from workitems.relay import relay_once
-    from workitems.stream_topology import event_stream_name
+def test_the_release_candidate_endpoint_pushes_the_three_fields_in_one_edit_and_records_nothing(
+        clean_db, permissive_jira, monkeypatch):
+    """release-mode-parity.md REQ-13, "The report": in Jira mode the endpoint
+    calls the writer in-process, which sends the three fields to the Release
+    ticket in ONE `PUT /issue/{key}`, and records nothing — no field, no
+    event, no comment row."""
+    from workitems.models import OutboxEvent, WorkItemReleaseDetail
 
     for name, field_id in (('JIRA_CANDIDATE_SHA_FIELD_ID', 'cf_sha'),
                             ('JIRA_BUILD_IDENTIFIER_FIELD_ID', 'cf_build'),
                             ('JIRA_PREVIEW_URL_FIELD_ID', 'cf_preview')):
         monkeypatch.setenv(name, field_id)
-
-    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release')
+    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release',
+                        status='in-progress')
     jira_mode()
-    posted = offer_transition(permissive_jira, 'WT-R', 'In Review')
 
     response = _post_release_candidate(item_id, candidateSha='abc1234', buildIdentifier='b-7',
                                        previewUrl='https://preview.example.com')
-    assert response.status_code == 200
+    assert response.status_code == 202, response.content
 
-    # The comment reached Jira from the endpoint's own call; the writer has
-    # not run yet, so no field or transition has.
-    assert posted_comment_texts() == [
-        '[jenkins] Release candidate cut: abc1234 (build b-7)\nPreview: https://preview.example.com'
-    ]
-    assert requests_to('PUT', '/issue/WT-R') == []
-    assert posted == []
+    puts = requests_to('PUT', '/issue/WT-R')
+    assert [p['body'] for p in puts] == [
+        {'fields': {'cf_sha': 'abc1234', 'cf_build': 'b-7', 'cf_preview': 'https://preview.example.com'}},
+    ], 'exactly one Jira edit, carrying all three fields'
+    assert not OutboxEvent.objects.filter(event_type='work_item.release_candidate_recorded').exists()
+    assert not WorkItemReleaseDetail.objects.filter(work_item_id=item_id, candidate_sha='abc1234').exists()
+    assert WorkItemComment.objects.count() == 0
+    assert posted_comment_texts() == [], 'no native build was reported, so no comment'
+    assert store.get_work_item(item_id).status == 'in-progress', 'nothing recorded'
 
-    relay_once(redis_client)
-    entries = redis_client.xrange(event_stream_name(PROJECT), '-', '+')
-    envelopes = [json.loads(fields['data']) for _, fields in entries]
-    [envelope] = [e for e in envelopes if e['payload']['eventType'] == 'work_item.release_candidate_recorded']
 
-    jira_writer.handle_event_envelope(envelope)
+def test_a_failed_candidate_push_fails_the_report_and_records_nothing(clean_db, permissive_jira, monkeypatch):
+    """REQ-13: "A failed push returns the error to the job, which fails
+    visibly; nothing is recorded." (`curl -sf` fails on a 5xx.)"""
+    from workitems.models import OutboxEvent
 
-    fields = {}
-    for request in requests_to('PUT', '/issue/WT-R'):
-        fields.update(request['body']['fields'])
-    assert fields == {'cf_sha': 'abc1234', 'cf_build': 'b-7', 'cf_preview': 'https://preview.example.com'}
-    assert posted == [{'transition': {'id': '10'}}], 'the transition to In Review, offered as the only one'
-    assert len(posted_comment_texts()) == 1, 'the writer posts no second comment'
+    monkeypatch.setenv('JIRA_CANDIDATE_SHA_FIELD_ID', 'cf_sha')
+    item_id = make_item(item_type='release', external_key='WT-R', display_name='Release',
+                        status='in-progress')
+    jira_mode()
+    permissive_jira.routes[('PUT', '/rest/api/3/issue/WT-R')] = lambda q, b: (500, {'errorMessages': ['down']})
+
+    response = _post_release_candidate(item_id, candidateSha='abc1234', nativeBuildUrl='https://ci/n/1',
+                                       nativeBuildStatus='success')
+
+    assert response.status_code >= 500
+    assert posted_comment_texts() == [], 'the native-build comment follows only a push that succeeded'
+    assert not OutboxEvent.objects.filter(work_item_id=item_id,
+                                          event_type='work_item.release_candidate_recorded').exists()
 
 
 def test_a_status_changed_event_makes_no_jira_write(clean_db, permissive_jira):

@@ -130,8 +130,12 @@ def _latest_envelope(redis_client, stream):
 
 
 def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_columns_local_mode_uses(
-    clean_db, monkeypatch, redis_client,
+    clean_db, monkeypatch, redis_client, jira_instance,  # noqa: F811
 ):
+    # From v5.3 a requested Release is pushed In Progress and its candidate's
+    # note is posted to Jira (release-mode-parity.md REQ-09, REQ-13), so the
+    # ticket has to exist in the fixture Jira.
+    jira_instance.add_issue('REL-1', issuetype='Release')
     monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
     for env_name, field_id in RELEASE_FIELD_IDS.items():
         monkeypatch.setenv(env_name, field_id)
@@ -165,9 +169,9 @@ def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_column
     assert detail_after_create['build_identifier'] is None
     assert detail_after_create['preview_url'] is None
 
-    # The release-candidate Jenkins job writes Candidate SHA, Build
-    # Identifier, and Preview URL back onto the ticket once cut
-    # (scripts/create-release-fields.sh) — an ordinary issue_updated
+    # The writer pushes Candidate SHA, Build Identifier and Preview URL onto
+    # the ticket in one edit (release-mode-parity.md REQ-13) — an ordinary
+    # issue_updated
     # webhook naming the changed field.
     updated = jira_payload(
         'REL-1', event='jira:issue_updated', issuetype='Release',

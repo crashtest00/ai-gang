@@ -181,7 +181,7 @@ def test_release_candidate_cut_against_dirty_queue_is_dead_lettered(clean_db, re
     consumer.start()
     try:
         publish_command(redis_client, {'command': 'transitionStatus', 'actor': 'tester',
-                                        'workItemId': str(release_id), 'status': 'in-review'})
+                                        'workItemId': str(release_id), 'status': 'in-progress'})
         wait_for(lambda: redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT))) == 1,
                  expected='the release-gate rejection to be dead-lettered — 1 entry on the dead-letter stream',
                  observed=lambda: f'{redis_client.xlen(dead_letter_stream_name(command_stream_name(PROJECT)))} dead-letter entry/entries')

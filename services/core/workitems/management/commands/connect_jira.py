@@ -32,19 +32,28 @@ What it does, in order:
    parent as a Sub-task under its parent's issue — with its Agent field
    and, for a story, its story fields set in the same request. Each create
    and its `record_external_key` commit before the next item's create.
-4. **Re-syncs** every item but a release: the Jira status its canonical
-   status maps to, the Blocked flag for `needs-clarification`, `failed` or
-   `cancelled`, and a Blocks link for each canonical `blocks` link whose
+4. **Re-syncs** every keyed item, keyed Releases included
+   (release-mode-parity.md REQ-14): the Jira status its canonical status
+   maps to — `cancelled` included, which the default map writes as
+   Abandoned, for every type — the Blocked flag for `needs-clarification`
+   or `failed`, and a Blocks link for each canonical `blocks` link whose
    two ends both have keys.
 5. **Switches**, but only when every item but releases has a key and no
    re-sync step failed in this run. The writer's consumer group on the
    project's event stream moves to the stream's end first, so nothing the
    project published while it was local is written to Jira.
 
-**A `release` is neither pushed nor re-synced** (Pass 7, answer 2.1): its
-`jira:issue_created` would publish `requested` and cut a candidate, and a
-re-sync move to Done whose webhook `core` processes after the switch would
-publish `done` and promote it (REQ-08).
+**A `release` with no key is still not pushed** (v5.2 Pass 7, answer 2.1):
+its `jira:issue_created` would publish `requested` and cut a candidate.
+**A keyed Release is re-synced** (REQ-14, superseding v5.2 REQ-10's
+exclusion for the re-sync only): a Release cancelled while its project was
+local is moved to Abandoned, and one done is moved to Done. Neither
+publishes anything when its webhook arrives after the switch, because
+`core` already holds that canonical status and a Release's release event is
+published only on a change (REQ-10), so nothing is promoted twice. Done is
+not offered from Abandoned, so re-syncing a `done` item whose issue is in
+Abandoned is a failed step: the command exits non-zero naming it and leaves
+the project local until a person moves the issue out of Abandoned.
 
 **The re-sync is the writer's status rules with REQ-10's own outcomes**, and
 `connect_jira` is REQ-09's one exception to "the writer makes no Jira write
@@ -166,7 +175,7 @@ def open_releases(project: str) -> list[WorkItem]:
 def _pushable_items(project: str) -> list[WorkItem]:
     """Every work item of the project but a `release`, parents before
     children, so an item with a parent always finds its parent's issue key
-    already recorded."""
+    already recorded. A release is never pushed (v5.2 REQ-10)."""
     items = list(WorkItem.objects.filter(project=project).exclude(type='release').order_by('created_at'))
     by_id = {str(item.id): item for item in items}
 
@@ -224,6 +233,15 @@ class _Failures:
         return bool(self.entries)
 
 
+def _keyed_releases(project: str) -> list[WorkItem]:
+    """The project's Releases that already have a Jira issue — the only
+    Releases the re-sync touches (release-mode-parity.md REQ-14)."""
+    return list(
+        WorkItem.objects.filter(project=project, type='release', external_key__isnull=False)
+        .exclude(external_key='').order_by('created_at')
+    )
+
+
 def push_project(project: str, jira_project_key: str, *, stdout=None) -> _Failures:
     """Steps 3 and 4: the push and the re-sync. Returns the failures, so the
     caller can withhold the switch while any exists."""
@@ -270,7 +288,8 @@ def push_project(project: str, jira_project_key: str, *, stdout=None) -> _Failur
         say(f'  created {issue_key} for {item.display_name} ({item.id})')
 
     # --- 4. the re-sync: status, flag and Blocks links --------------------
-    for item in items:
+    # Keyed Releases too, for their status only (REQ-14).
+    for item in [*items, *_keyed_releases(project)]:
         if not item.external_key:
             continue  # its create failed in this run; nothing to re-sync.
         _resync_status(project, item, failures, say)
@@ -281,8 +300,10 @@ def push_project(project: str, jira_project_key: str, *, stdout=None) -> _Failur
 
 def _resync_status(project: str, item: WorkItem, failures: _Failures, say) -> None:
     if item.status in jira_writer.BLOCKED_FLAG_STATUSES:
-        # Jira shows all three as one Blocked flag (REQ-09). No transition,
-        # and no flag is ever CLEARED by a re-sync (Pass 7, answer 1).
+        # Jira shows `needs-clarification` and `failed` as one Blocked flag
+        # (v5.2 REQ-09; `cancelled` is a mapped status from v5.3, REQ-14).
+        # No transition, and no flag is ever CLEARED by a re-sync (Pass 7,
+        # answer 1).
         try:
             jira_client.set_blocked_field(item.external_key, True)
         except Exception as err:  # noqa: BLE001
@@ -315,11 +336,17 @@ def _resync_status(project: str, item: WorkItem, failures: _Failures, say) -> No
         say(f'  {item.external_key} is already in "{outcome["currentJiraStatus"]}", '
             f'which maps to "{item.status}" — counted done')
         return
+    # Includes a `done` item whose issue is in Abandoned, from which the
+    # provisioned workflow offers no Done (REQ-14): a person moves it out of
+    # Abandoned first, and the re-run then re-syncs it.
+    current = outcome['currentJiraStatus']
+    current_canonical = jira_writer.jira_status_to_canonical(project, current) if current else None
     failures.record(
         item, STEP_STATUS,
-        f'Jira issue {item.external_key} offers no transition to "{jira_status}" and is in '
-        f'"{outcome["currentJiraStatus"]}", which maps to no canonical status for this project',
-        {'targetJiraStatus': jira_status, 'currentJiraStatus': outcome['currentJiraStatus']},
+        f'Jira issue {item.external_key} offers no transition to "{jira_status}" from "{current}", '
+        + (f'which maps to "{current_canonical}"' if current_canonical else 'which maps to no canonical status')
+        + ' for this project',
+        {'targetJiraStatus': jira_status, 'currentJiraStatus': current},
     )
 
 
@@ -396,8 +423,8 @@ class Command(BaseCommand):
             raise CommandError(
                 'refusing to connect: these release work items are still open — '
                 + ', '.join(f'{item.display_name} ({item.id}, {item.status})' for item in open_release_items)
-                + '. A release is neither pushed nor re-synced, and a Release that changes hands '
-                'mid-connect would cut or promote a candidate.'
+                + '. A Release that changes hands mid-connect would cut or promote a candidate; '
+                'close it first.'
             )
 
         # --- 2. the key, with the project still local ---------------------

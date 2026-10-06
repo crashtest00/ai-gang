@@ -254,19 +254,31 @@ def _make_release(clean_db, project=PROJECT):
     return item_id
 
 
-def test_release_candidate_cut_req04_publishes_mode_agnostic_release_event(clean_db):
+def test_a_release_request_is_proposed_to_in_progress_and_publishes_requested(clean_db):
+    """release-mode-parity.md REQ-09/REQ-10: a local Release's request is
+    the move `proposed` -> `in-progress`, and it publishes `requested`."""
     release_id = _make_release(clean_db)
-    item = store.transition_status(release_id, 'in-review', actor='tester')
-    assert item.status == 'in-review'
+    item = store.transition_status(release_id, 'in-progress', actor='tester')
+    assert item.status == 'in-progress'
 
     events = outbox_events_for(release_id)
     release_events = [e for e in events if e.event_type == store.RELEASE_EVENT_TYPE]
     assert len(release_events) == 1
     assert release_events[0].payload == {'kind': 'requested', 'workItemId': str(release_id), 'project': PROJECT}
+    assert release_events[0].project == PROJECT, "a local Release's event is on item.project's stream"
     assert 'jiraIssueKey' not in release_events[0].payload
 
 
-def test_release_candidate_cut_req03_rejected_when_beta_queue_dirty(clean_db):
+def test_a_local_release_moved_straight_to_in_review_publishes_nothing(clean_db):
+    """REQ-10: "`requested` on `proposed` -> `in-progress` only" — a move to
+    `in-review` is the candidate's, and publishes nothing."""
+    release_id = _make_release(clean_db)
+    store.transition_status(release_id, 'in-review', actor='tester')
+
+    assert not any(e.event_type == store.RELEASE_EVENT_TYPE for e in outbox_events_for(release_id))
+
+
+def test_release_request_rejected_when_beta_queue_dirty(clean_db):
     outstanding = uuid.uuid4()
     story_detail = {'behavior': 'b', 'acceptanceCriteria': 'ac', 'constraints': 'c', 'edgeCases': 'e', 'outOfScope': 'oos'}
     store.create_work_item({'id': outstanding, 'project': PROJECT, 'type': 'story', 'displayName': 'Awaiting review',
@@ -274,7 +286,7 @@ def test_release_candidate_cut_req03_rejected_when_beta_queue_dirty(clean_db):
     release_id = _make_release(clean_db)
 
     with pytest.raises(store.ReleaseGateError) as exc_info:
-        store.transition_status(release_id, 'in-review', actor='tester')
+        store.transition_status(release_id, 'in-progress', actor='tester')
     assert exc_info.value.outstanding == [str(outstanding)]
 
     item = store.get_work_item(release_id)
@@ -287,7 +299,7 @@ def test_release_candidate_cut_req03_rejected_when_beta_queue_dirty(clean_db):
     assert str(outstanding) in comment.body
 
 
-def test_release_candidate_cut_ignores_other_releases_in_review(clean_db):
+def test_release_request_ignores_other_releases_in_review(clean_db):
     """A different Release work item sitting in 'in-review' must not itself
     count as outstanding beta-queue work — the Jira-mode-mirrored
     query explicitly excludes `issuetype != Release`."""
@@ -295,12 +307,13 @@ def test_release_candidate_cut_ignores_other_releases_in_review(clean_db):
     store.transition_status(other_release, 'in-review', actor='tester')
 
     release_id = _make_release(clean_db)
-    item = store.transition_status(release_id, 'in-review', actor='tester')
-    assert item.status == 'in-review'
+    item = store.transition_status(release_id, 'in-progress', actor='tester')
+    assert item.status == 'in-progress'
 
 
 def test_release_done_req05_publishes_release_event_kind_done(clean_db):
     release_id = _make_release(clean_db)
+    store.transition_status(release_id, 'in-progress', actor='tester')
     store.transition_status(release_id, 'in-review', actor='tester')
     item = store.transition_status(release_id, 'done', actor='tester')
     assert item.status == 'done'
@@ -311,7 +324,7 @@ def test_release_done_req05_publishes_release_event_kind_done(clean_db):
 
 def test_release_abandoned_req06_publishes_release_event_kind_abandoned(clean_db):
     release_id = _make_release(clean_db)
-    store.transition_status(release_id, 'in-review', actor='tester')
+    store.transition_status(release_id, 'in-progress', actor='tester')
     item = store.transition_status(release_id, 'cancelled', actor='tester')
     assert item.status == 'cancelled'
 
@@ -321,7 +334,7 @@ def test_release_abandoned_req06_publishes_release_event_kind_abandoned(clean_db
 
 def test_record_release_candidate_req04_writeback_is_write_once_per_candidate(clean_db):
     release_id = _make_release(clean_db)
-    store.transition_status(release_id, 'in-review', actor='tester')
+    store.transition_status(release_id, 'in-progress', actor='tester')
 
     item = store.record_release_candidate(
         release_id, candidate_sha='abc123', build_identifier='build-1', preview_url='https://preview.example/abc123',
