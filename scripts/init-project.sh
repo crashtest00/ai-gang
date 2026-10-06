@@ -407,8 +407,9 @@ STATUS_SHOVEL_READY=""
 STATUS_IN_PROGRESS=""
 STATUS_IN_REVIEW=""
 STATUS_DONE=""
+STATUS_ABANDONED=""
 
-# Ensure the 5 workflow statuses exist globally; populate STATUS_* vars
+# Ensure the 6 workflow statuses exist globally; populate STATUS_* vars
 ensure_workflow_statuses() {
   local search
   search=$(jira_get "/statuses/search")
@@ -418,17 +419,20 @@ ensure_workflow_statuses() {
   STATUS_IN_PROGRESS=$( echo "$search" | jq -r '.values[] | select(.name=="In Progress")   | .id')
   STATUS_IN_REVIEW=$(   echo "$search" | jq -r '.values[] | select(.name=="In Review")     | .id')
   STATUS_DONE=$(        echo "$search" | jq -r '.values[] | select(.name=="Done")          | .id')
+  STATUS_ABANDONED=$(   echo "$search" | jq -r '.values[] | select(.name=="Abandoned")     | .id')
 
   # Create any missing statuses
   local to_create='[]'
   [[ -z "$STATUS_SHOVEL_READY" ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"Shovel Ready","statusCategory":"IN_PROGRESS"}]')
   [[ -z "$STATUS_IN_REVIEW"    ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"In Review","statusCategory":"IN_PROGRESS"}]')
+  [[ -z "$STATUS_ABANDONED"    ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"Abandoned","statusCategory":"DONE"}]')
 
   if [[ "$to_create" != "[]" ]]; then
     local created
     created=$(jira_post "/statuses" "$to_create")
     [[ -z "$STATUS_SHOVEL_READY" ]] && STATUS_SHOVEL_READY=$(echo "$created" | jq -r '.[] | select(.name=="Shovel Ready") | .id')
     [[ -z "$STATUS_IN_REVIEW"    ]] && STATUS_IN_REVIEW=$(   echo "$created" | jq -r '.[] | select(.name=="In Review")    | .id')
+    [[ -z "$STATUS_ABANDONED"    ]] && STATUS_ABANDONED=$(   echo "$created" | jq -r '.[] | select(.name=="Abandoned")    | .id')
     echo "    Created missing statuses."
   fi
 }
@@ -445,17 +449,19 @@ ensure_ai_gang_workflow() {
     --arg ip "$STATUS_IN_PROGRESS" \
     --arg ir "$STATUS_IN_REVIEW" \
     --arg dn "$STATUS_DONE" \
+    --arg ab "$STATUS_ABANDONED" \
     '{
       name: $name,
-      description: "AI Gang: Backlog → Shovel Ready → In Progress → In Review → Done",
-      statuses: [{id:$bs},{id:$sr},{id:$ip},{id:$ir},{id:$dn}],
+      description: "AI Gang: Backlog → Shovel Ready → In Progress → In Review → Done (or Abandoned)",
+      statuses: [{id:$bs},{id:$sr},{id:$ip},{id:$ir},{id:$dn},{id:$ab}],
       transitions: [
         {name:"Create",       to:$bs, type:"initial", from:[]},
         {name:"Backlog",      to:$bs, type:"global",  from:[]},
         {name:"Shovel Ready", to:$sr, type:"global",  from:[]},
         {name:"Start",        to:$ip, type:"global",  from:[]},
         {name:"In Review",    to:$ir, type:"global",  from:[]},
-        {name:"Done",         to:$dn, type:"global",  from:[]}
+        {name:"Abandon",      to:$ab, type:"global",  from:[]},
+        {name:"Done",         to:$dn, type:"directed", from:[$bs,$sr,$ip,$ir]}
       ]
     }')")
 

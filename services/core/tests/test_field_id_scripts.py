@@ -5,7 +5,7 @@ provisioning scripts write the ids they provision where
 the two scripts that read them back read the same file.
 
 Each script is RUN here, against a stubbed `curl` that reports every field,
-issue type and resolution as already existing, and a temporary platform
+and issue type as already existing, and a temporary platform
 .env. That is the enforcement point: the REQ is about what the scripts write
 when an operator runs them, not about what their text says. No test here
 talks to a Jira.
@@ -24,8 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO_ROOT / 'scripts'
 DERIVE_ENV = SCRIPTS / 'startup' / 'derive-env.sh'
 
-# Everything the stubbed Jira "already has": the fourteen custom fields, the
-# Release issue type and the Abandoned resolution. All three of the scripts'
+# Everything the stubbed Jira "already has": the fourteen custom fields and the
+# Release issue type. All three of the scripts'
 # lookups filter the same `[{name, id}]` shape by name, so one array serves
 # every one of them and no POST is ever made.
 STUBBED_JIRA_OBJECTS = [
@@ -44,7 +44,6 @@ STUBBED_JIRA_OBJECTS = [
     ('Build Identifier', 'customfield_10013'),
     ('Preview URL', 'customfield_10014'),
     ('Release', '10100'),
-    ('Abandoned', '10200'),
 ]
 
 

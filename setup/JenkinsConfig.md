@@ -260,31 +260,28 @@ Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "he
 These steps run against the canonical work items in `core`. They are written
 against a local-mode project; the same sequence on a Jira-mode project's
 Release goes through the ticket in Jira instead of the admin, and through
-`core`'s outbound writer (`canonical-delivery-state.md` REQ-09), with one
-procedural gap: **there is no abandon procedure for a Jira-mode Release.**
-No provisioned screen offers the `Abandoned` resolution, and moving a
-Jira-mode Release to Done publishes the `done` release event — which
-triggers `production-promote` — whatever resolution it is moved to Done
-with (REQ-08; this stage's design notes §4). Left to v5.3
-(`../v5.3/features/release-engineer-agent.md` OQ-R1). Until then, abandoning
-a release by moving it to `cancelled` (the last checklist item below) is a
-local-mode-only procedure.
+`core`'s outbound writer (`canonical-delivery-state.md` REQ-09). A Jira-mode
+Release is abandoned by moving its ticket to the `Abandoned` status, which the
+provisioned workflow offers from every status; `Done` is not offered from
+`Abandoned`.
 
 - [ ] Move a Story's PR through: merge → beta auto-deploys → comment posted →
       move the Story to `done` (no promotion fires, and no release event is
       published for it)
-- [ ] With a Story still `in-review` on the target project, move a release work
-      item from `proposed` to `in-review` → confirm `core` refuses the
-      transition and comments on the release naming the outstanding work items
-- [ ] Move that Story to `done`, retry the release's `in-review` transition →
-      confirm `core` publishes the `requested` release event, ScrumMaster
-      triggers `release-candidate`, and a preview link, SHA and build
-      identifier land on the release work item
+- [ ] With a Story still `in-review` on the target project, request a release
+      work item (move it from `proposed` to `in-progress`) → confirm `core`
+      refuses the request and comments on the release naming the outstanding
+      work items
+- [ ] Move that Story to `done`, retry the release's request (`proposed` →
+      `in-progress`) → confirm `core` publishes the `requested` release event,
+      ScrumMaster triggers `release-candidate`, and a preview link, SHA and
+      build identifier land on the release work item, which then moves to
+      `in-review`
 - [ ] Move the release work item to `done` → confirm `core` publishes the
       `done` release event, the frozen PR merges, and production redeploys the
       previewed artifact
-- [ ] Move a release work item to `cancelled` instead (**local mode only** —
-      see the warning above) → confirm the `abandoned` release event fires
+- [ ] Move a release work item to `cancelled` instead (in Jira mode, move its
+      ticket to `Abandoned`) → confirm the `abandoned` release event fires
       `release-preview-teardown`
 - [ ] For a desktop-lane project (e.g. `hello-desktop`): confirm the release
       candidate's comment includes a native build link/status, and that moving
@@ -412,9 +409,9 @@ End-to-end verification after setup is complete.
       Beta VM redeploys automatically — no Jira transition involved
 - [ ] Confirm the work item receives a comment with the Beta VM URL and commit SHA
 - [ ] Move the work item to `done` → confirm nothing fires (acceptance only)
-- [ ] Create a release work item targeting this project and move it to
-      `in-review` → confirm `release-candidate` fires and a preview link lands
-      on it
+- [ ] Create a release work item targeting this project and request it
+      (`proposed` → `in-progress`) → confirm `release-candidate` fires and a
+      preview link lands on it, after which it is `in-review`
 - [ ] Move the release work item to `done` → confirm `production-promote` fires,
       the frozen PR merges, and production serves the previewed SHA
 
