@@ -171,7 +171,8 @@ Build stages and the Beta URL/SHA comment step do not.
 
 `core` runs the beta-queue-clean check itself (`store.py`'s
 `transition_status`) before publishing a local-mode release's `requested`
-event; a Jira-mode release's `requested` is published by the webhook
+event, which a local Release's request (`proposed` → `in-progress`) triggers
+(release-mode-parity.md REQ-09); a Jira-mode release's `requested` is published by the webhook
 consumer instead, on the Release ticket's creation, after the same
 canonical beta-queue query (`canonical-delivery-state.md` REQ-04, REQ-08).
 Either way ScrumMaster's `handleReleaseRequested` reacts to the event and
