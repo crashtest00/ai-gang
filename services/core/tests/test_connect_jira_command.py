@@ -163,8 +163,9 @@ def test_refuses_while_a_release_work_item_is_open(clean_db, jira_env):
 
 
 def test_a_closed_release_does_not_refuse_and_is_not_pushed(clean_db, jira_env):
-    """The other half of the same rule, and Pass 7 answer 2.1: "A `release`
-    is neither pushed nor re-synced"."""
+    """The other half of the same rule, and Pass 7 answer 2.1, kept by
+    release-mode-parity.md REQ-14: "A Release with no key is still not
+    pushed"."""
     task = make_item()
     make_item(item_type='release', display_name='R1', status='done')
 
@@ -176,18 +177,23 @@ def test_a_closed_release_does_not_refuse_and_is_not_pushed(clean_db, jira_env):
     assert [item.external_key for item in WorkItem.objects.filter(type='release')] == [None]
 
 
-def test_a_keyed_release_gets_no_resync_write(clean_db, jira_env, jira_instance):  # noqa: F811
-    """"a keyed Release gets no re-sync write" — its issue is left exactly
-    as Jira has it, because a re-sync move to Done would publish `done`
-    and promote its candidate (REQ-08)."""
-    jira_instance.add_issue('TP-9', issuetype='Release', status='Backlog')
-    make_item(item_type='release', display_name='R1', status='done', external_key='TP-9')
+def test_a_keyed_release_is_resynced_to_its_mapped_jira_status(clean_db, jira_env, jira_instance):  # noqa: F811
+    """release-mode-parity.md REQ-14: "`connect_jira`'s re-sync MUST include
+    Releases: each keyed Release is moved to the Jira status its canonical
+    status maps to" — Done for a done Release, Abandoned for a cancelled
+    one — replacing v5.2's "a keyed Release gets no re-sync write"."""
+    jira_instance.add_issue('TP-9', issuetype='Release', status='In Review')
+    jira_instance.add_issue('TP-8', issuetype='Release', status='In Progress')
+    make_item(item_type='release', display_name='R-done', status='done', external_key='TP-9')
+    make_item(item_type='release', display_name='R-cancelled', status='cancelled', external_key='TP-8')
     make_item()
 
     run()
 
-    assert jira_instance.status_of('TP-9') == 'Backlog'
-    assert jira_instance.blocked('TP-9') is None
+    assert jira_instance.status_of('TP-9') == 'Done'
+    assert jira_instance.status_of('TP-8') == 'Abandoned'
+    assert jira_instance.blocked('TP-8') is None, 'a cancelled Release is Abandoned, not flagged'
+    assert mode()['mode'] == 'jira'
 
 
 def test_refuses_a_project_already_in_jira_mode_and_moves_no_consumer_group(
@@ -418,12 +424,13 @@ def test_a_status_the_map_does_not_cover_is_left_as_jira_has_it(clean_db, jira_e
     assert mode()['mode'] == 'jira', 'and it does not stop the switch'
 
 
-def test_needs_clarification_failed_and_cancelled_set_the_blocked_flag(clean_db, jira_env):
-    """REQ-10's acceptance: "an item in `needs-clarification`, `failed` or
-    `cancelled` gets the Blocked flag set and no transition" — Jira shows
-    all three as one flag (§4)."""
+def test_needs_clarification_and_failed_set_the_blocked_flag(clean_db, jira_env):
+    """REQ-10's acceptance: "an item in `needs-clarification` or `failed`
+    gets the Blocked flag set and no transition" — Jira shows both as one
+    flag (§4). `cancelled` no longer does (release-mode-parity.md REQ-14,
+    the next test)."""
     items = [make_item(status=status, display_name=status)
-             for status in ('needs-clarification', 'failed', 'cancelled')]
+             for status in ('needs-clarification', 'failed')]
 
     run()
 
@@ -433,6 +440,45 @@ def test_needs_clarification_failed_and_cancelled_set_the_blocked_flag(clean_db,
         assert jira_env.status_of(key) == 'Backlog', 'the flag, not a transition'
     assert WebhookFailure.objects.count() == 0
     assert mode()['mode'] == 'jira'
+
+
+def test_a_story_cancelled_while_local_shows_abandoned_not_the_blocked_flag(clean_db, jira_env):
+    """release-mode-parity.md REQ-14's acceptance: "a Story cancelled while
+    its project was local shows Abandoned, not the Blocked flag, after
+    `connect_jira`" — the re-sync's rule for `cancelled` is superseded "for
+    every type"."""
+    story = make_item(item_type='story', status='cancelled', display_name='Dropped story',
+                      story_detail={'behavior': 'b', 'acceptanceCriteria': 'ac', 'constraints': 'c',
+                                    'edgeCases': 'e', 'outOfScope': 'oos'})
+
+    run()
+
+    key = store.get_work_item(story).external_key
+    assert jira_env.status_of(key) == 'Abandoned'
+    assert jira_env.blocked(key) is None
+    assert WebhookFailure.objects.count() == 0
+    assert mode()['mode'] == 'jira'
+
+
+def test_a_done_item_whose_issue_is_in_abandoned_is_a_failed_step_that_leaves_the_project_local(
+        clean_db, jira_env, jira_instance):  # noqa: F811
+    """REQ-14's acceptance: "`connect_jira` for a project with a `done` item
+    whose issue is in Abandoned exits non-zero naming it and leaves the
+    project local" — the workflow offers Done from every status but
+    Abandoned."""
+    jira_instance.add_issue('TP-9', issuetype='Release', status='Abandoned')
+    make_item(item_type='release', display_name='R-done', status='done', external_key='TP-9')
+
+    with pytest.raises(CommandError) as err:
+        run()
+
+    assert 'R-done' in str(err.value)
+    assert 'Abandoned' in str(err.value)
+    assert mode()['mode'] == 'local'
+    assert jira_instance.status_of('TP-9') == 'Abandoned'
+    failure = WebhookFailure.objects.get()
+    assert failure.payload['step'] == 'connect-jira-status'
+    assert failure.payload['currentJiraStatus'] == 'Abandoned'
 
 
 def test_an_issue_already_in_a_mapping_status_counts_done_even_while_flagged(

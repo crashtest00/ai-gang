@@ -94,7 +94,7 @@ def test_a_delivered_work_item_reaches_in_review_in_local_mode_and_blocks_a_rele
 
     release_id = make_item(item_type='release', display_name='A release')
     with pytest.raises(store.ReleaseGateError):
-        store.transition_status(release_id, 'in-review', actor='a-person')
+        store.transition_status(release_id, 'in-progress', actor='a-person')
 
 
 def test_a_local_mode_promotion_makes_no_outbound_call(clean_db, permissive_jira):

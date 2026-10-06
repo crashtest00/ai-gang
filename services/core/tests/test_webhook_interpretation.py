@@ -314,7 +314,7 @@ def _release_fields(summary='Release it', project=PROJECT, target_project=('ENG'
     return fields
 
 
-def test_release_ticket_created_materializes_a_canonical_release_work_item(clean_db, monkeypatch):
+def test_release_ticket_created_materializes_a_canonical_release_work_item(clean_db, monkeypatch, permissive_jira):
     _set_release_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     project_config.set_mode('engineering-app', 'jira')
@@ -349,14 +349,15 @@ def test_release_ticket_created_without_target_project_field_falls_back_to_the_c
 
     # REQ-08: the raw Target Project field (read before that fallback) is
     # what the missing-Target-Project check sees, so this Release is left
-    # uncut and gets today's missing-Target-Project comment instead — no
-    # beta-queue comment, since that check never runs.
+    # uncut and gets the one release gate's Target Project refusal
+    # (release-mode-parity.md REQ-11) — no beta-queue comment, since that
+    # check never runs.
     assert not OutboxEvent.objects.filter(event_type='work_item.jira_release_event').exists()
     texts = posted_comment_texts()
     assert len(texts) == 1
-    assert texts[0] == ('[system] Release ticket is missing the required Target Project field. '
-                         'Set it and re-create the Release ticket.'), \
-        'the writer posts "[<author>] <body>" so the author survives the round trip (REQ-09)'
+    assert texts[0] == ('[system] [system] release request rejected: Target Project is not set\n\n'
+                         'Resolve this and request the release again.'), \
+        'the writer posts "[<author>] <body>" over the rejection format\'s own "[system] " marker (REQ-09)'
 
 
 def test_release_requested_with_outstanding_beta_queue_gets_the_queue_comment_and_cuts_no_candidate(clean_db, monkeypatch, permissive_jira):
@@ -379,8 +380,10 @@ def test_release_requested_with_outstanding_beta_queue_gets_the_queue_comment_an
     assert item.type == 'release', 'the Release still materializes even though it is not cut'
     texts = posted_comment_texts()
     assert len(texts) == 1
-    assert 'Cannot cut a release candidate' in texts[0]
+    assert texts[0].startswith('[system] [system] release request rejected: 1 work item(s) are still '
+                               'awaiting acceptance on beta'), texts
     assert str(outstanding_id) in texts[0], 'lists the outstanding item by its key, or its id when it has none'
+    assert texts[0].endswith('Resolve this and request the release again.')
 
 
 def test_release_requested_release_check_comment_is_posted_once_on_webhook_redelivery(clean_db, monkeypatch, permissive_jira):
@@ -395,7 +398,7 @@ def test_release_requested_release_check_comment_is_posted_once_on_webhook_redel
     assert len(texts) == 1
 
 
-def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch):
+def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_db, monkeypatch, permissive_jira):
     _set_release_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     project_config.set_mode('engineering-app', 'jira')
@@ -407,17 +410,16 @@ def test_release_ticket_created_is_idempotent_against_webhook_redelivery(clean_d
     assert WorkItemReleaseDetail.objects.filter(work_item__external_key='TP-15').count() == 1
 
 
-def test_release_ticket_update_resyncs_candidate_fields_written_back_by_jenkins(clean_db, monkeypatch):
+def test_release_ticket_update_resyncs_candidate_fields_written_back_by_jenkins(clean_db, monkeypatch, permissive_jira):
     _set_release_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     project_config.set_mode('engineering-app', 'jira')
     handle_webhook_envelope(envelope_for('TP-16', 'jira:issue_created', _release_fields()))
     item = WorkItem.objects.get(external_key='TP-16')
 
-    # The release-candidate Jenkins job writes Candidate SHA, Build
-    # Identifier, and Preview URL directly onto the Jira ticket
-    # (scripts/create-release-fields.sh) — an ordinary issue_updated
-    # webhook the same as any other Jira field edit.
+    # The writer pushes Candidate SHA, Build Identifier and Preview URL onto
+    # the Jira ticket in one edit (release-mode-parity.md REQ-13) — an
+    # ordinary issue_updated webhook the same as any other Jira field edit.
     updated_fields = _release_fields(candidate_sha='abc1234', build_identifier='build-42',
                                       preview_url='https://preview.example.com/abc1234')
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-16', 'fields': updated_fields},
@@ -467,7 +469,8 @@ def test_release_ticket_update_with_no_prior_create_materializes_the_canonical_w
     assert not OutboxEvent.objects.filter(event_type='work_item.jira_release_event').exists()
 
 
-def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_second_update(clean_db, monkeypatch):
+def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_second_update(
+        clean_db, monkeypatch, permissive_jira):
     _set_release_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     project_config.set_mode('engineering-app', 'jira')
@@ -491,10 +494,13 @@ def test_release_ticket_update_with_no_prior_create_is_idempotent_against_a_seco
 
 
 def test_release_abandoned_is_recorded_and_republished(clean_db):
+    """release-mode-parity.md REQ-14: a Release moved to the Abandoned
+    STATUS (the resolution-based path is gone) is recorded `cancelled` and
+    publishes `abandoned`."""
     project_config.set_mode(PROJECT, 'jira')
     fields = {'summary': 'Release it', 'issuetype': {'name': 'Release'}, 'project': {'name': PROJECT, 'key': 'TP'}}
     body = {'webhookEvent': 'jira:issue_updated', 'issue': {'key': 'TP-11', 'fields': fields},
-            'changelog': {'items': [{'field': 'resolution', 'toString': 'Abandoned'}]}}
+            'changelog': {'items': [{'field': 'status', 'toString': 'Abandoned'}]}}
     env = build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
         'event': 'jira:issue_updated', 'issue': body['issue'], 'body': body,
     })
@@ -504,6 +510,7 @@ def test_release_abandoned_is_recorded_and_republished(clean_db):
     event = OutboxEvent.objects.get(event_type='work_item.jira_release_event')
     assert event.payload == {'kind': 'abandoned', 'workItemId': str(item.id), 'project': item.project}, \
         'carries the materialized Release\'s canonical id and, as project, its Target Project (REQ-08)'
+    assert item.status == 'cancelled'
 
 
 def test_release_done_is_recorded_and_republished_exactly_once_and_the_canonical_status_follows(clean_db):
@@ -561,6 +568,10 @@ def test_a_releases_in_review_echo_cuts_no_second_candidate(clean_db, monkeypatc
     publishes no release event. (Its Done twin is above.) Without that, the
     echo of the status the candidate cut moved the ticket to would cut a
     second one."""
+    # The ticket offers In Progress, so the request's In Progress push
+    # (release-mode-parity.md REQ-09) succeeds and records no failure.
+    permissive_jira.routes[('GET', '/rest/api/3/issue/TP-30/transitions')] = lambda q, b: (
+        200, {'transitions': [{'id': '21', 'to': {'name': 'In Progress'}}]})
     item = _create_jira_release(monkeypatch, 'TP-30')
     assert OutboxEvent.objects.filter(event_type='work_item.jira_release_event').count() == 1, \
         'the creation published its one `requested` event'
@@ -598,8 +609,8 @@ def test_an_unset_target_project_posts_only_its_own_comment_even_with_a_story_in
 
     assert not OutboxEvent.objects.filter(event_type='work_item.jira_release_event').exists()
     texts = posted_comment_texts()
-    assert texts == ['[system] Release ticket is missing the required Target Project field. '
-                      'Set it and re-create the Release ticket.'], \
+    assert texts == ['[system] [system] release request rejected: Target Project is not set\n\n'
+                      'Resolve this and request the release again.'], \
         'exactly one comment, the Target Project one, and no beta-queue comment'
 
 
@@ -614,7 +625,7 @@ def test_the_release_events_are_published_on_the_tickets_own_projects_stream(cle
     handle_webhook_envelope(_release_changelog_envelope(
         'TP-32', [{'field': 'status', 'fromString': 'In Review', 'toString': 'Done'}]))
     handle_webhook_envelope(_release_changelog_envelope(
-        'TP-32', [{'field': 'resolution', 'toString': 'Abandoned'}]))
+        'TP-32', [{'field': 'status', 'fromString': 'Done', 'toString': 'Abandoned'}]))
 
     rows = {r.payload['kind']: r for r in OutboxEvent.objects.filter(event_type='work_item.jira_release_event')}
     assert set(rows) == {'requested', 'done', 'abandoned'}

@@ -538,6 +538,9 @@ def _release_event_kind(previous_status: str, new_status: str) -> Optional[str]:
     if new_status == 'cancelled':
         return 'abandoned'
     return None
+
+
+def _release_beta_queue_outstanding(project: str) -> list[WorkItem]:
     """Local-mode equivalent of
     `services/scrummaster/src/handlers.js`'s `handleReleaseRequested` JQL check
     (`issuetype != Release AND status = "In Review"`): any non-release work

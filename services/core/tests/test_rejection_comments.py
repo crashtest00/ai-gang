@@ -133,14 +133,15 @@ def test_the_release_gate_keeps_its_own_comment_and_the_handler_adds_no_second(c
                              'displayName': 'Outstanding', 'status': 'in-review', 'storyDetail': STORY_DETAIL})
 
     envelope = command({'command': 'transitionStatus', 'actor': 'scrummaster',
-                         'workItemId': str(release_id), 'status': 'in-review'})
+                         'workItemId': str(release_id), 'status': 'in-progress'})
     with pytest.raises(store.ReleaseGateError):
         command_consumer._handler(envelope)
 
     bodies = bodies_for(release_id)
     assert len(bodies) == 1, bodies
-    assert bodies[0].startswith('Cannot cut a release candidate'), \
-        "today's text, in today's place — the handler adds nothing for it"
+    assert bodies[0].startswith('[system] release request rejected: 1 work item(s) are still awaiting '
+                                'acceptance on beta'), \
+        "the release gate's own comment (release-mode-parity.md REQ-11) — the handler adds nothing for it"
 
 
 def test_a_release_gate_rejection_redelivered_with_the_same_completion_key_leaves_one_comment(clean_db):
@@ -156,7 +157,7 @@ def test_a_release_gate_rejection_redelivered_with_the_same_completion_key_leave
                              'displayName': 'Outstanding', 'status': 'in-review', 'storyDetail': STORY_DETAIL})
 
     envelope = command({'command': 'transitionStatus', 'actor': 'scrummaster',
-                         'workItemId': str(release_id), 'status': 'in-review'})
+                         'workItemId': str(release_id), 'status': 'in-progress'})
     for _ in range(2):
         with pytest.raises(store.ReleaseGateError):
             command_consumer._handler(envelope)

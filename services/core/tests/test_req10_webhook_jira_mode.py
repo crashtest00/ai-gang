@@ -24,7 +24,7 @@ from workitems.envelope import Kind, build_envelope
 from workitems.models import OutboxEvent, WebhookFailure, WorkItem, WorkItemComment, WorkItemReleaseDetail
 from workitems.webhook_consumer import handle_webhook_envelope
 
-from tests.jira_fixture import permissive_jira  # noqa: F401 - a pytest fixture, used by name
+from tests.jira_fixture import jira_instance, permissive_jira  # noqa: F401 - pytest fixtures, used by name
 
 PROJECT = 'test-project'
 TARGET_PROJECT = 'engineering-app'
@@ -153,7 +153,11 @@ def test_an_update_for_a_release_ticket_never_materialized_under_a_local_mode_ta
     assert {g.payload['detail']['to'] for g in generics} == {'In Review', 'In Progress'}
 
 
-def test_a_release_ticket_materializes_under_a_jira_mode_target_project_as_today(clean_db, monkeypatch):
+def test_a_release_ticket_materializes_under_a_jira_mode_target_project_as_today(
+        clean_db, monkeypatch, jira_instance):  # noqa: F811
+    # A requested Release is pushed In Progress (release-mode-parity.md
+    # REQ-09), so the ticket exists in the fixture Jira.
+    jira_instance.add_issue('REL-102', issuetype='Release')
     _set_release_field_env(monkeypatch)
     project_config.set_mode(PROJECT, 'jira')
     project_config.set_mode(TARGET_PROJECT, 'jira')
