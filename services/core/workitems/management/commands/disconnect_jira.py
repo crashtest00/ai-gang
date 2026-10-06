@@ -15,10 +15,11 @@ is open** (Pass 6, decision 4.1), for the same reason `connect_jira` does:
 while the project is local `core` ignores the Release's Jira webhooks, so a
 Release left open across the disconnect could only be closed by a person in
 the admin, which publishes a release event (REQ-08). §4 records the cost —
-a Jira-mode Release stops being open only by reaching Done, which promotes
-it, so while one is open no work item of its Target Project can be repaired
-through the disconnect/edit/connect path until v5.3 specifies the abandon
-procedure.
+a Jira-mode Release stops being open by reaching Done, which promotes it,
+or by being abandoned (release-mode-parity.md REQ-14: the person moves the
+ticket to Abandoned, which `core` maps to `cancelled`), so while one is open
+no work item of its Target Project can be repaired through the
+disconnect/edit/connect path.
 
 **This is also the repair path.** The Django admin refuses every edit to a
 Jira-mode work item, so an operator who has to fix an `external_key` or
