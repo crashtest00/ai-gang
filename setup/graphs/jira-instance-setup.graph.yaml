@@ -89,7 +89,8 @@ nodes:
       Test & Measurement, Behavior, Acceptance Criteria, Constraints, Edge
       Cases, Out of Scope); the second creates the Release issue type, its
       5 fields (Target Project, Release Notes, Candidate SHA, Build
-      Identifier, Preview URL) and the Abandoned resolution. Both write
+      Identifier, Preview URL); Abandoned is a workflow status created by
+      scripts/init-project.sh, not by this script. Both write
       the JIRA_*_FIELD_ID values they provision straight into
       ~/ai-gang/.env, the platform .env, which
       scripts/startup/derive-env.sh carries into services/core/.env for

@@ -160,7 +160,7 @@ All custom fields are instance-level resources created by `scripts/create-jira-f
 | Field Name | Type | Purpose |
 |-----------|------|---------|
 | `Agent` | Single-select | Identifies which agent owns the ticket. `core` carries its value onto the canonical work item; routing is decided from there. |
-| `Blocked` | Single-select (`Yes` / null) | Set by `core`'s outbound writer when a Jira-mode work item enters `needs-clarification`, `failed` or `cancelled`, and when story intake finds a Story's required fields missing. Cleared by a human, which `core` interprets into the canonical change that triggers the unblock flow. |
+| `Blocked` | Single-select (`Yes` / null) | Set by `core`'s outbound writer when a Jira-mode work item enters `needs-clarification` or `failed` (a `cancelled` item is written as the `Abandoned` status instead), and when story intake finds a Story's required fields missing. Cleared by a human, which `core` interprets into the canonical change that triggers the unblock flow. |
 
 **Story schema fields (all paragraph/textarea type):**
 

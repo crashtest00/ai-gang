@@ -310,7 +310,7 @@ This creates:
 - **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
-- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) and its Abandoned resolution
+- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) (Abandoned is a workflow status, created by `scripts/init-project.sh`, not by this script)
 
 Both scripts write the `JIRA_*_FIELD_ID` values they create directly into
 `~/ai-gang/.env`, the platform `.env` — not into `services/scrummaster/.env`,

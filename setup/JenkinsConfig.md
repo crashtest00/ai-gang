@@ -187,13 +187,19 @@ The job pins `beta`'s current SHA as the candidate, cuts `release/<sha>`,
 opens the `release/<sha> → prod` PR, deploys a SHA-pinned preview container
 to the Beta VM (reusing the image already built there — no rebuild), writes
 Candidate SHA / Build Identifier / Preview URL onto the Release work item in
-`core`, and posts a summary comment there.
+`core` through `core`'s release-candidate report endpoint (in Jira mode one edit
+that pushes the three fields to the ticket), and `core` posts the candidate
+note there; when a native build ran, the report also carries its URL and
+status and `core` posts a separate comment `Native build (<status>): <URL>`,
+keyed `release-candidate:<sha>:native-build` (release-mode-parity.md
+REQ-12, REQ-13).
 
 For a desktop-lane project (detected by the presence of
 `.github/workflows/build-desktop.yml` in the checked-out repo — no separate
 config needed), the job also dispatches `build-desktop.yml` for the pinned SHA
-via `jenkins/scripts/trigger-native-build.sh` and includes the resulting build
-link and status in the same comment as the web preview. See Desktop App
+via `jenkins/scripts/trigger-native-build.sh` and reports the resulting build
+link and status to `core`, which posts them as the separate native-build
+comment (REQ-12), not inside the candidate note. See Desktop App
 Support. A native build
 failure never fails this job — it's supplementary to the web preview.
 
@@ -245,8 +251,10 @@ production-promote failure.
 ### Release abandoned → preview teardown (`release-preview-teardown` job)
 
 Fired by `handleReleaseAbandoned` when a release work item reaches
-`cancelled` without shipping — `core` maps that status to the release event's
-`abandoned` kind and publishes it, and the handler tears the preview down:
+`cancelled` without shipping — in Jira mode the person moves the ticket to the
+`Abandoned` status, which `core` maps to `cancelled` (REQ-14). `core` maps
+`cancelled` to the release event's `abandoned` kind and publishes it, and the
+handler tears the preview down:
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-preview-teardown
@@ -284,7 +292,7 @@ provisioned workflow offers from every status; `Done` is not offered from
       ticket to `Abandoned`) → confirm the `abandoned` release event fires
       `release-preview-teardown`
 - [ ] For a desktop-lane project (e.g. `hello-desktop`): confirm the release
-      candidate's comment includes a native build link/status, and that moving
+      candidate carries a separate `Native build (<status>): <URL>` comment, and that moving
       its release work item to `done` pushes a `vX.Y.Z` tag and produces a
       GitHub Release with Windows/macOS/Linux installers attached
 
