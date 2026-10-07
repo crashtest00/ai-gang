@@ -105,7 +105,8 @@ async function handleDone(ref) {
   await jenkins.triggerProductionPromote({ workItemId }, project, candidateSha);
 }
 
-// A release work item's own transition into review was validated. The
+// A release work item's request (a local Release's `proposed` -> `in-progress`
+// move; a Jira Release's creation) was validated. The
 // beta-queue-clean check runs in Django BEFORE this event is ever published
 // (store.py's transition_status), so there is nothing left to re-check here —
 // an event reaching this handler at all already means the queue was clean.

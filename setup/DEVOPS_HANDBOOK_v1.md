@@ -334,13 +334,17 @@ see The Full Lifecycle and Production Promotion below for the full flow.
 
 7. CUTTING A RELEASE (batched, deliberate)
    - When enough has accumulated on beta, a human creates a Release work
-     item in `core` (Target Project required)
+     item in `core` (Target Project required) and requests it: a local
+     Release moves `proposed` → `in-progress` (in Jira mode the ticket's
+     creation is the request, and `core` pushes In Progress)
    - `core` confirms beta's queue is clean and publishes the release event;
      ScrumMaster then triggers the release-candidate Jenkins job with the
      Release's canonical work item id
    - Jenkins pins beta's SHA, cuts release/<sha>, opens the frozen
      release/<sha> → prod PR, deploys a private SHA-pinned preview to the
-     Beta VM, and posts the preview link back to the Release
+     Beta VM, and reports the preview link back to `core`, which records it
+     on the Release (a local Release it also moves to `in-review`; release-mode-parity.md
+     REQ-09, REQ-13)
 
 8. PROMOTION TO PRODUCTION (Release ticket Done — the only approval gate)
    - Human opens the preview, reviews the exact candidate that would ship
@@ -396,12 +400,14 @@ that passed there — built once, never rebuilt.
 The release promotion flow:
 
 1. Human creates a Release work item in `core` (Target Project required) once
-   enough has landed on beta
+   enough has landed on beta, and requests it: a local Release moves
+   `proposed` → `in-progress` (Jira mode: `core` pushes In Progress)
 2. `core` confirms beta's queue is clean and publishes the release event;
    ScrumMaster triggers Jenkins' `release-candidate` job, which pins
    beta's HEAD as the candidate SHA, cuts `release/<sha>`, opens the
    `release/<sha> → prod` PR, and deploys a private SHA-pinned preview to
-   the Beta VM — link posted back to the Release work item
+   the Beta VM — the report back to `core` records the link on the Release work
+   item (a local Release it also moves to `in-review`)
 3. Human opens the preview, reviews the exact candidate, and moves the
    Release work item to **done**
 4. Jenkins' `production-promote` job merges the frozen PR (squash — no merge

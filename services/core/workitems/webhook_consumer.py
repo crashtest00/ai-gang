@@ -17,9 +17,11 @@ payload:
     reuses) a canonical `release` work item and its
     `work_item_release_detail` row from the ticket's five fields
     (`jira_interpret.parse_release_fields` — BUGFIXES.md BF-01), THEN
-    records and republishes the existing `work_item.jira_release_event`
-    (kind `requested`) unchanged — see the module docstring section below
-    on the Release scope carve-out, which this does not reopen.
+    publishes `work_item.jira_release_event` (kind `requested`) through
+    `store.publish_release_event` only when this webhook materializes the
+    Release (REQ-10), so a redelivery publishes nothing again — see the
+    module docstring section below on the Release scope carve-out, which
+    this does not reopen.
   - `comment_created`/`comment_updated`: projected into the canonical
     comment thread via `store.append_comment` (previously
     silently discarded).
@@ -28,10 +30,10 @@ payload:
         item: `work_item_release_detail` is re-synced from the webhook's
         current `issue.fields` snapshot first (`_sync_release_detail`,
         mirroring `_sync_story_detail`) — this is how the release-candidate
-        Jenkins job's writeback of Candidate SHA/Build Identifier/Preview
-        URL onto the Jira ticket (`scripts/create-release-fields.sh`)
-        reaches the canonical columns, regardless of which changelog field
-        the webhook names.
+        Jenkins job's report to `core`'s release-candidate endpoint, which
+        in Jira mode pushes Candidate SHA/Build Identifier/Preview URL onto
+        the ticket in one edit (REQ-13), reaches the canonical columns,
+        regardless of which changelog field the webhook names.
       - for a Release ticket with NO canonical `release` work item yet
         (e.g. one created before BF-01 shipped, whose `jira:issue_created`
         webhook came and went unmaterialized): materialized first, via the

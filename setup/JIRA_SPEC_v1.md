@@ -157,6 +157,7 @@ themselves are `backlog`, `ready`, `in-progress`, `in-review` and `done`.
 | `In Progress` | Agent actively working |
 | `In Review` | Delivered to beta (canonical `in-review`), awaiting human review; set by `core` when it records a beta deployment |
 | `Done` | Accepted after review on beta; a human's move |
+| `Abandoned` | A ticket abandoned without shipping (status category Done; `core` maps it to canonical `cancelled`, and writes it for a `cancelled` item; offered from every status, and `Done` is not offered from it) (release-mode-parity.md REQ-14) |
 
 `Blocked` is a field state (the Blocked custom field set to `Yes`), not a standalone workflow status. A ticket can be `In Progress` and blocked simultaneously.
 

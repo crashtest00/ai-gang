@@ -310,7 +310,7 @@ This creates:
 - **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
-- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) and its Abandoned resolution
+- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) (Abandoned is a workflow status, created by `scripts/init-project.sh`, not by this script)
 
 Both scripts write the `JIRA_*_FIELD_ID` values they create directly into
 `~/ai-gang/.env`, the platform `.env` — not into `services/scrummaster/.env`,
@@ -635,10 +635,13 @@ For deployment target-specific pipeline steps:
 There is no manual `beta → prod` PR for a human to open — `prod` only changes
 via the Release-ticket flow:
 1. Human creates a Jira Release ticket (Target Project field required) once
-   enough has accumulated on `beta`
+   enough has accumulated on `beta`; its creation is the request, and `core`
+   pushes the ticket to In Progress (a local Release is requested by moving it
+   `proposed` → `in-progress`)
 2. The `core` service checks `beta`'s queue is clean; Jenkins then pins the
    candidate SHA, cuts `release/<sha>`, opens the `release/<sha> → prod` PR,
-   and deploys a private preview — link posted back to the ticket
+   and deploys a private preview — its report to `core` records the link on the
+   ticket (in local mode it also moves the Release to `in-review`)
 3. Human reviews the preview, then moves the Release ticket to **Done**
 4. Jenkins merges the frozen PR and redeploys that exact artifact to
    production — no manual Jenkins or GitHub action required

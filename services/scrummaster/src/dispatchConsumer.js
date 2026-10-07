@@ -224,10 +224,10 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
 // A release event ScrumMaster can act on names a canonical work item
 // (`workItemId`). Every release event `core` publishes does, in every mode
 // (V5.2 Canonical Delivery State REQ-08): in local mode from
-// `store.py`'s `_publish_release_event`, and in Jira mode from
-// `webhook_consumer.py`'s three release publishers
-// (`_handle_release_requested`/`_handle_release_done`/
-// `_handle_release_abandoned`), each carrying the materialized Release's
+// `store.py`'s `publish_release_event`, the one writer of every release event
+// in both modes (release-mode-parity.md REQ-10), called from the status
+// transition in local mode and from `webhook_consumer.py`'s release handlers
+// in Jira mode, each event carrying the materialized Release's
 // canonical id and, as `project`, its Target Project — the former
 // Jira-mode early return here (which used to read the project's mode and
 // decline every such event, because nothing published one with a
