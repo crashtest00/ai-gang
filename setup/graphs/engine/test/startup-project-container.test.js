@@ -23,7 +23,8 @@ const INSTALL = path.join(STARTUP_DIR, 'install-project-dockerfile.sh');
 const { listSupportedTargets, listSupportedStacks } = require('../lib/config/catalog');
 
 const CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  authMethod: 'api-key',
   project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
   repository: { url: 'https://github.com/an-org/a-repo.git' },
 };

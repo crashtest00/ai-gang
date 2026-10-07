@@ -85,7 +85,14 @@ machine or on a server you have Docker on. One command does all of it.
 
 - **Docker**, with the Compose plugin. `./scripts/install-docker.sh`
   installs both if you do not have them.
-- **An Anthropic API key** — <https://console.anthropic.com/settings/keys>.
+- **A Claude credential**, matching the `authMethod` you will set in
+  `ai-gang.config.json`:
+  - `api-key` — a Claude Console API key,
+    <https://console.anthropic.com/settings/keys>, goes in `.env` as
+    `ANTHROPIC_API_KEY`.
+  - `oauth-token` — a long-lived OAuth token for a Claude subscription. Run
+    `claude setup-token` once, complete the browser login it opens, and
+    paste the token it prints into `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
 - **An empty GitHub repository** for the project you want built, and a
   fine-grained PAT for it (see "GitHub Fine-Grained PAT" above). AI Gang
   does not create the repository; it pushes into the one you made.
@@ -102,12 +109,13 @@ cp .env.template .env                                 # then edit it
 docker compose up --exit-code-from ai-gang
 ```
 
-`ai-gang.config.json` is four values — what to build, and where its code
-lives:
+`ai-gang.config.json` is five values — how Claude authenticates, what to
+build, and where its code lives:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "authMethod": "api-key",
   "project": {
     "name": "hello-world",
     "type": "web",
@@ -124,6 +132,14 @@ from a fixed list of supported profiles — today that is `web` with
 `node-express`, and startup tells you the current list if you get it
 wrong. `repository.url` is that repository's plain HTTPS URL, with no
 username or token in it — the PAT goes in `.env`, as `GH_TOKEN`.
+
+`authMethod` is how Claude Code authenticates, and it is `api-key` or
+`oauth-token`. It decides which credential `.env` must carry:
+`api-key` requires `ANTHROPIC_API_KEY`, and `oauth-token` requires
+`CLAUDE_CODE_OAUTH_TOKEN`, which you mint once with `claude setup-token`
+and paste into `.env`. Startup refuses a `.env` missing the credential
+your method requires, naming it. If `.env` carries both, Claude Code uses
+`ANTHROPIC_API_KEY` first, so comment out the one you are not using.
 
 `.env` is where you put every secret. Startup copies the ones a service needs
 into that service's own `.env` (and the project's), each written
@@ -271,7 +287,7 @@ The script will prompt for:
 It creates:
 
 - `projects/hello-world/docker-compose.yml` — pre-configured with the `ai-gang` network, env file, and agent-docs mount; container startup runs `gh auth setup-git` using `GH_TOKEN`
-- `projects/hello-world/.env` — with `PROJECT_NAME`, `REDIS_HOST`, `ANTHROPIC_API_KEY`, `GITHUB_URL`, and `GH_TOKEN`
+- `projects/hello-world/.env` — with `PROJECT_NAME`, `REDIS_HOST`, the Claude credential for the platform's `authMethod` (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`), `GITHUB_URL`, and `GH_TOKEN`
 - `projects/hello-world/src/CLAUDE.md` — project map stub; fill in before the first agent run
 - The Jira project (company-managed Kanban) with all custom fields applied to every screen
 
@@ -357,14 +373,14 @@ Each container needs its own `.env` with `AGENT_CHANNEL_SUFFIX` set to its role:
 PROJECT_NAME=myapp
 AGENT_CHANNEL_SUFFIX=frontend
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=...
+ANTHROPIC_API_KEY=...   # or CLAUDE_CODE_OAUTH_TOKEN=..., per authMethod
 GH_TOKEN=...   # fine-grained PAT scoped to myapp-frontend only
 
 # backend/.env
 PROJECT_NAME=myapp
 AGENT_CHANNEL_SUFFIX=backend
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=...
+ANTHROPIC_API_KEY=...   # or CLAUDE_CODE_OAUTH_TOKEN=..., per authMethod
 GH_TOKEN=...   # fine-grained PAT scoped to myapp-backend only
 ```
 

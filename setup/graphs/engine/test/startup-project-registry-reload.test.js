@@ -32,7 +32,8 @@ const PROJECT = 'acceptance-project';
 const COMMAND_STREAM = `aigang:workitems:${PROJECT}`;
 
 const CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  authMethod: 'api-key',
   project: { name: PROJECT, type: 'web', stack: 'node-express' },
   repository: { url: 'https://github.com/an-org/a-repo.git' },
 };

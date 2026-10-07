@@ -19,7 +19,10 @@
  *                           Jira project name: no part of a dispatch reads one
  *   REDIS_HOST            — hostname of the Redis container
  *   REDIS_PORT            — Redis port (default 6379)
- *   ANTHROPIC_API_KEY     — required by Claude Code
+ *   ANTHROPIC_API_KEY     — required by Claude Code when the platform's
+ *                           authMethod is "api-key"
+ *   CLAUDE_CODE_OAUTH_TOKEN — required instead when it is "oauth-token"
+ *                           (a token from `claude setup-token`)
  *
  * Optional env vars:
  *   AGENT_CHANNEL_SUFFIX   — scope this container to one agent role (e.g.

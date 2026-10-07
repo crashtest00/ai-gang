@@ -126,7 +126,8 @@ function invalidConfig() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-bad-config-'));
   const file = path.join(dir, 'ai-gang.config.json');
   fs.writeFileSync(file, JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'web', stack: 'not-a-stack' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));
@@ -203,7 +204,8 @@ test("a second run keeps the previous run's record and log rather than deleting 
 
   const secondConfig = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-bad-config-')), 'ai-gang.config.json');
   fs.writeFileSync(secondConfig, JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'not-a-target', stack: 'node-express' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));
@@ -282,7 +284,8 @@ function runnableCheckout() {
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
   fs.writeFileSync(path.join(root, '.env'), PLATFORM_ENV);
   fs.writeFileSync(path.join(root, 'ai-gang.config.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'web', stack: 'node-express' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));

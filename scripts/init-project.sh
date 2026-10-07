@@ -25,7 +25,7 @@
 #   ./scripts/init-project.sh --config <file.json> [--connect-jira]
 #
 # --config <file>: read the project name, deployment target, and stack
-# profile from a UTF-8 JSON file (schemaVersion 1; a "project" object with
+# profile from a UTF-8 JSON file (schemaVersion 2; a "project" object with
 # nonempty string fields "name", "type", "stack" — see
 # setup/graphs/engine/lib/config/) instead of the interactive prompts and
 # --deployment flag below. The file is validated — and any invalid input
@@ -109,6 +109,44 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# --- Authentication method ---
+# The method is a platform-wide decision, so it comes from the platform
+# configuration — ai-gang.config.json at the checkout root, or the file
+# AIGANG_CONFIG_FILE names (platform startup sets it) — in every mode this
+# script runs in, and never from a project's own --config file. It selects
+# which credential the project's .env receives. With no valid platform
+# configuration nothing is created: this runs ahead of every prompt and
+# every write.
+PLATFORM_CONFIG_FILE="${AIGANG_CONFIG_FILE:-$REPO_ROOT/ai-gang.config.json}"
+if [[ ! -f "$PLATFORM_CONFIG_FILE" ]]; then
+  echo "Error: no platform configuration at $PLATFORM_CONFIG_FILE — copy ai-gang.config.template.json to ai-gang.config.json and fill it in." >&2
+  exit 1
+fi
+if ! command -v node &> /dev/null; then
+  echo "Error: this script reads the platform configuration with 'node', but it was not found on PATH." >&2
+  exit 1
+fi
+PLATFORM_STDERR_FILE=$(mktemp)
+if ! PLATFORM_OUTPUT=$(node "$REPO_ROOT/setup/graphs/engine/lib/config/cli.js" --platform "$PLATFORM_CONFIG_FILE" 2>"$PLATFORM_STDERR_FILE"); then
+  echo "Error: $PLATFORM_CONFIG_FILE is not a valid platform configuration:" >&2
+  cat "$PLATFORM_STDERR_FILE" >&2
+  rm -f "$PLATFORM_STDERR_FILE"
+  exit 1
+fi
+rm -f "$PLATFORM_STDERR_FILE"
+AUTH_METHOD=""
+while IFS='=' read -r platform_key platform_val; do
+  [[ "$platform_key" == "AUTH_METHOD" ]] && AUTH_METHOD="$platform_val"
+done <<< "$PLATFORM_OUTPUT"
+unset platform_key platform_val
+# The credential's name is the one scripts/startup/env-contract.sh declares
+# for the method; it is written nowhere else.
+CREDENTIAL_VAR="$(bash "$SCRIPT_DIR/startup/env-contract.sh" | awk -v m="$AUTH_METHOD" '$1 == "REQUIRED_IN_METHOD" && $2 == m { print $3 }')"
+if [[ -z "$AUTH_METHOD" || -z "$CREDENTIAL_VAR" ]]; then
+  echo "Error: could not determine the credential for the authentication method in $PLATFORM_CONFIG_FILE." >&2
+  exit 1
+fi
 
 CONFIG_PROJECT_NAME=""
 CONFIG_PROJECT_TYPE=""
@@ -223,7 +261,7 @@ read_env_value() {
   printf '%s' "$value"
 }
 
-for env_var in ANTHROPIC_API_KEY GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
+for env_var in "$CREDENTIAL_VAR" GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
   if [[ -z "${!env_var:-}" ]]; then
     printf -v "$env_var" '%s' "$(read_env_value "$HQ_ENV" "$env_var" || true)"
   fi
@@ -738,7 +776,7 @@ COMPOSE
 fi
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  # This file holds the Anthropic key and the GitHub PAT, so it is
+  # This file holds the Claude credential and the GitHub PAT, so it is
   # readable only by its owner — the same rule the platform's own derived
   # environment files follow. Created 0600 rather than chmod-ed
   # afterwards, so it is never briefly world-readable.
@@ -746,15 +784,15 @@ if [[ ! -f "$PROJECT_DIR/.env" ]]; then
     cat > "$PROJECT_DIR/.env" <<ENVFILE
 PROJECT_NAME=${PROJECT_NAME}
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+${CREDENTIAL_VAR}=${!CREDENTIAL_VAR:-}
 GITHUB_URL=${GITHUB_URL:-}
 GH_TOKEN=${GH_TOKEN:-}
 ENVFILE
   )
   chmod 600 "$PROJECT_DIR/.env"
   echo "Created: $PROJECT_DIR/.env"
-  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    echo "  ** ANTHROPIC_API_KEY not found in $HQ_ENV — fill it in before building."
+  if [[ -z "${!CREDENTIAL_VAR:-}" ]]; then
+    echo "  ** $CREDENTIAL_VAR not found in $HQ_ENV — fill it in before building."
   fi
   if [[ -z "${GH_TOKEN:-}" ]]; then
     echo "  ** GH_TOKEN is blank — fill it in before the first agent run."

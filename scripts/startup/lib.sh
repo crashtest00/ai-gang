@@ -157,6 +157,20 @@ env_value() {
   printf ''
 }
 
+# The name of the Claude credential an authentication method requires: the
+# <NAME> of the contract's `REQUIRED_IN_METHOD <method> <NAME>` line.
+# Nothing outside env-contract.sh writes those names.
+auth_credential_name() {
+  local method="$1" kind first second
+  while read -r kind first second; do
+    if [[ "$kind" == "REQUIRED_IN_METHOD" && "$first" == "$method" ]]; then
+      printf '%s' "$second"
+      return 0
+    fi
+  done < <("$STARTUP_DIR/env-contract.sh")
+  die "the env contract names no credential for authentication method '$method'"
+}
+
 status() {
   "$STARTUP_DIR/status.sh" "$@"
 }
@@ -181,20 +195,22 @@ end_step() {
 # The four configured values, read back through the same validator that
 # gated the run. Steps call this rather than parsing the configuration
 # themselves, so no step can act on a value the validator never approved.
-# Sets PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK and REPOSITORY_URL.
+# Sets PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK, REPOSITORY_URL and
+# AUTH_METHOD.
 load_decisions() {
   local output key value
   output="$("$STARTUP_DIR/validate-config.sh")" || exit 1
-  PROJECT_NAME=""; PROJECT_TYPE=""; PROJECT_STACK=""; REPOSITORY_URL=""
+  PROJECT_NAME=""; PROJECT_TYPE=""; PROJECT_STACK=""; REPOSITORY_URL=""; AUTH_METHOD=""
   while IFS='=' read -r key value; do
     case "$key" in
       PROJECT_NAME) PROJECT_NAME="$value" ;;
       PROJECT_TYPE) PROJECT_TYPE="$value" ;;
       PROJECT_STACK) PROJECT_STACK="$value" ;;
       REPOSITORY_URL) REPOSITORY_URL="$value" ;;
+      AUTH_METHOD) AUTH_METHOD="$value" ;;
     esac
   done <<< "$output"
-  [[ -n "$PROJECT_NAME" && -n "$PROJECT_TYPE" && -n "$PROJECT_STACK" && -n "$REPOSITORY_URL" ]] \
+  [[ -n "$PROJECT_NAME" && -n "$PROJECT_TYPE" && -n "$PROJECT_STACK" && -n "$REPOSITORY_URL" && -n "$AUTH_METHOD" ]] \
     || die "configuration validation did not produce the expected decisions"
 }
 

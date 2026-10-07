@@ -5,17 +5,17 @@ const assert = require('node:assert/strict');
 const { findDuplicateKeyPaths } = require('../lib/config/duplicate-keys');
 
 test('findDuplicateKeyPaths: no duplicates in a well-formed document', () => {
-  const text = JSON.stringify({ schemaVersion: 1, project: { name: 'a', type: 'web', stack: 's' } });
+  const text = JSON.stringify({ schemaVersion: 2, project: { name: 'a', type: 'web', stack: 's' } });
   assert.deepEqual(findDuplicateKeyPaths(text), []);
 });
 
 test('findDuplicateKeyPaths: a duplicate top-level key is reported', () => {
-  const text = '{"schemaVersion":1,"schemaVersion":2,"project":{}}';
+  const text = '{"schemaVersion":2,"schemaVersion":2,"project":{}}';
   assert.deepEqual(findDuplicateKeyPaths(text), ['schemaVersion']);
 });
 
 test('findDuplicateKeyPaths: a duplicate nested key is reported with its path', () => {
-  const text = '{"schemaVersion":1,"project":{"name":"a","name":"b","type":"web","stack":"s"}}';
+  const text = '{"schemaVersion":2,"project":{"name":"a","name":"b","type":"web","stack":"s"}}';
   assert.deepEqual(findDuplicateKeyPaths(text), ['project.name']);
 });
 

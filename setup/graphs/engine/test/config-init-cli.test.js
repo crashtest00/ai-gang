@@ -29,12 +29,27 @@ const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'init-project.sh');
 const EXAMPLE_CONFIG_PATH = path.join(REPO_ROOT, 'scripts', 'init-project.example.json');
 
 const VALID_CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
 };
 
 function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+// init-project.sh takes the authentication method from the PLATFORM
+// configuration in every mode, never from the project's --config file, and
+// refuses to start without a valid one. AIGANG_CONFIG_FILE is the override
+// platform startup itself uses to name it.
+function writePlatformConfig(root, authMethod = 'api-key') {
+  const file = path.join(root, 'platform.config.json');
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 2,
+    authMethod,
+    project: { name: 'platform-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  return file;
 }
 
 function makeIsolatedEnv(extra = {}) {
@@ -48,6 +63,7 @@ function makeIsolatedEnv(extra = {}) {
     AIGANG_PROJECTS_DIR: projectsDir,
     AIGANG_PROJECTS_CONFIG: projectsConfigPath,
     HQ_ENV: path.join(root, 'nonexistent.env'),
+    AIGANG_CONFIG_FILE: writePlatformConfig(root),
     ...extra,
   };
   return { root, projectsDir, projectsConfigPath, env };
@@ -142,7 +158,7 @@ test('malformed JSON is rejected before any project creation', () => {
 
 test('a duplicate key is rejected before any project creation, even though JSON.parse alone would accept it', () => {
   const { root, projectsDir, env } = makeIsolatedEnv();
-  const text = '{"schemaVersion":1,"project":{"name":"acceptance-project","type":"web","stack":"node-express","stack":"node-express"}}';
+  const text = '{"schemaVersion":2,"project":{"name":"acceptance-project","type":"web","stack":"node-express","stack":"node-express"}}';
   const configPath = writeConfigFile(root, 'config.json', text);
 
   const result = runScript(['--config', configPath], { env });
@@ -177,7 +193,7 @@ test('an unsupported schema version is rejected before any project creation', ()
 test('a wrong-typed field is rejected before any project creation', () => {
   const { root, projectsDir, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 12345, type: 'web', stack: 'node-express' },
   });
 
@@ -191,7 +207,7 @@ test('a wrong-typed field is rejected before any project creation', () => {
 test('a missing required field is rejected before any project creation', () => {
   const { root, projectsDir, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'web' },
   });
 
@@ -205,7 +221,7 @@ test('a missing required field is rejected before any project creation', () => {
 test('non-UTF-8 config content is rejected before any project creation', () => {
   const { root, projectsDir, env } = makeIsolatedEnv();
   const invalidUtf8 = Buffer.concat([
-    Buffer.from('{"schemaVersion":1,"project":{"name":"'),
+    Buffer.from('{"schemaVersion":2,"project":{"name":"'),
     Buffer.from([0xff, 0xfe]),
     Buffer.from('","type":"web","stack":"node-express"}}'),
   ]);
@@ -221,7 +237,7 @@ test('shell syntax inside a config value is rejected as data, and never executes
   const { root, projectsDir, env } = makeIsolatedEnv();
   const sentinel = path.join(root, 'sentinel-should-not-exist');
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: `web; touch ${sentinel}`, stack: 'node-express' },
   });
 
@@ -238,7 +254,7 @@ test('shell syntax inside a config value is rejected as data, and never executes
 test('an unknown type is rejected and the diagnostic lists supported choices', () => {
   const { root, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'spaceship', stack: 'node-express' },
   });
 
@@ -252,7 +268,7 @@ test('an unknown type is rejected and the diagnostic lists supported choices', (
 test('an unknown stack is rejected and the diagnostic lists supported choices', () => {
   const { root, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'web', stack: 'rust-actix' },
   });
 
@@ -266,7 +282,7 @@ test('an unknown stack is rejected and the diagnostic lists supported choices', 
 test('an incompatible target/stack pair is rejected', () => {
   const { root, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'web', stack: 'python-flask' },
   });
 
@@ -279,7 +295,7 @@ test('an incompatible target/stack pair is rejected', () => {
 test('an unsafe name is rejected before any project creation', () => {
   const { root, projectsDir, env } = makeIsolatedEnv();
   const configPath = writeConfigFile(root, 'config.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'Not_Safe', type: 'web', stack: 'node-express' },
   });
 

@@ -25,9 +25,24 @@ const DOC_PATH = path.join(REPO_ROOT, 'docs', 'ClaudeInstructions.md');
 const GRAPH_PATH = path.join(REPO_ROOT, 'setup', 'graphs', 'deployment-target-boilerplate.graph.yaml');
 
 const VALID_CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
 };
+
+// init-project.sh takes the authentication method from the PLATFORM
+// configuration in every mode, never from the project's --config file, and
+// refuses to start without a valid one. AIGANG_CONFIG_FILE is the override
+// platform startup itself uses to name it.
+function writePlatformConfig(root, authMethod = 'api-key') {
+  const file = path.join(root, 'platform.config.json');
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 2,
+    authMethod,
+    project: { name: 'platform-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  return file;
+}
 
 function makeIsolatedEnv() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-config-identity-refs-'));
@@ -40,6 +55,7 @@ function makeIsolatedEnv() {
     AIGANG_PROJECTS_DIR: projectsDir,
     AIGANG_PROJECTS_CONFIG: projectsConfigPath,
     HQ_ENV: path.join(root, 'nonexistent.env'),
+    AIGANG_CONFIG_FILE: writePlatformConfig(root),
   };
   return { root, projectsDir, env };
 }

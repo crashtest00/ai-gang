@@ -29,8 +29,13 @@ function readContract() {
     .trim()
     .split('\n')
     .map((line) => {
-      const [kind, name, ...rest] = line.split(' ');
-      return { kind, name, default: rest.join(' ') };
+      // REQUIRED <NAME>, OPTIONAL <NAME> <default>, and
+      // REQUIRED_IN_METHOD <method> <NAME>, whose variable is the third field.
+      const [kind, second, ...rest] = line.split(' ');
+      if (kind === 'REQUIRED_IN_METHOD') {
+        return { kind, method: second, name: rest[0], default: rest.slice(1).join(' ') };
+      }
+      return { kind, name: second, default: rest.join(' ') };
     });
 }
 
@@ -44,6 +49,7 @@ function templateValue(name) {
 // A .env holding a valid value for every contract variable.
 const FILLED = {
   ANTHROPIC_API_KEY: 'sk-ant-test-not-a-real-key',
+  CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-test-not-a-real-token',
   GH_TOKEN: 'github_pat_test_not_a_real_token',
   AIGANG_ADMIN_USER: 'operator',
   AIGANG_ADMIN_EMAIL: 'operator@example.invalid',
@@ -52,8 +58,22 @@ const FILLED = {
   DJANGO_SECRET_KEY: 'a-test-only-django-key',
 };
 
-function makeRoot(envOverrides = {}, { omit = [] } = {}) {
+// The platform configuration validate-env.sh reads the method from, through
+// load_decisions and validate-config.sh. That script runs the validator out of
+// $AIGANG_ROOT/setup, so the fixture root links the real one.
+function writeConfig(root, authMethod) {
+  fs.writeFileSync(path.join(root, 'ai-gang.config.json'), JSON.stringify({
+    schemaVersion: 2,
+    authMethod,
+    project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
+}
+
+function makeRoot(envOverrides = {}, { omit = [], authMethod = 'api-key' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-startup-env-'));
+  writeConfig(root, authMethod);
   const values = { ...FILLED, ...envOverrides };
   const lines = Object.entries(values)
     .filter(([name]) => !omit.includes(name))
@@ -77,13 +97,17 @@ function runValidateEnv(root) {
 
 // ---- the contract, .env.template, and each other ----
 
-test('the contract is well formed: REQUIRED or OPTIONAL, one variable each', () => {
+test('the contract is well formed: REQUIRED, REQUIRED_IN_METHOD or OPTIONAL, one variable each', () => {
   const entries = readContract();
   assert.ok(entries.length > 0);
   for (const entry of entries) {
-    assert.ok(['REQUIRED', 'OPTIONAL'].includes(entry.kind), `bad kind: ${entry.kind}`);
+    assert.ok(['REQUIRED', 'REQUIRED_IN_METHOD', 'OPTIONAL'].includes(entry.kind), `bad kind: ${entry.kind}`);
     assert.match(entry.name, /^[A-Z][A-Z0-9_]*$/);
     if (entry.kind === 'OPTIONAL') assert.notEqual(entry.default, '');
+    if (entry.kind === 'REQUIRED_IN_METHOD') {
+      assert.ok(['api-key', 'oauth-token'].includes(entry.method), `bad method: ${entry.method}`);
+      assert.equal(entry.default, '', 'a REQUIRED_IN_METHOD line is exactly three fields');
+    }
   }
   const names = entries.map((e) => e.name);
   assert.equal(new Set(names).size, names.length, 'a variable is listed twice');
@@ -99,13 +123,25 @@ test('every contract variable is declared in .env.template', () => {
   }
 });
 
-test('every REQUIRED variable ships empty in .env.template, so an unfilled copy fails', () => {
-  for (const entry of readContract().filter((e) => e.kind === 'REQUIRED')) {
+test('every REQUIRED and REQUIRED_IN_METHOD variable ships empty in .env.template, so an unfilled copy fails', () => {
+  for (const entry of readContract().filter((e) => e.kind === 'REQUIRED' || e.kind === 'REQUIRED_IN_METHOD')) {
     assert.equal(
       templateValue(entry.name),
       '',
-      `${entry.name} is REQUIRED and must ship empty in .env.template`
+      `${entry.name} is ${entry.kind} and must ship empty in .env.template`
     );
+  }
+});
+
+test('the contract carries exactly the two method-conditional credentials, and neither is unconditionally REQUIRED', () => {
+  const entries = readContract();
+  const lines = spawnSync('bash', [CONTRACT], { encoding: 'utf8', timeout: 15000 }).stdout.split('\n');
+  assert.deepEqual(lines.filter((l) => l.startsWith('REQUIRED_IN_METHOD ')), [
+    'REQUIRED_IN_METHOD api-key ANTHROPIC_API_KEY',
+    'REQUIRED_IN_METHOD oauth-token CLAUDE_CODE_OAUTH_TOKEN',
+  ]);
+  for (const name of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+    assert.equal(entries.some((e) => e.kind === 'REQUIRED' && e.name === name), false, `${name} must not be REQUIRED`);
   }
 });
 
@@ -294,6 +330,63 @@ test('a required variable still holding the template value is refused as a place
   assert.match(result.stderr, /AIGANG_ADMIN_EMAIL is still at its \.env\.template placeholder/);
 });
 
+// ---- the method-conditional credential ----
+
+const METHODS = [
+  { authMethod: 'api-key', credential: 'ANTHROPIC_API_KEY', other: 'CLAUDE_CODE_OAUTH_TOKEN' },
+  { authMethod: 'oauth-token', credential: 'CLAUDE_CODE_OAUTH_TOKEN', other: 'ANTHROPIC_API_KEY' },
+];
+
+for (const { authMethod, credential, other } of METHODS) {
+  test(`${authMethod}: a .env missing ${credential} is refused by name`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [credential], authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`required variable ${credential} is missing or empty`));
+  });
+
+  test(`${authMethod}: a .env with ${credential} left empty is refused by name`, () => {
+    const result = runValidateEnv(makeRoot({ [credential]: '' }, { authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`required variable ${credential} is missing or empty`));
+  });
+
+  test(`${authMethod}: a .env carrying only the other method's credential is refused the same way`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [credential], authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(credential), result.stderr);
+    assert.equal(result.stderr.includes(`variable ${other}`), false, 'the other credential is not demanded');
+  });
+
+  test(`${authMethod}: ${credential} alone is enough`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [other], authMethod }));
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  test(`${authMethod}: a .env carrying both credentials is accepted, with no warning`, () => {
+    const result = runValidateEnv(makeRoot({}, { authMethod }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(/warn|WARN/.test(`${result.stdout}${result.stderr}`), false, `${result.stdout}${result.stderr}`);
+  });
+
+  test(`${authMethod}: ${credential} still at its .env.template value is refused as a placeholder`, () => {
+    const root = makeRoot({ [credential]: 'paste-it-here' }, { authMethod });
+    fs.writeFileSync(
+      path.join(root, '.env.template'),
+      fs.readFileSync(ENV_TEMPLATE, 'utf8').replace(new RegExp(`^${credential}=$`, 'm'), `${credential}=paste-it-here`)
+    );
+    const result = runValidateEnv(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`${credential} is still at its \\.env\\.template placeholder`));
+  });
+}
+
+test('validate-env.sh cannot read a method from a configuration that is not valid, and stops', () => {
+  const root = makeRoot();
+  fs.writeFileSync(path.join(root, 'ai-gang.config.json'), '{}');
+  const result = runValidateEnv(root);
+  assert.notEqual(result.status, 0);
+});
+
 test('optional variables may be absent entirely', () => {
   const root = makeRoot();
   const result = runValidateEnv(root);
@@ -310,7 +403,7 @@ test('a missing .env is reported, naming the file', () => {
 });
 
 test('no secret value is echoed by a passing or failing run', () => {
-  const secrets = [FILLED.ANTHROPIC_API_KEY, FILLED.GH_TOKEN, FILLED.AIGANG_ADMIN_PASSWORD,
+  const secrets = [FILLED.ANTHROPIC_API_KEY, FILLED.CLAUDE_CODE_OAUTH_TOKEN, FILLED.GH_TOKEN, FILLED.AIGANG_ADMIN_PASSWORD,
     FILLED.PGPASSWORD, FILLED.DJANGO_SECRET_KEY];
   for (const root of [makeRoot(), makeRoot({}, { omit: ['GH_TOKEN'] })]) {
     const result = runValidateEnv(root);
