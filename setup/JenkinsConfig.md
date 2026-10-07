@@ -198,9 +198,12 @@ REQ-12, REQ-13).
 `core` accepts the report only while it holds the Release at `in-progress`,
 in both modes (release-mode-parity.md REQ-09). A report for a Release at any
 other status (`proposed`, `in-review`, `done` or `cancelled`) is refused with
-a 400 `VALIDATION_ERROR` before anything happens: nothing is recorded, no
-comment is posted, nothing is pushed to Jira, and the job's report call fails
-visibly. To report a new candidate for a Release already `in-review`, move it
+a 400 `VALIDATION_ERROR` before anything happens: the report records nothing,
+posts no candidate or native-build comment and pushes nothing to Jira. The
+report call then fails the job, and the job's `post { failure }` step posts its
+usual `Failed to cut a release candidate` comment with the build log. That one
+comment (in Jira mode, its one Jira write) is the visible failure; it is a
+known limitation of REQ-09 (release-mode-parity.md §5). To report a new candidate for a Release already `in-review`, move it
 back to `in-progress` first; that move triggers no new candidate.
 
 For a desktop-lane project (detected by the presence of
