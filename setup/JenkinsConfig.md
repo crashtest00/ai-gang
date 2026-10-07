@@ -195,6 +195,14 @@ status and `core` posts a separate comment `Native build (<status>): <URL>`,
 keyed `release-candidate:<sha>:native-build` (release-mode-parity.md
 REQ-12, REQ-13).
 
+`core` accepts the report only while it holds the Release at `in-progress`,
+in both modes (release-mode-parity.md REQ-09). A report for a Release at any
+other status (`proposed`, `in-review`, `done` or `cancelled`) is refused with
+a 400 `VALIDATION_ERROR` before anything happens: nothing is recorded, no
+comment is posted, nothing is pushed to Jira, and the job's report call fails
+visibly. To report a new candidate for a Release already `in-review`, move it
+back to `in-progress` first; that move triggers no new candidate.
+
 For a desktop-lane project (detected by the presence of
 `.github/workflows/build-desktop.yml` in the checked-out repo — no separate
 config needed), the job also dispatches `build-desktop.yml` for the pinned SHA

@@ -863,8 +863,25 @@ def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
               reaches them in. Returns the work item.
 
     The native-build comment is keyed `release-candidate:<sha>:native-build`,
-    so a repeated report with the same SHA posts it once, in either mode."""
+    so a repeated report with the same SHA posts it once, in either mode.
+
+    **A report only for an `in-progress` Release, in both modes** (REQ-09).
+    The report is accepted only while `core` holds the Release at
+    `in-progress`. At any other status (`proposed`, `in-review`, `done`,
+    `cancelled`) it raises `ValidationError` before anything else happens —
+    before the write gate, the native-build comment, the Jira push and the
+    local record — so nothing is recorded, no comment is posted, nothing is
+    pushed, and the endpoint returns a 4xx the job's `curl -sf` fails on. A
+    late report therefore never reopens a finished Release, and the next
+    Done never publishes a second `done`. A new candidate for an `in-review`
+    Release needs it moved back to `in-progress` first, a move that
+    publishes no release event (`_release_event_kind`)."""
     item = _get_release(work_item_id, 'reportReleaseCandidate')
+    if item.status != 'in-progress':
+        raise ValidationError(
+            f'reportReleaseCandidate: release {work_item_id} is at "{item.status}"; a candidate is '
+            'reported only for a release at "in-progress" — move it back to "in-progress" first'
+        )
 
     verdict = write_gate.route(item.project, origin)
     if verdict == write_gate.REFUSE:
