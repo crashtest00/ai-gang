@@ -165,11 +165,18 @@ def _create_release(client, project=PROJECT):
     return item_id
 
 
+def _request_release(client, item_id):
+    """Put the Release at `in-progress`, the only status a release-candidate
+    report is accepted for (release-mode-parity.md REQ-09)."""
+    res = client.post(f'/admin/work-items/{item_id}/transition', data=json.dumps({'status': 'in-progress'}),
+                      content_type='application/json')
+    assert res.status_code == 200, res.content
+
+
 def test_admin_record_release_candidate_success(clean_db):
     client = Client()
     item_id = _create_release(client)
-    client.post(f'/admin/work-items/{item_id}/transition', data=json.dumps({'status': 'in-review'}),
-                content_type='application/json')
+    _request_release(client, item_id)
 
     res = client.post(f'/admin/work-items/{item_id}/release-candidate', data=json.dumps({
         'candidateSha': 'abc123', 'buildIdentifier': 'build-9', 'previewUrl': 'https://preview.example/abc123',
@@ -189,6 +196,7 @@ def test_admin_record_release_candidate_publishes_the_canonical_event_once_in_lo
     endpoint (the Jira-mode half is in test_jira_writer.py)."""
     client = Client()
     item_id = _create_release(client)
+    _request_release(client, item_id)
 
     res = client.post(f'/admin/work-items/{item_id}/release-candidate', data=json.dumps({
         'candidateSha': 'abc123', 'buildIdentifier': 'build-9', 'previewUrl': 'https://preview.example/abc123',
@@ -239,8 +247,7 @@ def test_get_work_item_full_includes_release_detail(clean_db):
     full_before = client.get(f'/work-items/{item_id}', {'full': 'true'}).json()
     assert full_before['releaseDetail'] is None
 
-    client.post(f'/admin/work-items/{item_id}/transition', data=json.dumps({'status': 'in-review'}),
-                content_type='application/json')
+    _request_release(client, item_id)
     client.post(f'/admin/work-items/{item_id}/release-candidate', data=json.dumps({'candidateSha': 'def456'}),
                 content_type='application/json')
 

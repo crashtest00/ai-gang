@@ -110,6 +110,21 @@ def report(release_id, **body):
                          content_type='application/json')
 
 
+def move_back_to_in_progress(release_id):
+    """An `in-review` Release moved back to `in-progress` through the external
+    API's transition view, so a new candidate can be reported (REQ-09)."""
+    response = Client().post(f'/admin/work-items/{release_id}/transition',
+                             data=json.dumps({'status': 'in-progress'}), content_type='application/json')
+    assert response.status_code == 200, response.content
+
+
+def record_in_progress(instance, key):
+    """The Release ticket's In Progress webhook, which records `in-progress`
+    in `core` — the only status a report is accepted for (REQ-09)."""
+    handle_webhook_envelope(status_webhook(instance, key, 'In Progress', 'Backlog'))
+    assert WorkItem.objects.get(external_key=key).status == 'in-progress'
+
+
 def webhook(instance, key, event='jira:issue_updated', *, changelog=None, message_id=None):
     body = instance.issue_webhook(key, event, changelog=changelog)
     return build_envelope(Kind.WEBHOOK_EVENT, registry.normalize_project_name(PROJECT), payload={
@@ -283,6 +298,178 @@ def test_jira_a_creation_webhook_replayed_after_the_release_reaches_in_review_ma
     assert JiraWriteCompletion.objects.get(
         completion_key=f'{envelope["messageId"]}:release-in-progress', work_item_id=item.id,
     ).completed_at is not None, 'recorded complete without a push'
+
+
+# ---------------------------------------------------------------------------
+# REQ-09 — a report only for an `in-progress` Release, in both modes
+# ---------------------------------------------------------------------------
+
+LATE = dict(candidateSha='late999', buildIdentifier='b-late', previewUrl='https://preview.example/late999',
+            nativeBuildUrl='https://ci.example/native/99', nativeBuildStatus='success')
+
+
+def local_snapshot(release_id):
+    """Everything a report could change in `core`: the Release's status and
+    status history, its candidate fields, its comments, and every outbox
+    row (status, candidate, release and comment events alike)."""
+    detail = WorkItemReleaseDetail.objects.filter(work_item_id=release_id).first()
+    return {
+        'status': store.get_work_item(release_id).status,
+        'history': status_sequence(release_id),
+        'candidate': detail and (detail.candidate_sha, detail.build_identifier, detail.preview_url),
+        'comments': sorted(WorkItemComment.objects.filter(work_item_id=release_id).values_list('body', flat=True)),
+        'outbox': sorted(OutboxEvent.objects.values_list('id', flat=True)),
+    }
+
+
+MOVE_BACK = 'move it back to "in-progress" first'
+REQUEST_FIRST = 'the release must be requested first'
+
+
+def assert_refused(response, status):
+    """Refused with a 4xx; the message names the status, and only an
+    `in-review` Release is told to move back to `in-progress` (REQ-09 scopes
+    that to `in-review`: for `done` or `cancelled` it would lead to a second
+    `done`, and for `proposed` it is the release request itself)."""
+    assert 400 <= response.status_code < 500, (response.status_code, response.content)
+    assert response.json()['error'] == 'VALIDATION_ERROR'
+    message = response.json()['message']
+    assert f'is at "{status}"' in message
+    assert 'reported only for a release at "in-progress"' in message
+    assert (MOVE_BACK in message) == (status == 'in-review'), message
+    assert (REQUEST_FIRST in message) == (status == 'proposed'), message
+
+
+def local_release_at(status):
+    """A local Release brought to `status` through the production paths: the
+    Streams command handler and the report endpoint."""
+    release_id = make_item(item_type='release')
+    if status == 'proposed':
+        return release_id
+    request_release_locally(release_id)
+    if status in ('in-review', 'done'):
+        assert report(release_id, candidateSha='abc1234').status_code == 200
+    if status in ('done', 'cancelled'):
+        command_consumer.handle_command(command({
+            'command': 'transitionStatus', 'actor': 'scrummaster',
+            'workItemId': str(release_id), 'status': status}))
+    assert store.get_work_item(release_id).status == status
+    return release_id
+
+
+@pytest.mark.parametrize('status', ['proposed', 'in-review', 'done', 'cancelled'])
+def test_local_a_report_for_a_release_not_in_progress_is_refused_and_changes_nothing(clean_db, status):
+    release_id = local_release_at(status)
+    before = local_snapshot(release_id)
+
+    assert_refused(report(release_id, **LATE), status)
+
+    assert local_snapshot(release_id) == before, 'no status change, no candidate, no comment, no event'
+    if status == 'done':
+        assert kinds(release_id) == ['requested', 'done'], 'a late report never leads to a second `done`'
+
+
+def test_local_an_in_review_release_moved_back_to_in_progress_takes_a_new_candidate_and_cuts_none(clean_db):
+    release_id = local_release_at('in-review')
+
+    move_back_to_in_progress(release_id)
+    assert kinds(release_id) == ['requested'], 'the move back publishes no release event (REQ-10)'
+    assert report(release_id, candidateSha='def5678').status_code == 200
+
+    assert store.get_work_item(release_id).status == 'in-review'
+    assert WorkItemReleaseDetail.objects.get(work_item_id=release_id).candidate_sha == 'def5678'
+    assert [e.payload['candidateSha'] for e in candidate_events(release_id)] == ['abc1234', 'def5678']
+    assert kinds(release_id) == ['requested']
+
+
+@pytest.mark.parametrize('status', ['cancelled', 'done'])
+def test_local_a_release_finished_after_the_first_check_refuses_the_report_and_keeps_nothing(
+        clean_db, monkeypatch, status):
+    """The race REQ-09 rules out: the report passes its first, unlocked check
+    at `in-progress`, and a cancel or Done commits before the record. The
+    status change is made through the store's own transition from inside
+    `native_build_comment_text`, which the report calls after that check and
+    before its locked block; the report must then be refused under the lock
+    and leave nothing — no reopened Release, no candidate, no comment, no
+    event."""
+    release_id = local_release_at('in-progress')
+    after_race = {}
+    real_text = store.native_build_comment_text
+
+    def finish_then_text(*args, **kwargs):
+        store.transition_status(release_id, status, actor='scrummaster')
+        after_race.update(local_snapshot(release_id))
+        after_race['kinds'] = kinds(release_id)
+        return real_text(*args, **kwargs)
+
+    monkeypatch.setattr(store, 'native_build_comment_text', finish_then_text)
+
+    assert_refused(report(release_id, **LATE), status)
+
+    assert after_race, 'the status changed after the first check passed'
+    assert after_race['status'] == status
+    assert store.get_work_item(release_id).status == status, 'the Release is not reopened'
+    assert WorkItemReleaseDetail.objects.filter(work_item_id=release_id, candidate_sha__isnull=False).count() == 0
+    assert candidate_events(release_id) == [], 'no release_candidate_recorded event'
+    assert WorkItemComment.objects.filter(work_item_id=release_id).count() == 0, 'no note, no native-build comment'
+    assert kinds(release_id) == after_race['kinds'] == ['requested', 'done' if status == 'done' else 'abandoned']
+    snapshot = local_snapshot(release_id)
+    assert snapshot == {k: v for k, v in after_race.items() if k != 'kinds'}, 'the report left nothing behind'
+
+
+JIRA_STATUS = {'in-review': 'In Review', 'done': 'Done', 'cancelled': 'Abandoned'}
+
+
+def jira_snapshot(instance, key, release_id):
+    """`core`'s side plus Jira's: every request the fake Jira has received
+    (field pushes, comment posts, transitions) and the ticket's own state."""
+    return {
+        **local_snapshot(release_id),
+        'jira_requests': len(instance.handler.received),
+        'jira_status': instance.status_of(key),
+        'jira_fields': dict(instance.issues[key]['fields']),
+        'completions': JiraWriteCompletion.objects.count(),
+        'failures': WebhookFailure.objects.count(),
+    }
+
+
+@pytest.mark.parametrize('status', ['proposed', 'in-review', 'done', 'cancelled'])
+def test_jira_a_report_for_a_release_not_in_progress_is_refused_and_makes_no_jira_write(
+        clean_db, release_fields, jira_instance, status):  # noqa: F811
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    # Created in Backlog, the request pushes In Progress; `core` holds
+    # `proposed` until the In Progress webhook, then the ticket moves on.
+    key = jira_release(jira_instance)
+    handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    item = WorkItem.objects.get(external_key=key)
+    if status != 'proposed':
+        record_in_progress(jira_instance, key)
+        jira_instance.issues[key]['status'] = JIRA_STATUS[status]
+        handle_webhook_envelope(status_webhook(jira_instance, key, JIRA_STATUS[status], 'In Progress'))
+    item.refresh_from_db()
+    assert item.status == status
+    before = jira_snapshot(jira_instance, key, item.id)
+
+    assert_refused(report(item.id, **LATE), status)
+
+    assert jira_snapshot(jira_instance, key, item.id) == before, \
+        'no status change, no candidate, no comment, no event and no Jira write'
+    assert requests_to('PUT', f'/issue/{key}') == [], 'no field push'
+    assert posted_comment_texts() == [], 'no comment posted'
+
+
+def test_jira_a_report_for_an_in_progress_release_is_still_pushed(
+        clean_db, release_fields, jira_instance):  # noqa: F811
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    key = jira_release(jira_instance, status='In Progress')
+    handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    record_in_progress(jira_instance, key)
+    item = WorkItem.objects.get(external_key=key)
+
+    assert report(item.id, **LATE).status_code == 202
+
+    assert jira_instance.issues[key]['fields']['cf_sha'] == 'late999'
+    assert posted_comment_texts() == ['[jenkins] Native build (success): https://ci.example/native/99']
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +662,7 @@ def test_local_a_report_with_a_native_build_leaves_one_note_and_one_native_build
                 nativeBuildUrl='https://ci.example/native/12', nativeBuildStatus='success')
 
     assert report(release_id, **body).status_code == 200
+    move_back_to_in_progress(release_id)  # a report is accepted only at `in-progress` (REQ-09)
     assert report(release_id, **body).status_code == 200  # a repeated report, same SHA
 
     bodies = [c.body for c in WorkItemComment.objects.filter(work_item_id=release_id)]
@@ -511,6 +699,7 @@ def test_jira_a_report_with_no_candidate_field_id_configured_fails_the_job_and_r
     project_config.set_mode(PROJECT, 'jira')
     key = jira_release(jira_instance, status='In Progress')
     handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    record_in_progress(jira_instance, key)  # a report is accepted only at `in-progress` (REQ-09)
     release_id = WorkItem.objects.get(external_key=key).id
 
     response = report(release_id, candidateSha='abc1234', buildIdentifier='b-7',
@@ -531,6 +720,7 @@ def test_jira_the_native_build_comment_precedes_the_note_and_is_recorded_only_fr
     project_config.set_mode(PROJECT, 'jira')
     key = jira_release(jira_instance, status='In Progress')
     handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    record_in_progress(jira_instance, key)  # a report is accepted only at `in-progress` (REQ-09)
     item = WorkItem.objects.get(external_key=key)
     body = dict(candidateSha='abc1234', buildIdentifier='b-7', previewUrl='https://preview.example/abc1234',
                 nativeBuildUrl='https://ci.example/native/12', nativeBuildStatus='success')
@@ -571,6 +761,7 @@ def test_jira_the_candidate_is_recorded_from_one_webhook_and_published_once(
     project_config.set_mode(PROJECT, 'jira')
     key = jira_release(jira_instance, status='In Progress')
     handle_webhook_envelope(webhook(jira_instance, key, 'jira:issue_created'))
+    record_in_progress(jira_instance, key)  # a report is accepted only at `in-progress` (REQ-09)
     item = WorkItem.objects.get(external_key=key)
 
     report(item.id, candidateSha='abc1234', buildIdentifier='b-7', previewUrl='https://preview.example/abc1234')

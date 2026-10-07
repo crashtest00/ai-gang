@@ -331,7 +331,12 @@ def admin_record_release_candidate(request, work_item_id):
     nothing, and this returns 202, since the canonical row changes only when
     Jira's webhook returns. Either way the native build becomes one comment
     (REQ-12). This view holds no transaction, so a failed push returns its
-    error to the job."""
+    error to the job.
+
+    The report is accepted only for a Release `core` holds at `in-progress`
+    (REQ-09). For any other status the store refuses it before anything is
+    recorded, commented or pushed, and this returns 400 `VALIDATION_ERROR`,
+    which fails the job's `curl -sf` visibly."""
     try:
         actor = request.headers.get('X-Actor', 'jenkins')
         body = json.loads(request.body or b'{}')
