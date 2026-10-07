@@ -264,6 +264,7 @@ test('a repository.url carrying whitespace or a newline is rejected', () => {
 test('a project configuration is still valid with no repository object at all', () => {
   const config = valid();
   delete config.repository;
+  delete config.authMethod;
   const result = validateConfigText(JSON.stringify(config));
   assert.equal(result.valid, true);
   assert.deepEqual(result.decisions, { name: 'acceptance-project', type: 'web', stack: 'node-express' });
