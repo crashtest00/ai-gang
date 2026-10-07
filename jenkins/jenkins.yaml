@@ -154,12 +154,14 @@ jobs:
                   stage('Report candidate back to the release') {
                     steps {
                       script {
-                        // The candidate fields, the comment and the In Review transition
-                        // are all Django-decided side effects of this one call
-                        // (store.record_release_candidate), in every mode (V5.2 Canonical
-                        // Delivery State REQ-06) — the work item is still `in-progress`
-                        // when this job runs (a request moves it there, V5.3 REQ-09), and
-                        // `core` moves it to `in-review` on this report, so there is no
+                        // One call, store.report_release_candidate, and core decides the
+                        // rest by mode (V5.2 Canonical Delivery State REQ-06): in Jira mode
+                        // it pushes the three candidate fields to Jira in one edit and the
+                        // candidate is recorded from Jira's webhook, the In Review
+                        // transition being the writer's; in local mode it records the
+                        // candidate directly and moves the Release to in-review (V5.3
+                        // REQ-13, REQ-09). The work item is still `in-progress` when this
+                        // job runs (a request moves it there, V5.3 REQ-09), so there is no
                         // separate status transition to make here. The native build's
                         // URL and status ride along only when a native build ran (V5.3
                         // REQ-12); a report without one carries neither field.
