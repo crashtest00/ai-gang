@@ -860,7 +860,9 @@ def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
       record  (local mode) the native-build comment, then the fields and the
               recording step (`record_release_candidate`), then the move to
               `in-review` (REQ-09), origin `origin` — the same order Jira mode
-              reaches them in. Returns the work item.
+              reaches them in — all in ONE transaction that first re-checks
+              `in-progress` under the Release's row lock. Returns the work
+              item.
 
     The native-build comment is keyed `release-candidate:<sha>:native-build`,
     so a repeated report with the same SHA posts it once, in either mode.
@@ -875,13 +877,15 @@ def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
     late report therefore never reopens a finished Release, and the next
     Done never publishes a second `done`. A new candidate for an `in-review`
     Release needs it moved back to `in-progress` first, a move that
-    publishes no release event (`_release_event_kind`)."""
+    publishes no release event (`_release_event_kind`).
+
+    In local mode the same check is made again under the Release's row lock,
+    in the transaction that posts the native-build comment, records the
+    candidate and makes the `in-review` move, so a cancel or Done that
+    commits after the first check refuses the report the same way and
+    leaves nothing of it behind."""
     item = _get_release(work_item_id, 'reportReleaseCandidate')
-    if item.status != 'in-progress':
-        raise ValidationError(
-            f'reportReleaseCandidate: release {work_item_id} is at "{item.status}"; a candidate is '
-            'reported only for a release at "in-progress" — move it back to "in-progress" first'
-        )
+    _refuse_report_unless_in_progress(item)
 
     verdict = write_gate.route(item.project, origin)
     if verdict == write_gate.REFUSE:
@@ -902,12 +906,44 @@ def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifi
         post_native_build_comment()
         return result
 
-    post_native_build_comment()
-    record_release_candidate(
-        work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
-        preview_url=preview_url, actor=author,
-    )
-    return transition_status(work_item_id, 'in-review', actor=author, origin=origin)
+    with transaction.atomic():
+        # The guard above ran unlocked. A cancel or a Done that commits
+        # after it would otherwise be overwritten by the move below, which
+        # checks no transition graph; so the status is checked again here
+        # under the Release's row lock, and the comment, the record and the
+        # move land together on an `in-progress` Release or not at all.
+        locked = WorkItem.objects.select_for_update().filter(id=item.id).first()
+        _refuse_report_unless_in_progress(locked)
+        post_native_build_comment()
+        record_release_candidate(
+            work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url, actor=author,
+        )
+        # The atomic core, not `transition_status`: `in-progress` ->
+        # `in-review` runs no release gate (that is `proposed` ->
+        # `in-progress` only), and this branch is already routed RECORD, so
+        # `transition_status` would add only a second `write_gate.route`,
+        # whose PUSH branch makes a Jira call — never to be made inside this
+        # open transaction, should the project's mode change mid-report.
+        return _transition_status_core(work_item_id, 'in-review', actor=author, origin=origin)
+
+
+def _refuse_report_unless_in_progress(item: WorkItem) -> None:
+    """REQ-09's precondition on a release-candidate report: `core` holds the
+    Release at `in-progress`. The advice to move the Release back to
+    `in-progress` is given only for `in-review`, the one status REQ-09 says
+    takes a new candidate that way; for `done` or `cancelled` that move
+    would lead to a second `done`, and for `proposed` it is the release
+    request itself."""
+    if item.status == 'in-progress':
+        return
+    message = (f'reportReleaseCandidate: release {item.id} is at "{item.status}"; a candidate is '
+               'reported only for a release at "in-progress"')
+    if item.status == 'in-review':
+        message += ' — move it back to "in-progress" first'
+    elif item.status == 'proposed':
+        message += ' — the release must be requested first'
+    raise ValidationError(message)
 
 
 def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:

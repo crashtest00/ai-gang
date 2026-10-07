@@ -322,10 +322,22 @@ def local_snapshot(release_id):
     }
 
 
-def assert_refused(response):
+MOVE_BACK = 'move it back to "in-progress" first'
+REQUEST_FIRST = 'the release must be requested first'
+
+
+def assert_refused(response, status):
+    """Refused with a 4xx; the message names the status, and only an
+    `in-review` Release is told to move back to `in-progress` (REQ-09 scopes
+    that to `in-review`: for `done` or `cancelled` it would lead to a second
+    `done`, and for `proposed` it is the release request itself)."""
     assert 400 <= response.status_code < 500, (response.status_code, response.content)
     assert response.json()['error'] == 'VALIDATION_ERROR'
-    assert '"in-progress"' in response.json()['message']
+    message = response.json()['message']
+    assert f'is at "{status}"' in message
+    assert 'reported only for a release at "in-progress"' in message
+    assert (MOVE_BACK in message) == (status == 'in-review'), message
+    assert (REQUEST_FIRST in message) == (status == 'proposed'), message
 
 
 def local_release_at(status):
@@ -350,7 +362,7 @@ def test_local_a_report_for_a_release_not_in_progress_is_refused_and_changes_not
     release_id = local_release_at(status)
     before = local_snapshot(release_id)
 
-    assert_refused(report(release_id, **LATE))
+    assert_refused(report(release_id, **LATE), status)
 
     assert local_snapshot(release_id) == before, 'no status change, no candidate, no comment, no event'
     if status == 'done':
@@ -368,6 +380,41 @@ def test_local_an_in_review_release_moved_back_to_in_progress_takes_a_new_candid
     assert WorkItemReleaseDetail.objects.get(work_item_id=release_id).candidate_sha == 'def5678'
     assert [e.payload['candidateSha'] for e in candidate_events(release_id)] == ['abc1234', 'def5678']
     assert kinds(release_id) == ['requested']
+
+
+@pytest.mark.parametrize('status', ['cancelled', 'done'])
+def test_local_a_release_finished_after_the_first_check_refuses_the_report_and_keeps_nothing(
+        clean_db, monkeypatch, status):
+    """The race REQ-09 rules out: the report passes its first, unlocked check
+    at `in-progress`, and a cancel or Done commits before the record. The
+    status change is made through the store's own transition from inside
+    `native_build_comment_text`, which the report calls after that check and
+    before its locked block; the report must then be refused under the lock
+    and leave nothing — no reopened Release, no candidate, no comment, no
+    event."""
+    release_id = local_release_at('in-progress')
+    after_race = {}
+    real_text = store.native_build_comment_text
+
+    def finish_then_text(*args, **kwargs):
+        store.transition_status(release_id, status, actor='scrummaster')
+        after_race.update(local_snapshot(release_id))
+        after_race['kinds'] = kinds(release_id)
+        return real_text(*args, **kwargs)
+
+    monkeypatch.setattr(store, 'native_build_comment_text', finish_then_text)
+
+    assert_refused(report(release_id, **LATE), status)
+
+    assert after_race, 'the status changed after the first check passed'
+    assert after_race['status'] == status
+    assert store.get_work_item(release_id).status == status, 'the Release is not reopened'
+    assert WorkItemReleaseDetail.objects.filter(work_item_id=release_id, candidate_sha__isnull=False).count() == 0
+    assert candidate_events(release_id) == [], 'no release_candidate_recorded event'
+    assert WorkItemComment.objects.filter(work_item_id=release_id).count() == 0, 'no note, no native-build comment'
+    assert kinds(release_id) == after_race['kinds'] == ['requested', 'done' if status == 'done' else 'abandoned']
+    snapshot = local_snapshot(release_id)
+    assert snapshot == {k: v for k, v in after_race.items() if k != 'kinds'}, 'the report left nothing behind'
 
 
 JIRA_STATUS = {'in-review': 'In Review', 'done': 'Done', 'cancelled': 'Abandoned'}
@@ -403,7 +450,7 @@ def test_jira_a_report_for_a_release_not_in_progress_is_refused_and_makes_no_jir
     assert item.status == status
     before = jira_snapshot(jira_instance, key, item.id)
 
-    assert_refused(report(item.id, **LATE))
+    assert_refused(report(item.id, **LATE), status)
 
     assert jira_snapshot(jira_instance, key, item.id) == before, \
         'no status change, no candidate, no comment, no event and no Jira write'
