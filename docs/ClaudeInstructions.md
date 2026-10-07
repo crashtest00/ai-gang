@@ -43,8 +43,9 @@ it — Phases 0 to 4 — is how a customer project is set up on a running AI
 Gang. Platform startup performs that project setup once, unattended, for
 the one project its configuration names.*
 
-An operator with Docker installed, an Anthropic API key, and an empty
-GitHub repository already created for the project reaches a running AI
+An operator with Docker installed, a Claude credential (an Anthropic API
+key for `authMethod` `api-key`, or an OAuth token from `claude setup-token`
+for `oauth-token`), and an empty GitHub repository already created for the project reaches a running AI
 Gang in six steps and one command:
 
 1. Clone AI Gang.
@@ -541,7 +542,7 @@ equivalent guidance) rather than an empty, unexplained repository.
 
 Creates:
 - `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
-- `projects/<name>/.env` — `PROJECT_NAME`, `REDIS_HOST`, `ANTHROPIC_API_KEY`, `GITHUB_URL`, `GH_TOKEN`
+- `projects/<name>/.env` — `PROJECT_NAME`, `REDIS_HOST`, the Claude credential (`ANTHROPIC_API_KEY` for `authMethod` `api-key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth-token`), `GITHUB_URL`, `GH_TOKEN`
 - `projects/<name>/src/CLAUDE.md` — project map stub
 - GitHub branches `dev`, `beta`, `prod` with branch protection rules
 
@@ -578,7 +579,7 @@ docker ps  # verify running
 ```
 
 **Each container's `.env` must have**:
-- `ANTHROPIC_API_KEY` — Claude Code auth
+- `ANTHROPIC_API_KEY` — Claude Code auth when the platform's `authMethod` is `api-key`; `CLAUDE_CODE_OAUTH_TOKEN` instead when it is `oauth-token` (mint it once with `claude setup-token` and paste it into `.env`)
 - `PROJECT_NAME` — must match the project name used at 3.1 (and the Jira project name, if `--connect-jira` was used)
 - `REDIS_HOST=ai-gang-redis`
 - `AGENT_CHANNEL_SUFFIX=<role>` — e.g. `backend`, `frontend`, `mobile`, `api`
@@ -842,7 +843,7 @@ Update the value in the relevant `.env` file, then restart the service that uses
 curl -X POST http://localhost:8080/configuration-as-code/reload \
   -u "admin:$JENKINS_ADMIN_PASSWORD" -H "$(get_crumb)"
 
-# App container (e.g. ANTHROPIC_API_KEY)
+# App container (e.g. ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)
 cd ~/ai-gang/projects/<name> && docker compose restart
 ```
 

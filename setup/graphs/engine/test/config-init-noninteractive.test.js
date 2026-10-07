@@ -25,11 +25,26 @@ const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'init-project.sh');
 
 const BASE_CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
 };
 
-function makeIsolatedEnv({ hqEnvLines = null } = {}) {
+// init-project.sh takes the authentication method from the PLATFORM
+// configuration in every mode, never from the project's --config file, and
+// refuses to start without a valid one. AIGANG_CONFIG_FILE is the override
+// platform startup itself uses to name it.
+function writePlatformConfig(root, authMethod = 'api-key') {
+  const file = path.join(root, 'platform.config.json');
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 2,
+    authMethod,
+    project: { name: 'platform-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  return file;
+}
+
+function makeIsolatedEnv({ hqEnvLines = null, authMethod = 'api-key' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-noninteractive-'));
   const projectsDir = path.join(root, 'projects');
   fs.mkdirSync(projectsDir, { recursive: true });
@@ -44,6 +59,7 @@ function makeIsolatedEnv({ hqEnvLines = null } = {}) {
     AIGANG_PROJECTS_DIR: projectsDir,
     AIGANG_PROJECTS_CONFIG: projectsConfigPath,
     HQ_ENV: hqEnvLines === null ? path.join(root, 'nonexistent.env') : hqEnvPath,
+    AIGANG_CONFIG_FILE: writePlatformConfig(root, authMethod),
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid',
   };
@@ -269,32 +285,139 @@ test('without --config the confirmation still has to be answered', () => {
 
 // ---- the environment file is data, not a script ----
 
-test('a value in the environment file that looks like a command is a value', () => {
-  // The platform .env holds a password somebody invented. Executing the
-  // file — which is what sourcing it does — would expand a $, a backtick
-  // or a $(...) in any of these values, and run it.
-  const { root, projectsDir, env } = makeIsolatedEnv({ hqEnvLines: '' });
-  const canary = path.join(root, 'executed');
-  const backtickCanary = path.join(root, 'also-executed');
-  const key = `sk-$(touch ${canary})-\`touch ${backtickCanary}\`-not-a-real-key`;
-  fs.writeFileSync(env.HQ_ENV, [
-    'GH_TOKEN=github_pat_test_not_a_real_token',
-    `ANTHROPIC_API_KEY=${key}`,
-    `AIGANG_ADMIN_PASSWORD=$(touch ${canary})`,
-    '',
-  ].join('\n'));
+// Each authentication method's credential, and the one it must not write.
+const METHOD_CREDENTIALS = [
+  { authMethod: 'api-key', credential: 'ANTHROPIC_API_KEY', other: 'CLAUDE_CODE_OAUTH_TOKEN' },
+  { authMethod: 'oauth-token', credential: 'CLAUDE_CODE_OAUTH_TOKEN', other: 'ANTHROPIC_API_KEY' },
+];
 
-  const remote = makeBareRepo(root);
-  const configFile = writeConfig(root, { ...BASE_CONFIG, repository: { url: remote } });
-  const result = runWithNoTerminal(['--config', configFile], env);
+for (const { authMethod, credential, other } of METHOD_CREDENTIALS) {
+  test(`a value in the environment file that looks like a command is a value (${authMethod})`, () => {
+    // The platform .env holds a password somebody invented. Executing the
+    // file — which is what sourcing it does — would expand a $, a backtick
+    // or a $(...) in any of these values, and run it.
+    const { root, projectsDir, env } = makeIsolatedEnv({ hqEnvLines: '', authMethod });
+    const canary = path.join(root, 'executed');
+    const backtickCanary = path.join(root, 'also-executed');
+    const key = `sk-$(touch ${canary})-\`touch ${backtickCanary}\`-not-a-real-key`;
+    fs.writeFileSync(env.HQ_ENV, [
+      'GH_TOKEN=github_pat_test_not_a_real_token',
+      `${credential}=${key}`,
+      `AIGANG_ADMIN_PASSWORD=$(touch ${canary})`,
+      '',
+    ].join('\n'));
 
+    const remote = makeBareRepo(root);
+    const configFile = writeConfig(root, { ...BASE_CONFIG, repository: { url: remote } });
+    const result = runWithNoTerminal(['--config', configFile], env);
+
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(fs.existsSync(canary), false, 'a $(...) in an environment value must not run');
+    assert.equal(fs.existsSync(backtickCanary), false, 'a backtick in an environment value must not run');
+
+    // ...and the value still arrived, byte for byte.
+    const projectEnv = fs.readFileSync(path.join(projectsDir, 'acceptance-project', '.env'), 'utf8');
+    assert.ok(projectEnv.includes(`${credential}=${key}`), `the credential was not carried over literally:\n${projectEnv}`);
+  });
+
+  test(`the project's .env assigns the ${authMethod} credential and has no line at all for the other`, () => {
+    // Both credentials sit in the platform .env, the way the harness keeps
+    // them; only the configured method's is written to the project.
+    const { root, projectsDir, env } = makeIsolatedEnv({
+      hqEnvLines: `GH_TOKEN=github_pat_test_not_a_real_token\n${credential}=value-for-${authMethod}-0123\n${other}=value-for-the-other-0123\n`,
+      authMethod,
+    });
+    const configFile = writeConfig(root, BASE_CONFIG);
+    const result = runWithNoTerminal(['--config', configFile], env);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+    const projectEnv = fs.readFileSync(path.join(projectsDir, 'acceptance-project', '.env'), 'utf8');
+    assert.match(projectEnv, new RegExp(`^${credential}=value-for-${authMethod}-0123$`, 'm'));
+    assert.equal(projectEnv.includes(other), false, `no line for ${other} at all:\n${projectEnv}`);
+    assert.equal(projectEnv.includes('value-for-the-other'), false);
+  });
+
+  test(`a ${authMethod} run with the credential absent warns, naming that credential`, () => {
+    const { root, env } = makeIsolatedEnv({ hqEnvLines: 'GH_TOKEN=github_pat_test_not_a_real_token\n', authMethod });
+    const result = runWithNoTerminal(['--config', writeConfig(root, BASE_CONFIG)], env);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, new RegExp(`\\*\\* ${credential} not found in`));
+    assert.equal(result.stdout.includes(other), false, result.stdout);
+  });
+}
+
+// ---- the method comes from the platform configuration, in every mode ----
+
+test('an oauth-token platform: an interactive run writes the token too', () => {
+  const { root, projectsDir, env } = makeIsolatedEnv({
+    hqEnvLines: 'GH_TOKEN=github_pat_test_not_a_real_token\nCLAUDE_CODE_OAUTH_TOKEN=interactive-token-0123\nANTHROPIC_API_KEY=a-stray-key-0123\n',
+    authMethod: 'oauth-token',
+  });
+  const result = spawnSync('bash', [SCRIPT_PATH], {
+    cwd: REPO_ROOT,
+    env,
+    input: 'web\ninteractive-project\n\ny\n',
+    encoding: 'utf8',
+    timeout: 60000,
+  });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.equal(fs.existsSync(canary), false, 'a $(...) in an environment value must not run');
-  assert.equal(fs.existsSync(backtickCanary), false, 'a backtick in an environment value must not run');
+  const projectEnv = fs.readFileSync(path.join(projectsDir, 'interactive-project', '.env'), 'utf8');
+  assert.match(projectEnv, /^CLAUDE_CODE_OAUTH_TOKEN=interactive-token-0123$/m);
+  assert.equal(projectEnv.includes('ANTHROPIC_API_KEY'), false, projectEnv);
+});
 
-  // ...and the value still arrived, byte for byte.
+test('a project configuration naming a different authMethod does not override the platform', () => {
+  const { root, projectsDir, env } = makeIsolatedEnv({
+    hqEnvLines: 'GH_TOKEN=github_pat_test_not_a_real_token\nCLAUDE_CODE_OAUTH_TOKEN=platform-token-0123\nANTHROPIC_API_KEY=a-key-0123\n',
+    authMethod: 'oauth-token',
+  });
+  const configFile = writeConfig(root, { ...BASE_CONFIG, authMethod: 'api-key' });
+  const result = runWithNoTerminal(['--config', configFile], env);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const projectEnv = fs.readFileSync(path.join(projectsDir, 'acceptance-project', '.env'), 'utf8');
-  assert.ok(projectEnv.includes(`ANTHROPIC_API_KEY=${key}`), `the key was not carried over literally:\n${projectEnv}`);
+  assert.match(projectEnv, /^CLAUDE_CODE_OAUTH_TOKEN=platform-token-0123$/m);
+  assert.equal(projectEnv.includes('ANTHROPIC_API_KEY'), false, projectEnv);
+});
+
+test('with no platform configuration, a --config run refuses before creating anything, naming the file', () => {
+  const { root, projectsDir, projectsConfigPath, env } = makeIsolatedEnv();
+  const missing = path.join(root, 'no-such-platform.json');
+  const result = runWithNoTerminal(['--config', writeConfig(root, BASE_CONFIG)], { ...env, AIGANG_CONFIG_FILE: missing });
+  assert.notEqual(result.status, 0);
+  assert.ok(result.stderr.includes(missing), result.stderr);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(projectsConfigPath, 'utf8')).projects, []);
+});
+
+test('with no platform configuration, an interactive run refuses before asking or creating anything', () => {
+  const { root, projectsDir, env } = makeIsolatedEnv();
+  const missing = path.join(root, 'no-such-platform.json');
+  const result = spawnSync('bash', [SCRIPT_PATH], {
+    cwd: REPO_ROOT,
+    env: { ...env, AIGANG_CONFIG_FILE: missing },
+    input: 'web\ninteractive-project\n\ny\n',
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.ok(result.stderr.includes(missing), result.stderr);
+  assert.equal(result.stdout.includes('Deployment target'), false, 'nothing is asked before the refusal');
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+});
+
+test('an invalid platform configuration is refused before anything is created, with the validator\'s reason', () => {
+  const { root, projectsDir, env } = makeIsolatedEnv();
+  const bad = path.join(root, 'bad-platform.json');
+  fs.writeFileSync(bad, JSON.stringify({
+    schemaVersion: 2,
+    project: { name: 'platform-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  const result = runWithNoTerminal(['--config', writeConfig(root, BASE_CONFIG)], { ...env, AIGANG_CONFIG_FILE: bad });
+  assert.notEqual(result.status, 0);
+  assert.ok(result.stderr.includes(bad), result.stderr);
+  assert.match(result.stderr, /missing required field "authMethod"/);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
 });
 
 // ---- the project's own environment file holds two secrets ----

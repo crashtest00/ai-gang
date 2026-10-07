@@ -43,7 +43,8 @@ function validateConfigText(text) {
 
 function valid(overrides = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
     ...overrides,
@@ -58,8 +59,10 @@ test('the template ships at the repository root, where an operator copies it fro
 
 test('the shipped template is itself valid JSON with the expected shape', () => {
   const doc = JSON.parse(fs.readFileSync(PLATFORM_TEMPLATE_PATH, 'utf8'));
-  assert.equal(doc.schemaVersion, 1);
-  assert.deepEqual(Object.keys(doc).sort(), ['project', 'repository', 'schemaVersion']);
+  assert.equal(doc.schemaVersion, 2);
+  assert.equal(typeof doc.authMethod, 'string');
+  assert.notEqual(doc.authMethod, '');
+  assert.deepEqual(Object.keys(doc).sort(), ['authMethod', 'project', 'repository', 'schemaVersion']);
   assert.deepEqual(Object.keys(doc.project).sort(), ['name', 'stack', 'type']);
   assert.deepEqual(Object.keys(doc.repository), ['url']);
 });
@@ -67,12 +70,28 @@ test('the shipped template is itself valid JSON with the expected shape', () => 
 test('the unedited template is rejected, naming every field left unfilled', () => {
   const result = validatePlatformConfigFile(PLATFORM_TEMPLATE_PATH);
   assert.equal(result.valid, false);
-  for (const field of ['project.name', 'project.type', 'project.stack', 'repository.url']) {
+  for (const field of ['authMethod', 'project.name', 'project.type', 'project.stack', 'repository.url']) {
     assert.ok(
       result.errors.some((e) => e.includes(`"${field}"`) && /placeholder/.test(e)),
       `expected a placeholder diagnostic naming ${field}, got: ${result.errors.join(' | ')}`
     );
   }
+});
+
+test('the authMethod placeholder diagnostic lists both supported values', () => {
+  const result = validatePlatformConfigFile(PLATFORM_TEMPLATE_PATH);
+  const methodError = result.errors.find((e) => e.includes('"authMethod"'));
+  assert.match(methodError, /api-key/);
+  assert.match(methodError, /oauth-token/);
+});
+
+test('the template with only authMethod left at its placeholder is rejected, naming authMethod alone', () => {
+  const doc = JSON.parse(fs.readFileSync(PLATFORM_TEMPLATE_PATH, 'utf8'));
+  const config = valid({ authMethod: doc.authMethod });
+  const result = validatePlatformConfigText(JSON.stringify(config));
+  assert.equal(result.valid, false);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0], /"authMethod" is still at its ai-gang\.config\.template\.json placeholder/);
 });
 
 test('a placeholder diagnostic for a catalog-backed field lists the supported values', () => {
@@ -102,7 +121,51 @@ test('a complete platform configuration validates and yields the repository URL'
     type: 'web',
     stack: 'node-express',
     repositoryUrl: 'https://github.com/an-org/a-repo.git',
+    authMethod: 'api-key',
   });
+});
+
+// ---- the authentication method ----
+
+test('a platform configuration naming each supported method validates', () => {
+  for (const authMethod of ['api-key', 'oauth-token']) {
+    const result = validatePlatformConfigText(JSON.stringify(valid({ authMethod })));
+    assert.equal(result.valid, true, result.errors.join(' | '));
+    assert.equal(result.decisions.authMethod, authMethod);
+  }
+});
+
+test('a platform configuration without authMethod is rejected, naming it', () => {
+  const config = valid();
+  delete config.authMethod;
+  const result = validatePlatformConfigText(JSON.stringify(config));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => /missing required field "authMethod"/.test(e)));
+});
+
+test('an authMethod outside api-key and oauth-token is rejected, listing both', () => {
+  for (const bad of ['subscription-token', 'API-KEY', 'bearer']) {
+    const result = validatePlatformConfigText(JSON.stringify(valid({ authMethod: bad })));
+    assert.equal(result.valid, false, `${bad} should have been refused`);
+    assert.ok(
+      result.errors.some((e) => e.includes(`"${bad}"`) && /supported: api-key, oauth-token/.test(e)),
+      result.errors.join(' | ')
+    );
+  }
+});
+
+test('an authMethod that is not a nonempty string is rejected', () => {
+  for (const bad of [7, '', null, ['api-key']]) {
+    const result = validatePlatformConfigText(JSON.stringify(valid({ authMethod: bad })));
+    assert.equal(result.valid, false, `${JSON.stringify(bad)} should have been refused`);
+    assert.ok(result.errors.some((e) => /"authMethod" must be a nonempty string/.test(e)), result.errors.join(' | '));
+  }
+});
+
+test('a platform configuration at schemaVersion 1 is rejected', () => {
+  const result = validatePlatformConfigText(JSON.stringify(valid({ schemaVersion: 1 })));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => /unsupported schemaVersion 1 \(only 2 is supported\)/.test(e)));
 });
 
 test('a platform configuration without a repository object is rejected', () => {

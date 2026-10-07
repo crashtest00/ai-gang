@@ -20,15 +20,24 @@
 #
 # Output, one variable per line:
 #   REQUIRED <NAME>
+#   REQUIRED_IN_METHOD <method> <NAME>
 #   OPTIONAL <NAME> <default>
 #
 # A REQUIRED variable is one .env.template ships empty: the operator must
 # fill it in, and a value still equal to the template's is refused.
+#
+# A REQUIRED_IN_METHOD variable is held to the same rule, but only when the
+# platform configuration's `authMethod` (ai-gang.config.json) is <method>.
+# It is how the contract expresses the Claude credential: one per supported
+# authentication method, and the only place those credential names are
+# written. scripts/init-project.sh and scripts/startup/initialize-project.sh
+# read the name for the configured method from here.
 
 set -euo pipefail
 
 cat <<'CONTRACT'
-REQUIRED ANTHROPIC_API_KEY
+REQUIRED_IN_METHOD api-key ANTHROPIC_API_KEY
+REQUIRED_IN_METHOD oauth-token CLAUDE_CODE_OAUTH_TOKEN
 REQUIRED GH_TOKEN
 REQUIRED AIGANG_ADMIN_USER
 REQUIRED AIGANG_ADMIN_EMAIL

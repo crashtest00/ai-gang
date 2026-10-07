@@ -15,9 +15,10 @@
 // validation failure to stderr, and prints nothing to stdout.
 //
 // `--platform` selects the platform configuration rules instead: the
-// `repository` object becomes required and every field is checked against
-// ai-gang.config.template.json's own placeholder values. That mode also
-// prints REPOSITORY_URL. It is what the platform startup steps under
+// `repository` object and `authMethod` become required and every field is
+// checked against ai-gang.config.template.json's own placeholder values.
+// That mode also prints REPOSITORY_URL and AUTH_METHOD. In project mode
+// each is printed only when the file carries it. It is what the platform startup steps under
 // scripts/startup/ validate ai-gang.config.json with, before any service
 // container exists.
 
@@ -52,12 +53,15 @@ function main(argv) {
     return 1;
   }
 
-  const { name, type, stack, repositoryUrl } = result.decisions;
+  const { name, type, stack, repositoryUrl, authMethod } = result.decisions;
   process.stdout.write(`PROJECT_NAME=${name}\n`);
   process.stdout.write(`PROJECT_TYPE=${type}\n`);
   process.stdout.write(`PROJECT_STACK=${stack}\n`);
   if (repositoryUrl !== undefined) {
     process.stdout.write(`REPOSITORY_URL=${repositoryUrl}\n`);
+  }
+  if (authMethod !== undefined) {
+    process.stdout.write(`AUTH_METHOD=${authMethod}\n`);
   }
   return 0;
 }

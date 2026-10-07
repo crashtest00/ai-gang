@@ -40,7 +40,7 @@ function validateConfigText(text) {
 
 function validExample(overrides = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
     ...overrides,
   };
@@ -60,7 +60,7 @@ test('validateConfigText: rejects malformed JSON', () => {
 });
 
 test('validateConfigText: rejects a duplicate key even when the duplicate value is itself harmless', () => {
-  const text = '{"schemaVersion":1,"schemaVersion":1,"project":{"name":"a","type":"web","stack":"node-express"}}';
+  const text = '{"schemaVersion":2,"schemaVersion":2,"project":{"name":"a","type":"web","stack":"node-express"}}';
   const result = validateConfigText(text);
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((e) => /duplicate key "schemaVersion"/.test(e)));
@@ -81,13 +81,39 @@ test('validateConfigText: rejects an unknown project field', () => {
 });
 
 test('validateConfigText: rejects an unsupported schemaVersion', () => {
-  const result = validateConfigText(JSON.stringify(validExample({ schemaVersion: 2 })));
+  const result = validateConfigText(JSON.stringify(validExample({ schemaVersion: 3 })));
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((e) => /unsupported schemaVersion/.test(e)));
 });
 
+test('validateConfigText: rejects schemaVersion 1, which the supported version replaced', () => {
+  const result = validateConfigText(JSON.stringify(validExample({ schemaVersion: 1 })));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => /unsupported schemaVersion 1 \(only 2 is supported\)/.test(e)));
+});
+
+test('validateConfigText: a project configuration may leave authMethod out', () => {
+  const result = validateConfigText(JSON.stringify(validExample()));
+  assert.equal(result.valid, true);
+  assert.equal('authMethod' in result.decisions, false);
+});
+
+test('validateConfigText: a project configuration carrying a supported authMethod validates and reports it', () => {
+  for (const authMethod of ['api-key', 'oauth-token']) {
+    const result = validateConfigText(JSON.stringify(validExample({ authMethod })));
+    assert.equal(result.valid, true, result.errors.join(' | '));
+    assert.equal(result.decisions.authMethod, authMethod);
+  }
+});
+
+test('validateConfigText: a project configuration is held to the two supported methods when it carries authMethod', () => {
+  const result = validateConfigText(JSON.stringify(validExample({ authMethod: 'subscription-token' })));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => /supported: api-key, oauth-token/.test(e)));
+});
+
 test('validateConfigText: rejects a schemaVersion of the wrong type', () => {
-  const result = validateConfigText(JSON.stringify(validExample({ schemaVersion: '1' })));
+  const result = validateConfigText(JSON.stringify(validExample({ schemaVersion: '2' })));
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((e) => /unsupported schemaVersion/.test(e)));
 });
@@ -101,13 +127,13 @@ test('validateConfigText: rejects a missing schemaVersion', () => {
 });
 
 test('validateConfigText: rejects a missing "project" object', () => {
-  const result = validateConfigText(JSON.stringify({ schemaVersion: 1 }));
+  const result = validateConfigText(JSON.stringify({ schemaVersion: 2 }));
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((e) => /missing required field "project"/.test(e)));
 });
 
 test('validateConfigText: rejects "project" as the wrong type', () => {
-  const result = validateConfigText(JSON.stringify({ schemaVersion: 1, project: 'web' }));
+  const result = validateConfigText(JSON.stringify({ schemaVersion: 2, project: 'web' }));
   assert.equal(result.valid, false);
   assert.ok(result.errors.some((e) => /"project" must be an object/.test(e)));
 });
