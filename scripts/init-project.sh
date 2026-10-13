@@ -148,6 +148,25 @@ if [[ -z "$AUTH_METHOD" || -z "$CREDENTIAL_VAR" ]]; then
   exit 1
 fi
 
+# --- Shared harness volume ---
+# Every project container mounts its own subdirectory of one shared named
+# volume at the agent harness's `projects/` directory, so the sessions its
+# agents write survive a recreate and Memory can copy them (Durable Agent
+# Session Record REQ-01). Memory's platform-startup step creates the volume
+# (scripts/startup/start-memory.sh); this script never does — a project
+# generated without it would start against a volume nobody copies from.
+# Like the platform configuration above, this runs ahead of every prompt
+# and every write.
+HARNESS_VOLUME=aigang-harness
+if ! command -v docker &> /dev/null; then
+  echo "Error: this script checks for Memory's shared harness volume with 'docker', but it was not found on PATH." >&2
+  exit 1
+fi
+if ! docker volume inspect "$HARNESS_VOLUME" > /dev/null 2>&1; then
+  echo "Error: the shared harness volume '$HARNESS_VOLUME' does not exist. Start Memory first — platform startup's start-memory step (scripts/startup/start-memory.sh), or docs/ClaudeInstructions.md \"2.6 Memory\" by hand — then re-run this script." >&2
+  exit 1
+fi
+
 CONFIG_PROJECT_NAME=""
 CONFIG_PROJECT_TYPE=""
 CONFIG_PROJECT_STACK=""
@@ -750,6 +769,21 @@ if [[ -n "$DESKTOP_FRAMEWORK" ]]; then
 fi
 bash "$SCRIPT_DIR/init-repo.sh" "${INIT_REPO_ARGS[@]}"
 
+# --- This project's subdirectory of the shared harness volume ---
+# Created whether or not docker-compose.yml already exists, so a volume
+# deleted and re-created empty gets it back on a re-run. Docker refuses to
+# start a container whose volume subpath is missing, and with a subpath
+# mount it is this directory, not the image, that carries the ownership of
+# what the harness writes: uid 1000, the `aigang` user the project images
+# create (REQ-01). Made with Memory's own image, which is present wherever
+# Memory's stack has been brought up.
+if ! docker run --rm --user 0:0 --entrypoint sh -v "$HARNESS_VOLUME:/harness" aigang-memory \
+    -c 'mkdir -p "/harness/$1" && chown 1000:1000 "/harness/$1"' sh "$PROJECT_NAME" > /dev/null; then
+  echo "Error: could not create $PROJECT_NAME's subdirectory of the shared harness volume '$HARNESS_VOLUME' (with Memory's image, aigang-memory — start Memory first)." >&2
+  exit 1
+fi
+echo "Harness volume: $HARNESS_VOLUME/$PROJECT_NAME (owned by uid 1000)"
+
 # --- Generate project files ---
 if [[ ! -f "$PROJECT_DIR/docker-compose.yml" ]]; then
   cat > "$PROJECT_DIR/docker-compose.yml" <<COMPOSE
@@ -763,6 +797,14 @@ services:
     volumes:
       - ./src:/workspace
       - ../../setup:/agent-docs:ro
+      # The agent harness's session folder, and nothing else of its
+      # configuration: this project's subdirectory of the shared harness
+      # volume, which Memory copies every session from.
+      - type: volume
+        source: harness
+        target: /home/aigang/.claude/projects
+        volume:
+          subpath: ${PROJECT_NAME}
     command: sh -c "gh auth setup-git && tail -f /dev/null"
     restart: unless-stopped
     networks:
@@ -771,6 +813,11 @@ services:
 networks:
   ai-gang:
     external: true
+
+volumes:
+  harness:
+    external: true
+    name: ${HARNESS_VOLUME}
 COMPOSE
   echo "Created: $PROJECT_DIR/docker-compose.yml"
 fi
