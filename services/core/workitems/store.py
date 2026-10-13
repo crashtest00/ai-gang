@@ -54,7 +54,7 @@ import uuid
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from artifacts.models import Artifact
@@ -62,6 +62,7 @@ from artifacts.models import Artifact
 from . import assignment, jira_writer, project_config, status_vocabulary, write_gate
 from .envelope import validate_envelope
 from .models import (
+    A2AArtifact, A2AConflict, A2AMessage, A2ATask, A2AVerdict,
     OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink,
     WorkItemReleaseDetail, WorkItemSpecificationLink, WorkItemStoryDetail,
 )
@@ -1365,3 +1366,503 @@ def _create_link_core(from_work_item_id, to_work_item_id, link_type: str, *,
     )
     return {'id': str(link.id), 'fromWorkItemId': str(from_work_item_id), 'toWorkItemId': str(to_work_item_id),
             'linkType': link_type, 'deduped': False}
+
+
+# ---------------------------------------------------------------------------
+# The durable A2A record (durable-a2a-message-record.md)
+# ---------------------------------------------------------------------------
+#
+# Two writes and two reads. Neither write is routed by tracker mode (§4,
+# "`core`'s write functions are routed by tracker mode", property 2): the work
+# tracker has no surface for an A2A envelope or a verdict, so both are
+# recorded in every mode, like `record_specification_link` and
+# `add_artifact_link`.
+#
+#   record_a2a_message   the archive group's write (a2a_archive.py): the Task
+#                        record, the message, its artifacts, or a content
+#                        conflict, with their outbox rows, in one transaction.
+#   record_a2a_verdict   the command consumer's `recordA2AVerdict` (REQ-04).
+#   get_a2a_task         REQ-06's direct read, access-logged.
+#   list_a2a_tasks       REQ-11's paged changed-since enumeration, not logged.
+#
+# A Task's current `state` is never stored. `a2a_task_record` derives it
+# from the messages and verdict rows it reads (REQ-01).
+
+A2A_EVENT_TASK_RECORDED = 'a2a.task_recorded'
+A2A_EVENT_MESSAGE_RECORDED = 'a2a.message_recorded'
+A2A_EVENT_ARTIFACT_RECORDED = 'a2a.artifact_recorded'
+A2A_EVENT_CONFLICT_RECORDED = 'a2a.conflict_recorded'
+A2A_EVENT_VERDICT_RECORDED = 'a2a.verdict_recorded'
+
+
+def _a2a_write_checkpoint(point: str, **detail) -> None:
+    """Called inside ``record_a2a_message``'s transaction at two points —
+    ``'task_inserted'`` and ``'message_inserted'`` — and does nothing. It is
+    where a test holds a transaction open (REQ-01's concurrent Task record and
+    its archive-versus-verdict commit order) or fails a write after its
+    insert (§4's rollback), so that those tests run the real write rather than
+    a copy of it."""
+
+
+def _resolve_a2a_association(task_id: str) -> tuple[Optional[uuid.UUID], Optional[str]]:
+    """REQ-09: a Task's work item is the one whose canonical id IS the Task's
+    own id, in both tracker modes (`taskStore.js`, "A Task's own id is the
+    work item's own canonical id, in both modes"). Nothing here reads
+    ``external_key``. Returns ``(work_item_id, None)``, or ``(None, why)``
+    when the id resolves to no work item — the Task is still recorded."""
+    try:
+        candidate = uuid.UUID(str(task_id))
+    except ValueError:
+        return None, f'the Task id {task_id!r} is not a canonical work item id'
+    if WorkItem.objects.filter(id=candidate).exists():
+        return candidate, None
+    return None, f'no canonical work item has the id {task_id}'
+
+
+def _parse_entry_id(entry_id: str) -> tuple[int, int]:
+    ms, _, seq = str(entry_id).partition('-')
+    return int(ms), int(seq or 0)
+
+
+def _raw_a2a_content(direction: str, envelope: dict) -> tuple[Any, Any, Any]:
+    """What REQ-05 compares: the A2A message, the state and the artifacts, as
+    the envelope carried them. The envelope around them may differ — a
+    dead-letter replay adds a ``correlationId`` — without being a
+    conflict."""
+    payload = envelope.get('payload') or {}
+    if direction == A2AMessage.DISPATCH:
+        return payload, None, None
+    return payload.get('message'), payload.get('state'), payload.get('artifacts')
+
+
+def _ensure_a2a_task(task_id: str, context_id: Optional[str], project: str, message_id: str,
+                     outbox_project: str) -> A2ATask:
+    """REQ-01: the Task record, created from the Task's first archived
+    message, or found when it exists — including when another stream's
+    archive consumer inserted it concurrently: the insert then waits for that
+    transaction, fails on the primary key once it commits, and the savepoint
+    lets this transaction read the committed record and go on."""
+    task = A2ATask.objects.filter(id=task_id).first()
+    if task is not None:
+        return task
+    work_item_id, association_error = _resolve_a2a_association(task_id)
+    try:
+        with transaction.atomic():
+            task = A2ATask.objects.create(
+                id=task_id, context_id=context_id, project=project, work_item_id=work_item_id,
+                association_error=association_error, created_from_message_id=message_id,
+                created_at=timezone.now(),
+            )
+            _a2a_write_checkpoint('task_inserted', task_id=task_id, message_id=message_id)
+    except IntegrityError:
+        return A2ATask.objects.get(id=task_id)
+    _write_outbox_event(
+        project=outbox_project, event_type=A2A_EVENT_TASK_RECORDED, work_item_id=work_item_id,
+        payload={'taskId': task_id},
+    )
+    return task
+
+
+def _record_a2a_conflict(existing: A2AMessage, *, stream: str, entry_id: str, envelope: dict,
+                         outbox_project: str) -> dict:
+    """REQ-05: the stored message stays as it is; the conflicting entry is
+    recorded once per stream entry, with its outbox row."""
+    try:
+        with transaction.atomic():
+            conflict = A2AConflict.objects.create(
+                task_id=existing.task_id, message_id=existing.message_id, stream=stream, entry_id=entry_id,
+                envelope=envelope, recorded_at=timezone.now(),
+            )
+    except IntegrityError:
+        return {'stored': False, 'conflict': True, 'recorded': False, 'messageId': existing.message_id}
+    task = A2ATask.objects.get(id=existing.task_id)
+    _write_outbox_event(
+        project=outbox_project, event_type=A2A_EVENT_CONFLICT_RECORDED, work_item_id=task.work_item_id,
+        payload={'taskId': existing.task_id, 'messageId': existing.message_id, 'stream': stream, 'entryId': entry_id},
+    )
+    logger.warning('[a2a] %s entry %s carries A2A message %s, already stored with different content — '
+                   'recorded as conflict %s', stream, entry_id, existing.message_id, conflict.id)
+    return {'stored': False, 'conflict': True, 'recorded': True, 'messageId': existing.message_id}
+
+
+def _already_stored_a2a_message(existing: A2AMessage, *, direction: str, stream: str, entry_id: str,
+                                envelope: dict, outbox_project: str) -> dict:
+    if _raw_a2a_content(existing.direction, existing.envelope) == _raw_a2a_content(direction, envelope):
+        return {'stored': False, 'conflict': False, 'messageId': existing.message_id}
+    return _record_a2a_conflict(existing, stream=stream, entry_id=entry_id, envelope=envelope,
+                                outbox_project=outbox_project)
+
+
+def record_a2a_message(*, outbox_project: str, stream: str, entry_id: str, direction: str, envelope: dict,
+                       task_id: str, message_id: str) -> dict:
+    """The archive group's one write (§4, "One transaction, acknowledged
+    after commit"): the Task record when this is its Task's first message,
+    the message with its state, its artifacts, and an outbox row for each, all
+    in one transaction. The caller (``a2a_archive.archive_entry``) has already
+    decided the entry is an A2A message and found its keys.
+
+    Idempotent on the A2A ``messageId`` (REQ-05): an entry whose message is
+    already stored with the same message, state and artifacts writes nothing;
+    one with different content writes only a conflict record.
+
+    ``outbox_project`` is the configured project whose stream the entry was
+    read from; its event stream is where the relay announces these rows.
+
+    Returns ``{'stored': bool, 'conflict': bool, 'messageId': ...}``."""
+    message, raw_state, raw_artifacts = _raw_a2a_content(direction, envelope)
+    message = message if isinstance(message, dict) else {}
+    entry_ms, entry_seq = _parse_entry_id(entry_id)
+    context_id = envelope.get('contextId')
+    if not (isinstance(context_id, str) and context_id):
+        context_id = message.get('contextId') if isinstance(message.get('contextId'), str) else None
+
+    def text_or_none(value):
+        return value if isinstance(value, str) else None
+
+    with transaction.atomic():
+        existing = A2AMessage.objects.filter(message_id=message_id).first()
+        if existing is not None:
+            return _already_stored_a2a_message(existing, direction=direction, stream=stream, entry_id=entry_id,
+                                               envelope=envelope, outbox_project=outbox_project)
+
+        task = _ensure_a2a_task(task_id, context_id, envelope['project'], message_id, outbox_project)
+
+        try:
+            with transaction.atomic():
+                row = A2AMessage.objects.create(
+                    message_id=message_id, task=task, direction=direction, stream=stream, entry_id=entry_id,
+                    entry_ms=entry_ms, entry_seq=entry_seq, envelope=envelope, message=message,
+                    role=text_or_none(message.get('role')), parts=message.get('parts'),
+                    reference_message_id=text_or_none(message.get('referenceMessageId')),
+                    metadata=message.get('metadata'), timestamp=text_or_none(message.get('timestamp')),
+                    state=raw_state if isinstance(raw_state, str) and raw_state else None,
+                    recorded_at=timezone.now(),
+                )
+        except IntegrityError:
+            # The same A2A messageId committed by another stream's consumer
+            # while this transaction was open.
+            existing = A2AMessage.objects.get(message_id=message_id)
+            return _already_stored_a2a_message(existing, direction=direction, stream=stream, entry_id=entry_id,
+                                               envelope=envelope, outbox_project=outbox_project)
+
+        _write_outbox_event(
+            project=outbox_project, event_type=A2A_EVENT_MESSAGE_RECORDED, work_item_id=task.work_item_id,
+            payload={'taskId': task.id, 'messageId': message_id},
+        )
+        _a2a_write_checkpoint('message_inserted', task_id=task.id, message_id=message_id)
+
+        for position, artifact in enumerate(raw_artifacts if isinstance(raw_artifacts, list) else []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = artifact.get('artifactId')
+            if not (isinstance(artifact_id, str) and artifact_id):
+                continue  # kept in the stored envelope only (REQ-03)
+            A2AArtifact.objects.create(
+                task=task, message=row, position=position, artifact_id=artifact_id,
+                name=text_or_none(artifact.get('name')), parts=artifact.get('parts'),
+                reference_artifact_id=text_or_none(artifact.get('referenceArtifactId')),
+                metadata=artifact.get('metadata'), artifact=artifact, recorded_at=timezone.now(),
+            )
+            _write_outbox_event(
+                project=outbox_project, event_type=A2A_EVENT_ARTIFACT_RECORDED, work_item_id=task.work_item_id,
+                payload={'taskId': task.id, 'messageId': message_id, 'artifactId': artifact_id},
+            )
+
+    return {'stored': True, 'conflict': False, 'messageId': message_id}
+
+
+def _parse_command_created_at(value: str):
+    from datetime import datetime
+    from datetime import timezone as dt_timezone
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_timezone.utc)
+
+
+def _validate_a2a_verdict(payload: dict) -> None:
+    """REQ-04's shape and values, §4 "How Core applies a verdict". Anything
+    else is a ``ValidationError``, which the command consumer dead-letters at
+    once."""
+    problems = []
+    for field in ('taskId', 'messageId'):
+        if not (isinstance(payload.get(field), str) and payload.get(field)):
+            problems.append(f'{field} is required')
+    verdict, outcome, reason = payload.get('verdict'), payload.get('outcome'), payload.get('reason')
+    if verdict is None and outcome is None:
+        problems.append('a verdict or an outcome is required')
+    if verdict is not None and outcome is not None:
+        problems.append('carries both a verdict and an outcome')
+    if verdict is not None and verdict not in A2AVerdict.VERDICTS:
+        problems.append(f'verdict must be one of {", ".join(A2AVerdict.VERDICTS)}, got {verdict!r}')
+    if verdict == A2AVerdict.REFUSED and reason is None:
+        problems.append('a refused verdict needs a reason')
+    if reason is not None and reason not in A2AVerdict.REASONS:
+        problems.append(f'reason must be one of {", ".join(A2AVerdict.REASONS)}, got {reason!r}')
+    if outcome is not None and outcome not in A2AVerdict.OUTCOMES:
+        problems.append(f'outcome must be one of {", ".join(A2AVerdict.OUTCOMES)}, got {outcome!r}')
+    if problems:
+        raise ValidationError('recordA2AVerdict: ' + '; '.join(problems))
+
+
+def record_a2a_verdict(envelope: dict) -> dict:
+    """REQ-04: store one ``recordA2AVerdict`` command as an append-only row,
+    with its ``a2a.verdict_recorded`` outbox row, in one transaction —
+    whether or not the archive group has stored the message or its Task yet.
+    A redelivered command (its envelope ``messageId`` already stored) stores
+    nothing. Applies none of ``taskStore``'s rules; it records what
+    ScrumMaster decided."""
+    payload = envelope.get('payload') or {}
+    _validate_a2a_verdict(payload)
+    command_message_id = envelope['messageId']
+    finished_state = payload.get('finishedState')
+    source_message_id = payload.get('sourceMessageId')
+    actor = payload.get('actor')
+
+    with transaction.atomic():
+        if A2AVerdict.objects.filter(command_message_id=command_message_id).exists():
+            return {'deduped': True, 'commandMessageId': command_message_id}
+        try:
+            with transaction.atomic():
+                row = A2AVerdict.objects.create(
+                    task_id=payload['taskId'], message_id=payload['messageId'],
+                    verdict=payload.get('verdict'), reason=payload.get('reason'),
+                    finished_state=finished_state if isinstance(finished_state, str) else None,
+                    outcome=payload.get('outcome'),
+                    source_message_id=source_message_id if isinstance(source_message_id, str) else None,
+                    actor=actor if isinstance(actor, str) else None,
+                    command=payload, command_message_id=command_message_id,
+                    command_created_at=_parse_command_created_at(envelope['createdAt']),
+                    project=envelope['project'], recorded_at=timezone.now(),
+                )
+        except IntegrityError:
+            return {'deduped': True, 'commandMessageId': command_message_id}
+
+        task = A2ATask.objects.filter(id=payload['taskId']).first()
+        announced = {'taskId': payload['taskId'], 'messageId': payload['messageId']}
+        if row.verdict is not None:
+            announced['verdict'] = row.verdict
+        else:
+            announced['outcome'] = row.outcome
+        _write_outbox_event(
+            project=envelope['project'], event_type=A2A_EVENT_VERDICT_RECORDED,
+            work_item_id=task.work_item_id if task is not None else None, payload=announced,
+        )
+    return {'deduped': False, 'id': str(row.id), 'commandMessageId': command_message_id}
+
+
+def _a2a_message_order(row: A2AMessage) -> tuple:
+    """REQ-02: by stream entry id across the gateway and agent channel
+    streams — milliseconds, then stream name, then sequence."""
+    return (row.entry_ms, row.stream, row.entry_seq)
+
+
+def _a2a_verdict_row_view(row: A2AVerdict) -> dict:
+    return {
+        'verdict': row.verdict, 'reason': row.reason, 'finishedState': row.finished_state, 'outcome': row.outcome,
+        'sourceMessageId': row.source_message_id, 'commandMessageId': row.command_message_id,
+        'commandCreatedAt': row.command_created_at.isoformat(), 'recordedAt': row.recorded_at.isoformat(),
+    }
+
+
+def _a2a_reading(rows: list[A2AVerdict]) -> dict:
+    """REQ-04's reading of one message's verdict rows, already in publish
+    order: ``applied`` once any row records it, otherwise the refusal
+    published last, otherwise none; the outcome published last, ``pending``
+    while the verdict is ``applied`` and none is recorded, otherwise none."""
+    verdict = reason = finished_state = None
+    if any(r.verdict == A2AVerdict.APPLIED for r in rows):
+        verdict = A2AVerdict.APPLIED
+    else:
+        refusals = [r for r in rows if r.verdict == A2AVerdict.REFUSED]
+        if refusals:
+            verdict, reason, finished_state = A2AVerdict.REFUSED, refusals[-1].reason, refusals[-1].finished_state
+    outcomes = [r for r in rows if r.outcome is not None]
+    if outcomes:
+        outcome = outcomes[-1].outcome
+    else:
+        outcome = 'pending' if verdict == A2AVerdict.APPLIED else None
+    return {'verdict': verdict, 'reason': reason, 'finishedState': finished_state, 'outcome': outcome,
+            'verdictRows': [_a2a_verdict_row_view(r) for r in rows]}
+
+
+def _a2a_artifact_view(row: A2AArtifact, message_id: str) -> dict:
+    return {
+        'artifactId': row.artifact_id, 'name': row.name, 'parts': row.parts,
+        'referenceArtifactId': row.reference_artifact_id, 'metadata': row.metadata,
+        'messageId': message_id, 'position': row.position, 'artifact': row.artifact,
+        'recordedAt': row.recorded_at.isoformat(),
+    }
+
+
+def a2a_task_record(task_id: str) -> Optional[dict]:
+    """A Task's full durable record, as REQ-06 returns it and REQ-11 returns
+    each Task: the Task record, every archived message in stream-entry-id
+    order with its artifacts and its verdict, reason, ``finishedState`` and
+    outcome as REQ-04 reads them, every verdict whose message Core has not yet
+    archived (under its ``messageId``, with no message), every content
+    conflict, the state history, and the current ``state`` — derived here,
+    from the rows this read sees (REQ-01), never stored.
+
+    ``None`` when Core holds neither a Task record nor a verdict for the id.
+    A Task with verdicts and no record yet reads with ``recorded`` false."""
+    task = A2ATask.objects.filter(id=task_id).first()
+    verdict_rows = list(A2AVerdict.objects.filter(task_id=task_id)
+                        .order_by('command_created_at', 'recorded_at', 'id'))
+    if task is None and not verdict_rows:
+        return None
+
+    messages = sorted(A2AMessage.objects.filter(task_id=task_id), key=_a2a_message_order) if task else []
+    artifacts_by_message: dict = {}
+    for artifact in A2AArtifact.objects.filter(task_id=task_id).order_by('position'):
+        artifacts_by_message.setdefault(artifact.message_id, []).append(artifact)
+    rows_by_message: dict[str, list[A2AVerdict]] = {}
+    for row in verdict_rows:
+        rows_by_message.setdefault(row.message_id, []).append(row)
+
+    message_views = []
+    for row in messages:
+        reading = _a2a_reading(rows_by_message.get(row.message_id, []))
+        message_views.append({
+            'messageId': row.message_id, 'direction': row.direction, 'stream': row.stream,
+            'entryId': row.entry_id, 'role': row.role, 'parts': row.parts,
+            'referenceMessageId': row.reference_message_id, 'metadata': row.metadata,
+            'timestamp': row.timestamp, 'state': row.state, 'recordedAt': row.recorded_at.isoformat(),
+            'message': row.message, 'envelope': row.envelope,
+            'artifacts': [_a2a_artifact_view(a, row.message_id) for a in artifacts_by_message.get(row.id, [])],
+            **reading,
+        })
+
+    archived_ids = {row.message_id for row in messages}
+    unarchived = [
+        {'messageId': message_id, **_a2a_reading(rows)}
+        for message_id, rows in rows_by_message.items() if message_id not in archived_ids
+    ]
+
+    state_history = [
+        {'messageId': m['messageId'], 'state': m['state'], 'stream': m['stream'], 'entryId': m['entryId'],
+         'verdict': m['verdict'], 'reason': m['reason'], 'finishedState': m['finishedState'],
+         'outcome': m['outcome']}
+        for m in message_views if m['state'] is not None
+    ]
+    applied = [m for m in state_history if m['verdict'] == A2AVerdict.APPLIED]
+    current_state = applied[-1]['state'] if applied else None
+
+    conflicts = [
+        {'messageId': c.message_id, 'stream': c.stream, 'entryId': c.entry_id, 'envelope': c.envelope,
+         'recordedAt': c.recorded_at.isoformat()}
+        for c in A2AConflict.objects.filter(task_id=task_id).order_by('recorded_at', 'id')
+    ] if task else []
+
+    return {
+        'id': task_id,
+        'recorded': task is not None,
+        'contextId': task.context_id if task else None,
+        'project': task.project if task else None,
+        'workItemId': str(task.work_item_id) if task and task.work_item_id else None,
+        'associationError': task.association_error if task else None,
+        'createdFromMessageId': task.created_from_message_id if task else None,
+        'createdAt': task.created_at.isoformat() if task else None,
+        'state': current_state,
+        'stateHistory': state_history,
+        'messages': message_views,
+        'artifacts': [a for m in message_views for a in m['artifacts']],
+        'unarchivedVerdicts': unarchived,
+        'conflicts': conflicts,
+    }
+
+
+def get_a2a_task(task_id: str, *, actor: Optional[str] = None) -> Optional[dict]:
+    """REQ-06: the direct, synchronous read of a Task's full record,
+    recorded in ``access_log`` (internal-work-item-service.md REQ-04), never
+    in Streams."""
+    from .readstore import log_access
+
+    record = a2a_task_record(task_id)
+    work_item_id = record['workItemId'] if record else None
+    log_access('getA2ATask', project=record['project'] if record else None, work_item_id=work_item_id, actor=actor)
+    return record
+
+
+def _a2a_snapshot_xmin() -> int:
+    """The oldest transaction id still running, as of now: every transaction
+    below it has finished, so a row stamped below it can no longer appear."""
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint')
+        return int(cursor.fetchone()[0])
+
+
+def _encode_a2a_cursor(state: dict) -> str:
+    import base64
+    import json
+    return base64.urlsafe_b64encode(json.dumps(state, separators=(',', ':')).encode()).decode()
+
+
+def _decode_a2a_cursor(cursor: Optional[str]) -> dict:
+    import base64
+    import binascii
+    import json
+    if not cursor:
+        return {'since': 0, 'upto': None, 'after': None}
+    try:
+        state = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        since, upto, after = state['since'], state.get('upto'), state.get('after')
+        if not isinstance(since, int) or (upto is not None and not isinstance(upto, int)) \
+                or (after is not None and not isinstance(after, str)):
+            raise ValueError('cursor fields have the wrong types')
+    except (ValueError, KeyError, TypeError, binascii.Error) as err:
+        raise ValidationError(f'not an A2A Task enumeration cursor: {err}') from err
+    return {'since': since, 'upto': upto, 'after': after}
+
+
+def list_a2a_tasks(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11: a read-only, paged enumeration of A2A Tasks changed since a
+    cursor, each with its full record as REQ-06 returns it, and no
+    access-log row.
+
+    A Task has changed when its record, a message, an artifact, a content
+    conflict or a verdict row for it was written by a transaction at or above
+    the cursor's transaction id (``change_xid``, stamped by the database). A
+    verdict written before Core held its Task changes that Task once its
+    record exists, because the record's own row then carries a later id.
+
+    The cursor is opaque. An empty one enumerates every Task. One round of
+    pages is fixed at its first page: it takes the oldest transaction still
+    running (``pg_snapshot_xmin``) as the next round's start, so a row whose
+    transaction was open while the round was read is returned again next
+    round rather than skipped. A Task can therefore appear in two rounds; no
+    change is ever missed. Within a round, Tasks come in id order.
+
+    Returns ``{'tasks': [...], 'nextCursor': str, 'hasMore': bool}``:
+    ``hasMore`` says the round has further pages; once it is false,
+    ``nextCursor`` is the changed-since cursor for the next round."""
+    from django.db.models import Exists, OuterRef, Q
+
+    if not isinstance(limit, int) or limit < 1:
+        raise ValidationError('limit must be a positive integer')
+    state = _decode_a2a_cursor(cursor)
+    since = state['since']
+    upto = state['upto'] if state['upto'] is not None else _a2a_snapshot_xmin()
+
+    changed = (
+        Q(change_xid__gte=since)
+        | Exists(A2AMessage.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AArtifact.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AConflict.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AVerdict.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+    )
+    query = A2ATask.objects.filter(changed)
+    if state['after'] is not None:
+        query = query.filter(id__gt=state['after'])
+    ids = list(query.order_by('id').values_list('id', flat=True)[:limit + 1])
+    has_more = len(ids) > limit
+    page = ids[:limit]
+
+    if has_more:
+        next_state = {'since': since, 'upto': upto, 'after': page[-1]}
+    else:
+        next_state = {'since': upto, 'upto': None, 'after': None}
+    return {
+        'tasks': [a2a_task_record(task_id) for task_id in page],
+        'nextCursor': _encode_a2a_cursor(next_state),
+        'hasMore': has_more,
+    }

@@ -201,3 +201,16 @@ def gateway_stream_name(project_name: str) -> str:
     publishes the retry for ScrumMaster with the canonical `workItemId`
     Jenkins has no way to know (canonical-delivery-state.md REQ-01)."""
     return f'aigang:gateway:{normalize_project_name(project_name)}'
+
+
+def agent_stream_name(project_name: str, suffix: str) -> str:
+    """An agent channel stream, ScrumMaster -> agent, named verbatim as
+    `services/scrummaster/src/registry.js`'s `agentStreamName` names it
+    (`aigang:agent:{project}:{suffix}`), by the same reuse-not-reinvent rule
+    as the two names above.
+
+    `core` never publishes onto it and never consumes it as ScrumMaster's
+    agents do: its only reader here is the A2A archive group
+    (`a2a_archive.py`, durable-a2a-message-record.md §4), which stores each
+    dispatch as it appeared."""
+    return f'aigang:agent:{normalize_project_name(project_name)}:{suffix}'

@@ -54,6 +54,12 @@ function commandsOf(command) {
   return fakeCore.commands.filter(c => c.command === command);
 }
 
+// The projection's commands, without the `recordA2AVerdict` commands the
+// gateway also publishes from v6.0 (Durable A2A Message Record REQ-04).
+function projectionCommands() {
+  return fakeCore.commands.filter(c => c.command !== 'recordA2AVerdict');
+}
+
 // Register a Task in the in-memory store the way handlers.js's dispatchTask
 // would have when ScrumMaster originally assigned it — a gateway submission
 // is only ever meaningful for a Task that already exists.
@@ -210,7 +216,21 @@ test('a gateway envelope claiming the wrong project is dead-lettered without any
     await gateway.stopGatewaySubscriber();
   }
 
-  assert.deepEqual(fakeCore.commands, [], 'nothing should have been written to core');
+  assert.deepEqual(projectionCommands(), [], 'nothing should have been written to core');
+  // Durable A2A Message Record REQ-04: the dead-letter hook still tells core
+  // the message was refused. The Task is one this process holds, so
+  // recordDeadLetteredMessageFailure returns 'recorded' and the refusal is
+  // `dead_lettered`, published to the project whose stream it arrived on.
+  assert.deepEqual(commandsOf('recordA2AVerdict'), [{
+    project: 'hello-world',
+    command: 'recordA2AVerdict',
+    actor: 'scrummaster',
+    taskId: 'HW-1',
+    messageId: foreignEnvelope.payload.message.messageId,
+    sourceMessageId: foreignEnvelope.messageId,
+    verdict: 'refused',
+    reason: 'dead_lettered',
+  }]);
 });
 
 test('comment operation appends exactly once even if delivered twice with the same messageId', async () => {
@@ -636,4 +656,113 @@ test('a later message for a task that already finished is acknowledged and repor
     await gateway._handleTaskStatus(statusReport, 'hello-world'),
     { taskId: 'HW-1', status: 'completed' }
   );
+});
+
+// ---------------------------------------------------------------------------
+// Durable A2A Message Record REQ-04 — the verdicts the real consumer wiring
+// publishes (gateway._gatewayConsumerOptions: the handler and the dead-letter
+// hook startGatewaySubscriber installs), to the project whose stream carried
+// the entry.
+// ---------------------------------------------------------------------------
+
+function verdictsFor(messageId) {
+  return commandsOf('recordA2AVerdict')
+    .filter(c => c.messageId === messageId)
+    .map(({ project, verdict, reason, outcome }) => ({ project, verdict, reason, outcome }));
+}
+
+async function runConsumer(options, until) {
+  const consumer = streams.createConsumer(client, {
+    stream: gatewayStream(),
+    group: 'a2a-verdict-test',
+    consumerName: 'c1',
+    ...gateway._gatewayConsumerOptions('hello-world'),
+    blockMs: 100,
+    retryDelayMs: 50,
+    reclaimIntervalMs: 30,
+    maxAttempts: 2,
+    ...options,
+  });
+  await consumer.start();
+  try {
+    await until();
+  } finally {
+    await consumer.stop();
+  }
+}
+
+test('REQ-04: a submission dead-lettered after it was applied publishes the outcome failed', async () => {
+  const lastMessageId = registerTask('HW-1');
+  const submission = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: lastMessageId, state: 'working',
+    parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })],
+  }));
+  const messageId = submission.payload.message.messageId;
+
+  // The projection's publish fails every time; verdicts reach the fake core.
+  const recordingPublish = canonicalWorkItems.publishCommand;
+  canonicalWorkItems.publishCommand = async (project, payload) => {
+    if (payload.command !== 'recordA2AVerdict') throw new Error('transient core outage');
+    return recordingPublish(project, payload);
+  };
+  try {
+    await runConsumer({}, async () => {
+      await waitForXLen(streams.deadLetterStreamName(gatewayStream()), 1, 5000);
+      await waitFor(async () => verdictsFor(messageId).some(v => v.outcome === 'failed'), 'the failed outcome');
+    });
+  } finally {
+    canonicalWorkItems.publishCommand = recordingPublish;
+  }
+
+  // `applied` once per attempt (each re-run applies the still-pending message
+  // again), then the hook's `failed`: recordDeadLetteredMessageFailure
+  // returned 'updated'.
+  const published = verdictsFor(messageId);
+  assert.ok(published.length >= 2);
+  assert.ok(published.slice(0, -1).every(v => v.verdict === 'applied' && v.project === 'hello-world'));
+  assert.deepEqual(published[published.length - 1],
+    { project: 'hello-world', verdict: undefined, reason: undefined, outcome: 'failed' });
+});
+
+test('REQ-04: a dead-lettered submission for a Task this process does not hold publishes refused, dead_lettered', async () => {
+  // No Task registered: as after a restart. The entry claims another
+  // project, so it is dead-lettered as permanent before any handler runs.
+  const envelope = buildEnvelope({
+    kind: KIND.GATEWAY_OPERATION,
+    project: 'hello-desktop',
+    taskId: 'HW-9',
+    payload: a2aPayload({ taskId: 'HW-9', contextId: 'HW-9', state: 'working', parts: [buildTextPart('hi')] }),
+  });
+  await client.xAdd(gatewayStream(), '*', { data: JSON.stringify(envelope) });
+
+  await runConsumer({}, async () => {
+    await waitFor(async () => verdictsFor(envelope.payload.message.messageId).length > 0, 'the refusal');
+  });
+  assert.deepEqual(verdictsFor(envelope.payload.message.messageId),
+    [{ project: 'hello-world', verdict: 'refused', reason: 'dead_lettered', outcome: undefined }]);
+  assert.deepEqual(projectionCommands(), []);
+});
+
+test('REQ-04: a redelivered entry that already completed publishes no further verdict', async () => {
+  const lastMessageId = registerTask('HW-1');
+  const envelope = await publishGatewayOp(a2aPayload({
+    taskId: 'HW-1', contextId: 'HW-1', referenceMessageId: lastMessageId, state: 'working',
+    parts: [buildTextPart('once'), buildDataPart({ operation: 'comment' })],
+  }));
+  const redeliveryId = await client.xAdd(gatewayStream(), '*', { data: JSON.stringify(envelope) }); // the redelivery
+
+  await gateway.startGatewaySubscriber();
+  try {
+    await waitFor(async () => {
+      const [group] = await client.xInfoGroups(gatewayStream());
+      return group.pending === 0 && group.lastDeliveredId === redeliveryId;
+    }, 'both entries handled');
+  } finally {
+    await gateway.stopGatewaySubscriber();
+  }
+  assert.deepEqual(verdictsFor(envelope.payload.message.messageId), [
+    { project: 'hello-world', verdict: 'applied', reason: undefined, outcome: undefined },
+    { project: 'hello-world', verdict: undefined, reason: undefined, outcome: 'succeeded' },
+  ]);
+  assert.equal(commandsOf('appendComment').length, 1);
 });

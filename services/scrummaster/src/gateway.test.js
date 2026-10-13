@@ -86,10 +86,18 @@ test.beforeEach(() => taskStore._reset());
 // (REQ-04, REQ-05), so this one harness serves every test below. It collects
 // the commands published and stubs the one HTTP read the gateway still makes
 // (a work item's own persisted status, for reporting only).
+//
+// From v6.0 the gateway also publishes its verdict on each A2A submission as a
+// `recordA2AVerdict` command (Durable A2A Message Record REQ-04). Those are
+// collected in a list of their own, `calls.verdicts`, so that every assertion
+// on `calls` — the projection's commands — reads exactly as it did before.
 function mockCanonicalWrites(t) {
   const calls = [];
+  const verdicts = [];
+  Object.defineProperty(calls, 'verdicts', { value: verdicts, enumerable: false });
   t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
-    calls.push({ project, payload });
+    if (payload.command === 'recordA2AVerdict') verdicts.push({ project, payload });
+    else calls.push({ project, payload });
     return { deduped: false };
   });
   t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
@@ -237,7 +245,10 @@ test('a completed message retries its pending side effect without a terminal gua
   const { contextId, messageId } = registerTask();
   t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
   let postAttempts = 0;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async () => {
+  // Fails the first projection publish and counts the projection's alone; a
+  // `recordA2AVerdict` (REQ-04) is not part of the projection.
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, payload) => {
+    if (payload.command === 'recordA2AVerdict') return { deduped: false };
     postAttempts += 1;
     if (postAttempts === 1) throw new Error('temporary core outage');
     return { deduped: false };
@@ -366,6 +377,10 @@ function dispatchEnv({ contextId, messageId }) {
       A2A_CONTEXT_ID: contextId,
       A2A_LAST_MESSAGE_ID: messageId,
       AIGANG_COMMONS_DIR: path.join(dispatchDir, 'commons'),
+      // The harness session id the constructor writes into every message
+      // (Durable A2A Message Record REQ-12), set explicitly: the runner's own
+      // environment may not export one.
+      CLAUDE_CODE_SESSION_ID: 'gateway-test-session',
       // The constructor is mounted read-only beside `services/`, outside this
       // package, so its own `redis` comes from here.
       NODE_PATH: path.join(__dirname, '../node_modules'),
@@ -473,7 +488,10 @@ test('the skill documents a subtask\'s two references as optional, and they trav
   ], { contextId, messageId });
 
   let command = null;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -497,7 +515,10 @@ test('a subtask request that leaves both references out is created all the same 
   ], { contextId, messageId });
 
   let command = null;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -1509,4 +1530,184 @@ test('handleTaskStatus (local mode): failed transitions the work item to failed 
   const comment = calls.find(c => c.payload.command === 'appendComment');
   assert.equal(transition.payload.status, 'failed');
   assert.match(comment.payload.body, /timeout/);
+});
+
+// ---------------------------------------------------------------------------
+// Durable A2A Message Record REQ-04 — the gateway publishes its verdict on
+// each submission, and the outcome after the projection, as
+// `recordA2AVerdict` commands on the project's command stream.
+// ---------------------------------------------------------------------------
+
+function verdict(envelope, fields) {
+  return {
+    project: PROJECT_NAME,
+    payload: {
+      command: 'recordA2AVerdict',
+      actor: 'scrummaster',
+      taskId: envelope.taskId,
+      messageId: envelope.payload.message.messageId,
+      sourceMessageId: envelope.messageId,
+      ...fields,
+    },
+  };
+}
+
+test('REQ-04: an applied comment publishes applied before the projection and succeeded after it', async (t) => {
+  const order = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    order.push({ project, payload });
+    return { deduped: false };
+  });
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('a comment'), buildDataPart({ operation: 'comment' })],
+  });
+
+  await handleA2ASubmission(env, PROJECT_NAME);
+
+  assert.deepEqual(order.map(c => c.payload.command), ['recordA2AVerdict', 'appendComment', 'recordA2AVerdict']);
+  assert.deepEqual(order[0], verdict(env, { verdict: 'applied' }));
+  assert.deepEqual(order[2], verdict(env, { outcome: 'succeeded' }));
+});
+
+test('REQ-04: a projection that returns no outcome publishes applied, then the outcome failed', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('hand it over'), buildDataPart({ operation: 'reassign' })],
+  });
+
+  const outcome = await handleA2ASubmission(env, PROJECT_NAME);
+
+  assert.equal(outcome, null);
+  assert.deepEqual(calls.verdicts, [verdict(env, { verdict: 'applied' }), verdict(env, { outcome: 'failed' })]);
+});
+
+test('REQ-04: each early refusal publishes refused with its reason and nothing else', async (t) => {
+  const cases = [
+    {
+      reason: 'invalid',
+      build: ({ contextId, messageId }) => envelope({ contextId, referenceMessageId: messageId, state: 'in-progress', parts: [buildTextPart('x')] }),
+    },
+    {
+      reason: 'unknown_task',
+      build: () => {
+        const env = envelope({ contextId: 'ctx-x', state: 'working', parts: [buildTextPart('x')] });
+        env.taskId = 'wi-not-held';
+        env.payload.message.taskId = 'wi-not-held';
+        return env;
+      },
+    },
+    {
+      reason: 'wrong_project',
+      overrides: { projectName: 'hello-desktop' },
+      build: ({ contextId, messageId }) => envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] }),
+    },
+    {
+      reason: 'wrong_role',
+      build: ({ contextId, messageId }) => {
+        const env = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+        env.payload.message.role = 'client';
+        return env;
+      },
+    },
+  ];
+  for (const { reason, overrides, build } of cases) {
+    taskStore._reset();
+    const calls = [];
+    const verdicts = [];
+    const restore = t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+      (payload.command === 'recordA2AVerdict' ? verdicts : calls).push({ project, payload });
+    });
+    const env = build(registerTask(overrides));
+    const outcome = await handleA2ASubmission(env, PROJECT_NAME);
+    restore.mock.restore();
+
+    assert.equal(outcome, null, reason);
+    assert.deepEqual(calls, [], `${reason}: no projection`);
+    assert.deepEqual(verdicts, [verdict(env, { verdict: 'refused', reason })], reason);
+  }
+});
+
+test('REQ-04: an invalid submission with no A2A messageId publishes no command at all', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+  const env = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+  delete env.payload.message.messageId;
+
+  assert.equal(await handleA2ASubmission(env, PROJECT_NAME), null);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(calls.verdicts, [], 'core cannot key it, so it is given no verdict');
+});
+
+test('REQ-04: a late submission publishes task_finished with the finished state, before its report', async (t) => {
+  const order = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    order.push({ project, payload });
+  });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
+  const { contextId, messageId } = registerTask();
+  const done = envelope({ contextId, referenceMessageId: messageId, state: 'completed', parts: [buildTextPart('done')] });
+  await handleA2ASubmission(done, PROJECT_NAME);
+  order.length = 0;
+
+  const late = envelope({
+    contextId, referenceMessageId: done.payload.message.messageId, state: 'working', parts: [buildTextPart('late')],
+  });
+  const outcome = await handleA2ASubmission(late, PROJECT_NAME);
+
+  assert.deepEqual(outcome, { ticket_key: WORK_ITEM_ID, alreadyFinished: 'completed' });
+  assert.deepEqual(order.map(c => c.payload.command), ['recordA2AVerdict', 'appendComment']);
+  assert.deepEqual(order[0], verdict(late, { verdict: 'refused', reason: 'task_finished', finishedState: 'completed' }));
+});
+
+test('REQ-04: a failed applied publication raises before any projection, and the redelivery records the message once', async (t) => {
+  const published = [];
+  let failApplied = true;
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    if (payload.command === 'recordA2AVerdict' && payload.verdict === 'applied' && failApplied) {
+      failApplied = false;
+      throw new Error('command stream unavailable');
+    }
+    published.push(payload);
+  });
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })],
+  });
+
+  await assert.rejects(handleA2ASubmission(env, PROJECT_NAME), /command stream unavailable/);
+  assert.deepEqual(published, [], 'nothing of the projection ran');
+
+  await handleA2ASubmission(env, PROJECT_NAME);
+  assert.deepEqual(published.map(p => p.verdict || p.outcome || p.command), ['applied', 'appendComment', 'succeeded']);
+  const record = taskStore.getTaskById(WORK_ITEM_ID);
+  assert.equal(record.messages.filter(m => m.messageId === env.payload.message.messageId).length, 1);
+});
+
+test('REQ-04: a failed refusal or outcome publication is logged and the handler returns its outcome', async (t) => {
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, payload) => {
+    if (payload.command === 'recordA2AVerdict' && payload.verdict !== 'applied') {
+      throw new Error('command stream unavailable');
+    }
+  });
+  const { contextId, messageId } = registerTask();
+
+  const comment = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })],
+  });
+  assert.deepEqual(await handleA2ASubmission(comment, PROJECT_NAME), { ticket_key: WORK_ITEM_ID });
+
+  const spoofed = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+  spoofed.payload.message.role = 'client';
+  assert.equal(await handleA2ASubmission(spoofed, PROJECT_NAME), null);
+
+  assert.ok(errors.some(line => /outcome "succeeded".*could not|Could not publish the outcome "succeeded"/i.test(line)));
+  assert.ok(errors.some(line => /Could not publish the verdict "refused"/.test(line)));
 });

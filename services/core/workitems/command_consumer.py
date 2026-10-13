@@ -47,9 +47,10 @@ def handle_command(envelope: dict[str, Any]) -> Any:
     appendComment, createLink, materializeDecomposition,
     recordSpecificationLink, addArtifactLink (work-items.md REQ-01/REQ-02 —
     the only write path for these two references; see that spec's REQ-03),
-    and from v5.2 recordBetaDeployment and recordPipelineFailure, the two
+    from v5.2 recordBetaDeployment and recordPipelineFailure, the two
     commands the gateway relays Jenkins' own payloads to
-    (canonical-delivery-state.md REQ-01).
+    (canonical-delivery-state.md REQ-01), and from v6.0 recordA2AVerdict
+    (durable-a2a-message-record.md REQ-04), which is not routed either.
 
     Origin is always DIRECT here — this consumer IS the "direct" internal-API
     write path the router routes; a Jira-originated write instead goes through
@@ -123,6 +124,14 @@ def handle_command(envelope: dict[str, Any]) -> Any:
             payload, envelope['project'],
             source_message_id=payload.get('sourceMessageId') or message_id,
         )
+    if command == 'recordA2AVerdict':
+        # durable-a2a-message-record.md REQ-04 — ScrumMaster's verdict on one
+        # A2A submission, or an outcome update for it. Not routed, like
+        # recordSpecificationLink and addArtifactLink: the work tracker has
+        # no surface for it, and it touches no work item, comment or
+        # artifact row. A malformed one raises ValidationError, dead-lettered
+        # at once with no rejection comment, since it names no work item.
+        return store.record_a2a_verdict(envelope)
 
     err = ValueError(f'unknown command "{command}"')
     err.permanent = True  # not retryable — a malformed/unsupported command will never succeed.

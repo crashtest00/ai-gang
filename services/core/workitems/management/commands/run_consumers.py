@@ -1,7 +1,9 @@
 """
 Starts the Streams consumers (the command channel, webhook validation and,
 from v5.2, the outbound Jira writer's own event-stream group) for every
-configured project, and blocks until SIGTERM/SIGINT. Mirrors the consumer half of the Node service's
+configured project, from v6.0 the A2A archive group's consumers
+(``a2a_archive.py``: one per distinct gateway and agent channel stream), and
+blocks until SIGTERM/SIGINT. Mirrors the consumer half of the Node service's
 src/index.js `main()` — the HTTP API is served separately (Django's own
 runserver/gunicorn against core.wsgi, see manage.py runserver /
 Procfile-style deployment), and the outbox relay runs as its own process
@@ -16,6 +18,7 @@ import time
 from django.core.management.base import BaseCommand
 
 from workitems import registry
+from workitems.a2a_archive import create_archive_consumers
 from workitems.command_consumer import create_command_consumer
 from workitems.jira_writer import create_writer_consumer
 from workitems.redis_client import new_client
@@ -24,7 +27,7 @@ from workitems.webhook_consumer import create_webhook_consumer
 
 class Command(BaseCommand):
     help = ('Run the Streams command-consumer, webhook-consumer and Jira-writer event consumer '
-            'for every configured project.')
+            'for every configured project, and the A2A archive consumers.')
 
     def add_arguments(self, parser):
         parser.add_argument('--consumer-id', default=None, help='Override WORKITEM_CONSUMER_ID for this process.')
@@ -57,6 +60,17 @@ class Command(BaseCommand):
 
             self.stdout.write(self.style.SUCCESS(
                 f'[core] consuming commands, webhooks and events for project "{project}"'
+            ))
+
+        # durable-a2a-message-record.md §4: the `core-a2a-archive` group, on
+        # each project's gateway stream and its agents' channel streams. One
+        # consumer per distinct stream name, enumerated across every project
+        # at once, since two agents may share a channelSuffix.
+        for archive_consumer in create_archive_consumers(new_client, consumer_name=consumer_name):
+            archive_consumer.start()
+            consumers.append(archive_consumer)
+            self.stdout.write(self.style.SUCCESS(
+                f'[core] archiving A2A messages from "{archive_consumer.stream}"'
             ))
 
         stop = {'flag': False}

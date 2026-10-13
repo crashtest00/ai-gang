@@ -235,3 +235,89 @@ test('every agent role document teaches the marker format findBlockedMarker sear
       `${name} must not teach a marker keyed on a tracker key`);
   }
 });
+
+// Durable A2A Message Record REQ-04 — a controlled reopen turns every `failed`
+// outcome on the Task `superseded`, and dispatchTask tells core, once per
+// message it turned, as a `recordA2AVerdict` command on the project's command
+// stream.
+
+function mockVerdicts(t, { fail = false } = {}) {
+  const verdicts = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    if (fail) throw new Error('core command stream unavailable');
+    verdicts.push({ project, payload });
+    return { deduped: false };
+  });
+  return verdicts;
+}
+
+function agentSubmission(messageId, referenceMessageId) {
+  return {
+    kind: 'message', messageId, taskId: ISSUE.key, contextId: ISSUE.key, role: 'agent',
+    parts: [{ kind: 'text', text: 'agent work' }], referenceMessageId,
+  };
+}
+
+test('REQ-04: a reopen publishes superseded once for each failed message it turned', async (t) => {
+  mockPublish(t);
+  const verdicts = mockVerdicts(t);
+  const agent = registry.getAgent('backend-agent');
+
+  await dispatchTask(ISSUE, agent, { dispatchId: 'first', promptFactory: () => 'prompt' });
+  const dispatchMessageId = taskStore.lastMessage(ISSUE.key).messageId;
+  taskStore.applyTransition(ISSUE.key, { state: 'working', message: agentSubmission('msg-a', dispatchMessageId) });
+  taskStore.markMessageFailed(ISSUE.key, 'msg-a');
+  taskStore.applyTransition(ISSUE.key, { state: 'working', message: agentSubmission('msg-b', 'msg-a') });
+  taskStore.markMessageSucceeded(ISSUE.key, 'msg-b');
+  // A dead-lettered message never recorded on the Task is failed too.
+  taskStore.recordDeadLetteredMessageFailure(ISSUE.key, 'msg-dead');
+  assert.equal(verdicts.length, 0, 'the first dispatch turns nothing');
+
+  await dispatchTask(ISSUE, agent, { dispatchId: 'reopen', promptFactory: () => 'prompt' });
+  const reopenMessageId = taskStore.lastMessage(ISSUE.key).messageId;
+
+  assert.deepEqual(verdicts, ['msg-a', 'msg-dead'].map(messageId => ({
+    project: 'hello-world',
+    payload: {
+      command: 'recordA2AVerdict',
+      actor: 'scrummaster',
+      taskId: ISSUE.key,
+      messageId,
+      sourceMessageId: reopenMessageId,
+      outcome: 'superseded',
+    },
+  })));
+  assert.deepEqual(taskStore.failedMessageIds(ISSUE.key), []);
+});
+
+test('REQ-04: a reopen that turns no failed message publishes nothing, and a retry publishes only what failed since', async (t) => {
+  mockPublish(t);
+  const verdicts = mockVerdicts(t);
+  const agent = registry.getAgent('backend-agent');
+
+  await dispatchTask(ISSUE, agent, { dispatchId: 'first', promptFactory: () => 'prompt' });
+  await dispatchTask(ISSUE, agent, { dispatchId: 'continue', promptFactory: () => 'prompt' });
+  assert.equal(verdicts.length, 0, 'nothing failed, so nothing is superseded');
+
+  taskStore.recordDeadLetteredMessageFailure(ISSUE.key, 'msg-late');
+  await dispatchTask(ISSUE, agent, { dispatchId: 'continue', promptFactory: () => 'prompt' });
+  assert.deepEqual(verdicts.map(v => v.payload.messageId), ['msg-late']);
+  await dispatchTask(ISSUE, agent, { dispatchId: 'continue', promptFactory: () => 'prompt' });
+  assert.equal(verdicts.length, 1, "a caller's retry turns nothing new");
+});
+
+test('REQ-04: a superseded publication that fails is logged and the dispatch still goes out', async (t) => {
+  const published = mockPublish(t);
+  mockVerdicts(t, { fail: true });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+  const agent = registry.getAgent('backend-agent');
+
+  await dispatchTask(ISSUE, agent, { dispatchId: 'first', promptFactory: () => 'prompt' });
+  taskStore.recordDeadLetteredMessageFailure(ISSUE.key, 'msg-x');
+  await dispatchTask(ISSUE, agent, { dispatchId: 'reopen', promptFactory: () => 'prompt' });
+
+  assert.equal(published.length, 2, 'the continuation is dispatched regardless');
+  assert.ok(errors.some(line => /superseded.*msg-x/.test(line)), 'the lost update is logged at error level');
+  assert.deepEqual(taskStore.failedMessageIds(ISSUE.key), [], 'taskStore reopened as before');
+});

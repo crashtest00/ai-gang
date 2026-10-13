@@ -121,6 +121,26 @@ Its own summary of what it does and what an argument is for:
 Both `--flag value` and `--flag=value` work. An unrecognised flag and a value
 with no flag are both errors.
 
+## Your session id
+
+Every submission names the session that sent it. The tool writes your harness
+session id into the message's `metadata` as `sessionId`; you do not pass it,
+and there is no argument for it.
+
+It reads that id from one place: the `CLAUDE_CODE_SESSION_ID` environment
+variable, which Claude Code exports to every command your tools run. It equals
+your run's transcript file name, without `.jsonl`, under the harness's
+`projects/` directory, so a message can be traced to the transcript of the run
+that sent it. The tool never works the id out any other way — not from the most
+recently written transcript, which another run in the same container could have
+written.
+
+If `CLAUDE_CODE_SESSION_ID` is not set, the tool refuses: it exits non-zero,
+says `CLAUDE_CODE_SESSION_ID is not set`, and publishes nothing. That is not a
+mistake in your call and no argument fixes it — the session was not started the
+way a dispatch starts one. Say so in your final output rather than trying to
+submit another way.
+
 ## Success and failure
 
 On success the tool prints one line beginning `Accepted:`.

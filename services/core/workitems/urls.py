@@ -26,6 +26,14 @@ unchanged:
   POST /admin/work-items/<uuid>/release-candidate  — the release-candidate
     writeback target, new in V2.1
 
+  GET  /a2a/tasks[?cursor=&limit=]  — durable-a2a-message-record.md
+    REQ-11: the paged, changed-since enumeration of A2A Tasks, each with its
+    full record. Not access-logged.
+  GET  /a2a/tasks/<task id>  — REQ-06: one Task's full durable A2A record,
+    access-logged. Both are reads only: the record is written by the
+    `core-a2a-archive` group and the `recordA2AVerdict` command, never here
+    (REQ-05).
+
   POST /webhooks/jira  — amended
     2026-09-09: the Jira webhook endpoint, moved here from
     services/scrummaster/src/server.js's deleted `/webhook/jira` route now that
@@ -53,4 +61,6 @@ urlpatterns = [
     path('admin/work-items/<uuid:work_item_id>/comments', views.admin_add_comment),
     path('admin/work-items/<uuid:work_item_id>/release-candidate', views.admin_record_release_candidate),
     path('webhooks/jira', views.jira_webhook),
+    path('a2a/tasks', views.list_a2a_tasks),
+    path('a2a/tasks/<str:task_id>', views.get_a2a_task),
 ]

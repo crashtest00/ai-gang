@@ -656,3 +656,246 @@ class JiraDecompositionProposal(models.Model):
 
     def __str__(self) -> str:
         return f'{self.proposal_id} -> {self.jira_key or "(not yet created)"}'
+
+
+# ---------------------------------------------------------------------------
+# The durable A2A message record (durable-a2a-message-record.md)
+# ---------------------------------------------------------------------------
+#
+# Written by two independent writers and read by one function:
+#
+#   - `a2a_archive.py`'s `core-a2a-archive` consumer group, on each project's
+#     gateway stream and each agent channel stream, writes the Task record,
+#     the messages, their artifacts and any content conflict (REQ-01, REQ-02,
+#     REQ-03, REQ-05), straight from the raw stream entries;
+#   - the command consumer's `recordA2AVerdict` writes ScrumMaster's verdict
+#     and outcome rows (REQ-04).
+#
+# No table here stores a Task's current `state`: `store.a2a_task_record`
+# derives it at every read from the messages and verdict rows (REQ-01), so the
+# two writers never have to agree on a value they both update.
+#
+# Every table carries `change_xid`, the 64-bit id of the transaction that
+# wrote the row, set by the database itself (`a2a_set_change_xid`, migration
+# 0009). It is REQ-11's changed-since cursor: a row is "changed since" a
+# cursor when its transaction id is at or above the oldest transaction still
+# running when the cursor was taken, so a row whose transaction committed after
+# a reader took its cursor is never skipped, however late it commits.
+
+
+class A2ATask(models.Model):
+    """REQ-01 — one durable record per A2A Task, created from the Task's
+    first archived message, from whichever stream it was archived. Carries no
+    current `state` (derived at read) and no Task `metadata` (never
+    transmitted on a stream, §6 question 1).
+
+    ``work_item_id`` is REQ-09's association, resolved from the Task's own
+    ``id`` — the canonical work item id in both tracker modes — and never from
+    ``external_key``. When it does not resolve it stays null and
+    ``association_error`` records why, so the Task is stored, not dropped."""
+
+    id = models.TextField(primary_key=True)
+    context_id = models.TextField(null=True, blank=True)
+    project = models.TextField()
+    work_item_id = models.UUIDField(null=True, blank=True)
+    association_error = models.TextField(null=True, blank=True)
+    created_from_message_id = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
+    class Meta:
+        db_table = 'a2a_task'
+        indexes = [
+            models.Index(fields=['change_xid'], name='idx_a2a_task_change'),
+        ]
+
+    def __str__(self) -> str:
+        return f'A2A task {self.id}'
+
+
+class A2AMessage(models.Model):
+    """REQ-02 — every A2A message the archive group stores, append-only
+    (`a2a_message_append_only`, migration 0009), keyed by the A2A message's
+    own ``messageId`` (REQ-05: ``unique``, so a redelivery or a dead-letter
+    replay never stores it twice).
+
+    ``envelope`` is the stream entry's ``data`` field, parsed; ``message`` is
+    the A2A message as it appeared (``payload.message`` on a gateway
+    submission, the whole ``payload`` on a dispatch) and the columns beside
+    it are read out of it, each null where the message does not carry it.
+    ``state`` is a submission's ``payload.state`` when it is a non-empty
+    string, null otherwise and for every dispatch.
+
+    Ordered by the entry that carried it: ``entry_ms``, then ``stream``, then
+    ``entry_seq`` (REQ-02), never by ``timestamp`` or ``recorded_at``."""
+
+    DISPATCH = 'dispatch'
+    SUBMISSION = 'submission'
+    DIRECTION_CHOICES = [(DISPATCH, 'Dispatch'), (SUBMISSION, 'Submission')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    message_id = models.TextField(unique=True)
+    task = models.ForeignKey(A2ATask, on_delete=models.DO_NOTHING, db_column='task_id', related_name='messages')
+    direction = models.TextField(choices=DIRECTION_CHOICES)
+    stream = models.TextField()
+    entry_id = models.TextField()
+    entry_ms = models.BigIntegerField()
+    entry_seq = models.BigIntegerField()
+    envelope = models.JSONField()
+    message = models.JSONField(null=True, blank=True)
+    role = models.TextField(null=True, blank=True)
+    parts = models.JSONField(null=True, blank=True)
+    reference_message_id = models.TextField(null=True, blank=True)
+    metadata = models.JSONField(null=True, blank=True)
+    timestamp = models.TextField(null=True, blank=True)
+    state = models.TextField(null=True, blank=True)
+    recorded_at = models.DateTimeField(default=timezone.now)
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
+    class Meta:
+        db_table = 'a2a_message'
+        indexes = [
+            models.Index(fields=['task', 'entry_ms', 'stream', 'entry_seq'], name='idx_a2a_message_order'),
+            models.Index(fields=['task', 'change_xid'], name='idx_a2a_message_change'),
+        ]
+        constraints = [
+            models.CheckConstraint(check=models.Q(direction__in=['dispatch', 'submission']),
+                                   name='ck_a2a_message_direction'),
+        ]
+
+    def __str__(self) -> str:
+        return f'A2A message {self.message_id} ({self.direction})'
+
+
+class A2AArtifact(models.Model):
+    """REQ-03 — one row for each time an archived submission carried an
+    artifact with an ``artifactId``, tied to that message. Not unique on
+    ``artifact_id``: a repeated id, within one submission or across a Task's
+    submissions, is stored once per carrying (``position`` is its index in
+    ``payload.artifacts``). An artifact with no ``artifactId`` has no row; it
+    stays in its message's stored envelope."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(A2ATask, on_delete=models.DO_NOTHING, db_column='task_id', related_name='artifacts')
+    message = models.ForeignKey(A2AMessage, on_delete=models.DO_NOTHING, db_column='message_row_id',
+                                related_name='artifacts')
+    position = models.PositiveIntegerField()
+    artifact_id = models.TextField()
+    name = models.TextField(null=True, blank=True)
+    parts = models.JSONField(null=True, blank=True)
+    reference_artifact_id = models.TextField(null=True, blank=True)
+    metadata = models.JSONField(null=True, blank=True)
+    artifact = models.JSONField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
+    class Meta:
+        db_table = 'a2a_artifact'
+        indexes = [
+            models.Index(fields=['task', 'change_xid'], name='idx_a2a_artifact_change'),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['message', 'position'], name='uq_a2a_artifact_position'),
+        ]
+
+    def __str__(self) -> str:
+        return f'A2A artifact {self.artifact_id}'
+
+
+class A2AConflict(models.Model):
+    """REQ-05 — a stream entry whose A2A ``messageId`` was already stored with
+    different content (message, state or artifacts). The stored message is
+    left as it is; the conflicting entry is recorded here, once per stream
+    entry (``uq_a2a_conflict_entry``), under the Task of the stored
+    message."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(A2ATask, on_delete=models.DO_NOTHING, db_column='task_id', related_name='conflicts')
+    message_id = models.TextField()
+    stream = models.TextField()
+    entry_id = models.TextField()
+    envelope = models.JSONField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
+    class Meta:
+        db_table = 'a2a_conflict'
+        indexes = [
+            models.Index(fields=['task', 'change_xid'], name='idx_a2a_conflict_change'),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['stream', 'entry_id'], name='uq_a2a_conflict_entry'),
+        ]
+
+    def __str__(self) -> str:
+        return f'A2A conflict {self.message_id} at {self.stream} {self.entry_id}'
+
+
+class A2AVerdict(models.Model):
+    """REQ-04 — one append-only row (`a2a_verdict_append_only`, migration
+    0009) per ``recordA2AVerdict`` command ScrumMaster published: either a
+    verdict (``applied``, or ``refused`` with a ``reason``) or an outcome
+    update, never both and never neither (``ck_a2a_verdict_one_of``).
+
+    Keyed by the Task ``id`` and the A2A ``messageId``, with no foreign key to
+    either: a verdict can arrive before the archive group has stored its
+    message or its Task, since the two travel on different streams, and the
+    read joins them. ``command_message_id`` is the command envelope's own
+    ``messageId``, unique, so a redelivered command stores nothing new."""
+
+    APPLIED = 'applied'
+    REFUSED = 'refused'
+    VERDICTS = (APPLIED, REFUSED)
+    REASONS = ('invalid', 'unknown_task', 'wrong_project', 'wrong_role', 'task_finished', 'dead_lettered')
+    OUTCOMES = ('succeeded', 'failed', 'superseded')
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task_id = models.TextField()
+    message_id = models.TextField()
+    verdict = models.TextField(null=True, blank=True)
+    reason = models.TextField(null=True, blank=True)
+    finished_state = models.TextField(null=True, blank=True)
+    outcome = models.TextField(null=True, blank=True)
+    source_message_id = models.TextField(null=True, blank=True)
+    actor = models.TextField(null=True, blank=True)
+    command = models.JSONField()
+    command_message_id = models.TextField(unique=True)
+    command_created_at = models.DateTimeField()
+    project = models.TextField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
+    class Meta:
+        db_table = 'a2a_verdict'
+        indexes = [
+            models.Index(fields=['task_id', 'message_id'], name='idx_a2a_verdict_message'),
+            models.Index(fields=['task_id', 'change_xid'], name='idx_a2a_verdict_change'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(models.Q(verdict__isnull=False, outcome__isnull=True)
+                       | models.Q(verdict__isnull=True, outcome__isnull=False)),
+                name='ck_a2a_verdict_one_of',
+            ),
+            models.CheckConstraint(
+                check=models.Q(verdict__isnull=True) | models.Q(verdict__in=['applied', 'refused']),
+                name='ck_a2a_verdict_value',
+            ),
+            models.CheckConstraint(
+                check=models.Q(outcome__isnull=True) | models.Q(outcome__in=['succeeded', 'failed', 'superseded']),
+                name='ck_a2a_verdict_outcome',
+            ),
+            models.CheckConstraint(
+                check=~models.Q(verdict='refused') | models.Q(reason__isnull=False),
+                name='ck_a2a_verdict_refused_reason',
+            ),
+            models.CheckConstraint(
+                check=models.Q(reason__isnull=True) | models.Q(reason__in=[
+                    'invalid', 'unknown_task', 'wrong_project', 'wrong_role', 'task_finished', 'dead_lettered',
+                ]),
+                name='ck_a2a_verdict_reason',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'A2A verdict {self.message_id}: {self.verdict or self.outcome}'

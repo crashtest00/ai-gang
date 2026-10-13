@@ -52,7 +52,19 @@ async function dispatchTask(issue, agent, { dispatchId, promptFactory }) {
     // Reaching this path means a fresh canonical dispatch event selected an
     // already-known Task. That is the one controlled reason a terminal Task
     // may reopen; agent-authored gateway messages do not receive this flag.
+    //
+    // A reopen turns every `failed` outcome on the Task `superseded`
+    // (taskStore.applyTransition). Core keeps each message's outcome
+    // (Durable A2A Message Record REQ-04), so each id the reopen turned is
+    // published to it — read as the ids that left `failedMessageIds`. A
+    // caller's retry turns only what failed since the previous call, usually
+    // nothing, and then publishes nothing.
+    const failedBefore = taskStore.failedMessageIds(taskRef.id);
     taskStore.applyTransition(taskRef.id, { state, message, reopen: true });
+    const failedAfter = new Set(taskStore.failedMessageIds(taskRef.id));
+    for (const supersededId of failedBefore.filter(id => !failedAfter.has(id))) {
+      await publishSuperseded(issue.projectName, taskRef.id, supersededId, messageId);
+    }
   } else {
     taskStore.register(buildTask({
       id: taskRef.id,
@@ -80,6 +92,28 @@ async function dispatchTask(issue, agent, { dispatchId, promptFactory }) {
   });
   await streams.publish(client, stream, envelope, { dedupeKey: `dispatch:${dispatchId || newMessageId()}` });
   console.log(`[handler] Dispatched (${state}) for ${issue.key} to ${agent.id} on ${stream}`);
+}
+
+// One `superseded` outcome update for core (REQ-04), as a `recordA2AVerdict`
+// command whose `sourceMessageId` is the reopening dispatch message's id. Caught
+// and logged, never raised: the reopen has already happened in taskStore, and a
+// lost update leaves core reading the message's earlier outcome.
+async function publishSuperseded(projectName, taskId, messageId, dispatchMessageId) {
+  try {
+    await canonicalWorkItems.publishCommand(projectName, {
+      command: 'recordA2AVerdict',
+      actor: 'scrummaster',
+      taskId,
+      messageId,
+      sourceMessageId: dispatchMessageId,
+      outcome: 'superseded',
+    });
+  } catch (err) {
+    console.error(
+      `[handler] Could not publish the "superseded" outcome for message ${messageId} of task ${taskId} ` +
+      `to core: ${err.message} — core's record of it will lack this update`
+    );
+  }
 }
 
 // A release work item reached `done`, the single production-approval gate:
