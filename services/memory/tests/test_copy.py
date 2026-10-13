@@ -213,3 +213,18 @@ def test_the_offset_is_the_archive_copys_length_when_the_manifest_disagrees(root
     rec.refresh_from_db()
     assert rec.bytes_read == len(s.transcript.read_bytes())
     assert rec.digest == digest_of(arch)
+
+
+def test_an_unchanged_source_still_corrects_a_manifest_offset_to_the_archive_length(roots, copier):
+    harness, archive = roots
+    s = Src(harness)
+    s.append(completed_run())
+    copier.reconcile()
+    rec = SessionFile.objects.get(path__endswith='.jsonl')
+    SessionFile.objects.filter(pk=rec.pk).update(bytes_read=7, digest='sha256:stale')
+    copier.reconcile()
+    rec.refresh_from_db()
+    arch = Path(archive) / rec.archive_path
+    assert rec.bytes_read == arch.stat().st_size
+    assert rec.digest == digest_of(arch)
+    assert arch.read_bytes() == s.transcript.read_bytes()

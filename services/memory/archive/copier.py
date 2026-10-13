@@ -268,6 +268,8 @@ class Copier:
             # `.jsonl` file of an active session, its complete lines.
             pending_tail = line_file and session.status == STATUS_QUIET and st.st_size > frec.bytes_read
             if unchanged and (st.st_size == frec.bytes_read or (line_file and not pending_tail)):
+                # Keep the offset taken from the archive's length (§4).
+                frec.save(update_fields=['bytes_read', 'digest'])
                 return
             if st.st_size > frec.seen_size:
                 # Growth (REQ-06): a session whose newest run has not ended
