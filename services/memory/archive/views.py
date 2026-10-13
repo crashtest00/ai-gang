@@ -50,7 +50,9 @@ def _error(status, message):
 
 
 def _epoch():
-    return ArchiveEpoch.objects.get(pk=1).epoch
+    # Written by migration 0001. A database that lost the row is a new
+    # database too, so creating a fresh epoch refuses every older cursor.
+    return ArchiveEpoch.objects.get_or_create(pk=1)[0].epoch
 
 
 class _StaleCursor(Exception):
