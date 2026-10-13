@@ -651,15 +651,24 @@ class OutboxEventAdmin(admin.ModelAdmin):
     """Operational visibility into the transactional outbox — whether
     the relay (`python manage.py relay`) is keeping up. Read-only: rows are
     written exclusively by store.py inside the same transaction as the
-    write they describe, and marked published by the relay process."""
+    write they describe, and marked published by the relay process.
 
-    list_display = ('event_type', 'project', 'work_item_id', 'created_at', 'published_at')
-    list_filter = ('project', 'event_type')
+    The table is also the durable history of every announcement V4's
+    artifact ingress and librarian make (durable-artifact-event-history.md
+    REQ-06), so it cannot be deleted from here either, and the destination
+    stream is shown and filterable to tell an announcement row (which names
+    its stream) from a work-item row (which names none)."""
+
+    list_display = ('event_type', 'project', 'stream', 'work_item_id', 'created_at', 'published_at')
+    list_filter = ('project', 'event_type', 'stream')
 
     def has_add_permission(self, request):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 

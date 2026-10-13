@@ -64,10 +64,10 @@ def artifact_env(db, settings, tmp_path, redis_client):
     """Real Postgres and real Redis, with an artifact root on a per-test
     temp directory.
 
-    Uses pytest-django's rolled-back `db` fixture, so nothing here commits
-    and `transaction.on_commit` never fires — which means an upload made
-    under this fixture publishes NO event. Tests that observe the event
-    stream must use `committed_artifact_env` instead. The split is for
+    Uses pytest-django's rolled-back `db` fixture, so nothing here commits:
+    an upload's outbox row lives only inside the test's own transaction,
+    and no relay process could see it. Tests that observe the event
+    stream use `committed_artifact_env` instead. The split is for
     speed: `transactional_db` truncates every table and re-creates content
     types and permissions after each test, and at ~50 tests that dominates
     the suite's runtime.
@@ -78,8 +78,9 @@ def artifact_env(db, settings, tmp_path, redis_client):
 @pytest.fixture
 def committed_artifact_env(transactional_db, settings, tmp_path, redis_client):
     """As `artifact_env`, but every write is a real commit, so the
-    `transaction.on_commit` publication in ArtifactAdmin.save_model
-    actually runs and the real Redis stream can be read back."""
+    upload's outbox row (written by ArtifactAdmin.save_model) is committed
+    and the real Redis stream can be read back once it is relayed
+    (`read_events`)."""
     return _build_env(settings, tmp_path, redis_client)
 
 
@@ -148,8 +149,21 @@ def stored_path(env, artifact) -> Path:
     return Path(env.root) / str(artifact.id)[:2] / str(artifact.id)
 
 
+def drain_outbox(client) -> None:
+    """Publish every unpublished outbox row, as ``python manage.py relay``
+    would: ``workitems.relay.relay_once`` until it returns 0. An
+    announcement reaches its stream only through the relay
+    (durable-artifact-event-history.md REQ-01, REQ-04)."""
+    from workitems.relay import relay_once
+
+    while relay_once(client):
+        pass
+
+
 def read_events(env) -> list:
-    """Every envelope currently on the real artifact event stream."""
+    """Every envelope currently on the real artifact event stream, after
+    the outbox has been drained onto it."""
+    drain_outbox(env.redis)
     entries = env.redis.xrange(ARTIFACT_EVENT_STREAM)
     return [json.loads(fields['data']) for _entry_id, fields in entries]
 

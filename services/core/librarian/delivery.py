@@ -41,12 +41,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from artifacts.models import Artifact
 
-from . import content, failures, paths
+from . import content, failures, paths, responses
 from .envelope import read_field
 from .failures import DeliveryFailure
 from .models import ArtifactDelivery
@@ -101,26 +101,51 @@ def parse_request(payload: dict[str, Any]) -> DeliveryRequest:
     return DeliveryRequest(task_id=str(task_id) if task_id is not None else None, **values)
 
 
-def deliver(request: DeliveryRequest) -> dict[str, Any]:
-    """Resolve one request and return the confirmation's payload fields.
+def deliver(request: DeliveryRequest, *, correlation_id: str) -> Optional[dict[str, Any]]:
+    """Resolve one request, write its confirmation, and return the
+    confirmation's payload fields — or ``None`` when the request already
+    has an answer and nothing was done.
 
     Raises ``DeliveryFailure`` for every REQ-06 reason; the caller
-    (``consumer.py``) turns either outcome into exactly one response.
+    (``consumer.py``) turns that into the failure answer.
 
     Everything from the lock onwards runs inside one transaction, so the
     record is written synchronously as part of handling the request
     (REQ-05) and the advisory lock is released by the same commit that
-    makes the record visible.
+    makes the record visible. The confirmation's outbox row is written in
+    that same transaction (durable-artifact-event-history.md REQ-04), so a
+    delivery is never recorded without its answer, and the answer is
+    durable before the consumer acknowledges the request.
+
+    ``correlation_id`` is the request envelope's ``messageId``. Its own
+    advisory lock (``responses.lock_answer``) is taken immediately after
+    the (artifact, repository) lock — never before it — and then, before
+    anything is copied or written, ``responses.already_answered`` is asked:
+    a request that a previous handling already answered, with a
+    confirmation or a failure, is not delivered again. An answer insert
+    that ``uniq_outbox_librarian_answer`` nevertheless refuses rolls this
+    transaction back — the ``artifact_delivery`` record with it, though not
+    a file step 5 has already copied — and is treated the same way.
     """
     artifact = _artifact_or_failure(request.artifact_id)
     repository = paths.resolve_repository(request.destination_repo)
     requested = paths.resolve_requested_path(repository, request.requested_path)
     source = _source_file(artifact)
 
-    with transaction.atomic():
-        _lock(str(artifact.id), repository.name)
-        _test_only_hold_delay()
-        return _resolve(request, artifact, repository, requested, source)
+    try:
+        with transaction.atomic():
+            _lock(str(artifact.id), repository.name)
+            responses.lock_answer(correlation_id)
+            _test_only_hold_delay()
+            if responses.already_answered(correlation_id):
+                return None
+            confirmation = _resolve(request, artifact, repository, requested, source)
+            responses.record_confirmation(request, confirmation, correlation_id=correlation_id)
+            return confirmation
+    except IntegrityError as err:
+        if responses.is_answer_refusal(err):
+            return None
+        raise
 
 
 # --- REQ-07: one copy, whatever the arrival order ------------------------

@@ -144,10 +144,13 @@ because adding it belongs to the track that owns `workitems/`; a consumer
 using `workitems.envelope.from_stream_fields` would reject these entries
 until it is added. There is no such consumer today.
 
-The event is published from `transaction.on_commit`, so an upload whose
-record did not commit announces nothing. The converse — a committed upload
-whose publish then fails — is not covered by a transactional outbox here;
-see the build report.
+The event is written to Core's transactional outbox in the same
+transaction as the `artifact` row it announces, naming
+`aigang:artifacts:events` as its destination, and `python manage.py relay`
+publishes it verbatim (V6 `durable-artifact-event-history.md` REQ-01). An
+upload whose record did not commit announces nothing, and a committed upload
+is announced even if Redis was down when it committed. The `outbox_event`
+rows are the event history, queryable after the stream is trimmed.
 
 ## Tables
 

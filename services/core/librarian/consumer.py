@@ -18,7 +18,12 @@ response". A handler that raised on a copy failure would be retried three
 times and then dead-lettered, leaving the requester with no answer at all
 — and a handler that answered *and* raised would answer up to three times.
 So every request this consumer can decode is answered exactly once and
-acked, including when the answer is a failure. The requester decides
+acked, including when the answer is a failure. The answer is committed to
+Core's transactional outbox before the handler returns, and the relay
+publishes it (``responses.py``); the one exception is a database that
+cannot take even the failure answer, which leaves the request
+unacknowledged to be retried and finally dead-lettered unanswered
+(durable-artifact-event-history.md REQ-04). The requester decides
 whether to ask again, which is PRD §8's "ask, don't push" applied to the
 failure path as well as the happy one.
 
@@ -45,35 +50,40 @@ from .failures import DeliveryFailure
 from .stream_topology import REQUEST_GROUP, REQUEST_STREAM
 
 
-def handle_request(client, entry_envelope: dict[str, Any]) -> str:
-    """Handle one decoded request and publish its single response. Returns
-    the response's stream entry id.
+def handle_request(entry_envelope: dict[str, Any]) -> None:
+    """Handle one decoded request and commit its single answer to the
+    outbox before returning — the consumer acknowledges the request only
+    after this returns (``workitems.streams.Consumer``), so the answer is
+    durable before the acknowledgement (durable-artifact-event-history.md
+    REQ-04). A request that already has an answer gets no second one.
 
-    Never raises for a request-shaped message: every outcome, including an
-    unexpected one, becomes a response (see the module docstring).
+    Never raises for a request-shaped message while the database can take
+    its answer: every outcome, including an unexpected one, becomes an
+    answer (see the module docstring). When the database cannot take even
+    the failure answer, that error propagates, the request stays
+    unacknowledged, and ``workitems.streams`` retries it and finally
+    dead-letters it unanswered.
     """
     payload = entry_envelope.get('payload') or {}
     correlation_id = entry_envelope.get('messageId')
     request = None
     try:
         request = parse_request(payload)
-        confirmation = deliver(request)
-    except DeliveryFailure as failure:
-        return responses.publish_failure(client, failure, correlation_id=correlation_id,
-                                         request=request, payload=payload)
+        deliver(request, correlation_id=correlation_id)
+    except DeliveryFailure as raised:
+        failure = raised
     except Exception as err:  # noqa: BLE001 - REQ-06: the requester is told, not left waiting
         failure = DeliveryFailure('copy_failed', f'the librarian could not complete this request: {err}')
-        return responses.publish_failure(client, failure, correlation_id=correlation_id,
-                                         request=request, payload=payload)
-    return responses.publish_confirmation(client, request, confirmation, correlation_id=correlation_id)
+    else:
+        return
+    responses.record_failure(failure, correlation_id=correlation_id, request=request, payload=payload)
 
 
 def create_librarian_consumer(redis_factory, *, consumer_name: str | None = None):
     """The librarian's subscriber, wired the way ``manage.py
-    run_librarian`` runs it. The handler publishes on its own client
-    rather than the consumer's read connection, which is reserved for the
-    blocking read."""
-    publish_client = redis_factory()
+    run_librarian`` runs it. Its answers go to the outbox, not to Redis,
+    so the handler needs no client of its own; ``python manage.py relay``
+    publishes them."""
 
     def _handler(entry_envelope: dict[str, Any]) -> None:
         kind = entry_envelope.get('kind')
@@ -81,7 +91,7 @@ def create_librarian_consumer(redis_factory, *, consumer_name: str | None = None
             # Dead-lettered without consuming a retry slot: a second
             # delivery would not make it a request either.
             raise PermanentError(f'not a request: kind={kind!r}')
-        handle_request(publish_client, entry_envelope)
+        handle_request(entry_envelope)
 
     return create_consumer(
         redis_factory,

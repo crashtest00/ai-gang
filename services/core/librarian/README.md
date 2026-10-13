@@ -142,6 +142,40 @@ requester, so there is nobody to answer: it goes to
 `aigang:librarian:requests:dead` through the same machinery
 `workitems/streams.py` uses for every other stream in this service.
 
+### How the answer reaches the stream
+
+The librarian does not publish its answer to Redis itself. It commits the
+answer to Core's transactional outbox (`outbox_event`, naming
+`aigang:librarian:responses` as the row's destination stream and storing the
+envelope verbatim), and the outbox relay — `python manage.py relay`, the
+`relay` service — publishes it. The request is acknowledged only after that
+commit, so an answer survives a Redis outage and a crash between the commit
+and the acknowledgement (V6 `durable-artifact-event-history.md` REQ-04):
+
+- A **confirmation** commits in the same transaction as the
+  `artifact_delivery` record it confirms; a **failure** in its own.
+- **Exactly one answer per request.** Every transaction that may write an
+  answer first takes a Postgres advisory lock keyed on the request's
+  `messageId` — `deliver` immediately after its (artifact, repository)
+  lock, the failure path with no other lock — and then looks for an
+  existing answer row. If there is one, confirmation or failure, it copies
+  nothing, writes nothing, and the request is acknowledged with no new
+  answer. The partial unique index `uniq_outbox_librarian_answer`
+  (`workitems/migrations/0008_v60_outbox_stream_and_envelope.py`) refuses a
+  second answer row for one `correlationId` as a backstop; a refused insert
+  is treated as already answered. If it refuses `deliver`'s insert after a
+  copy, the record rolls back and the copied file stays, which the next
+  request finds by content.
+- **The one unanswered case.** When the database cannot take even the
+  failure answer, the handler raises, the request stays unacknowledged, and
+  `workitems/streams.py` retries it and finally dead-letters it with no
+  answer: an answer the database never recorded cannot be the durable one.
+- **Latency.** An answer reaches the stream on the relay's next pass. An
+  idle relay sleeps `RELAY_POLL_INTERVAL_MS` (default 1000 ms) between empty
+  passes, so it adds at most that, plus the time to publish any rows written
+  ahead of the answer — against the 30-second default wait of
+  `setup/commons/tools/request-artifact.js`.
+
 ## Repositories
 
 A repository is named by **one directory name directly under
@@ -326,9 +360,47 @@ Its own container because it is the one service that mounts the project
 repositories, which is a privilege the rest of the instance does not need
 (PRD §14: "the librarian and the repositories must share a machine").
 
+Its answers reach `aigang:librarian:responses` only through the outbox
+relay, so the `relay` service (container `core-relay`, `python manage.py
+relay`) must be running for any requester to be answered.
+
 `docker-compose.test.yml` adds nothing: the suite runs on the host with
 `ARTIFACT_ROOT` and `PROJECTS_ROOT` pointed at per-test temporary
 directories, and the subscriber running in the test process.
+
+### Switching from a librarian that published its answers directly (V6.0)
+
+Before V6.0 the librarian published each answer straight to
+`aigang:librarian:responses` and then acknowledged the request. A request it
+answered but had not yet acknowledged when it stopped has no answer row in
+the outbox, so the new librarian's lookup finds nothing and it would answer
+the request a second time when it reclaims it. Close that set before the new
+librarian starts (`durable-artifact-event-history.md` §4, "Deployment"):
+
+1. **Stop the pre-change librarian:** `docker compose stop librarian`.
+2. **List its pending requests:**
+   `XPENDING aigang:librarian:requests librarian - + <count>`, with
+   `<count>` at least the total the summary form
+   `XPENDING aigang:librarian:requests librarian` reports.
+3. **Acknowledge only the ones already answered.** For each entry id
+   listed, read the request with
+   `XRANGE aigang:librarian:requests <id> <id>` and take the `messageId`
+   from the envelope JSON in its `data` field. If
+   `aigang:librarian:responses` — which no deployed job trims — already
+   carries an entry whose envelope's `correlationId` equals that
+   `messageId` (`XRANGE aigang:librarian:responses - +`), acknowledge the
+   request: `XACK aigang:librarian:requests librarian <id>`. Leave every
+   other pending entry alone.
+4. **Deploy the new Core and start the new librarian.** Apply migration
+   `workitems` `0008` (`python manage.py migrate`), run the `relay` service
+   on the new code, then `docker compose up -d librarian`. The new
+   librarian reclaims each entry still pending once it has been idle for
+   `DEFAULT_RETRY_DELAY_MS` (10 minutes, `workitems/streams.py`) and answers
+   it once.
+
+Requests published while no librarian runs are unread rather than pending,
+and the new librarian reads them normally. From the switch on, every request
+gets exactly one answer.
 
 ## Tests
 
@@ -348,3 +420,5 @@ place of any of that.
 | `test_librarian_failures.py` | REQ-06 — every failure reason, and exactly one answer per request |
 | `test_librarian_concurrency.py` | REQ-07 — two subscribers, contention observed in `pg_locks` |
 | `test_librarian_atomic_create.py` | REQ-07 — a racing writer never loses its file, and the no-hard-link fallback |
+| `test_artifact_event_history_librarian.py` | V6 `durable-artifact-event-history.md` REQ-04 — the answer is durable before the acknowledgement, and exactly one per request |
+| `test_artifact_event_history_switch.py` | The switch procedure above, from a pre-change librarian killed mid-request |
