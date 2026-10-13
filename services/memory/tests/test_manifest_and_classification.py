@@ -58,7 +58,7 @@ def test_one_record_of_each_class_is_archived_and_counted_against_the_first_reco
 
     assert (Path(archive) / s.transcript.relative_to(harness_root)).read_bytes() == b''.join(lines)
     classes = [harness.classify_line(raw.rstrip(b'\n')) for raw in lines]
-    assert [c.usable_for_indexing for c in classes] == [True, False, False, False]
+    assert [c.cls == harness.CONVERSATIONAL for c in classes] == [True, False, False, False]
     assert [c.cls for c in classes] == ['conversational', 'bookkeeping', 'unknown', 'unparseable']
     counts = Session.objects.get(pk=s.id).record_counts['9.9.1']
     assert counts == {'conversational': 1, 'bookkeeping': 1, 'unknown': 1, 'unparseable': 1}

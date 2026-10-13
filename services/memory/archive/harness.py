@@ -143,7 +143,8 @@ BOOKKEEPING_TYPES = frozenset({
 
 
 class Classified:
-    """One line's classification. `record` is the parsed object, or None for
+    """One line's classification. Only CONVERSATIONAL is usable for
+    indexing (REQ-05's table). `record` is the parsed object, or None for
     an unparseable line; `version` is the `version` the record itself
     carries, or None."""
 
@@ -153,10 +154,6 @@ class Classified:
         self.cls = cls
         self.record = record
         self.version = version
-
-    @property
-    def usable_for_indexing(self):
-        return self.cls == CONVERSATIONAL
 
 
 def classify_line(line):
