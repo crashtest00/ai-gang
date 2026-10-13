@@ -15,6 +15,7 @@ import uuid
 
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
+from django.db.models.fields.json import KeyTextTransform
 from django.utils import timezone
 
 
@@ -409,7 +410,20 @@ class OutboxEvent(models.Model):
     relay.py) that marks each row published_at once XADD has durably
     succeeded. A row with published_at IS NULL is "not yet confirmed
     published" — exactly what the relay polls for and what a killed-mid-run
-    relay leaves behind for the next relay run to pick back up."""
+    relay leaves behind for the next relay run to pick back up.
+
+    Two kinds of row share the table (durable-artifact-event-history.md
+    REQ-02). A work-item row names no ``stream`` and stores no
+    ``envelope``: the relay derives both from ``project``, as it always
+    has. An announcement row names the stream it is destined for and
+    stores the envelope its publisher built, which the relay publishes
+    verbatim; its ``project``, ``event_type`` and ``payload`` are copied
+    from that envelope by ``store.write_outbox_event`` so the admin list
+    stays meaningful. The check constraint ``outbox_stream_iff_envelope``
+    refuses a row with one and not the other.
+
+    Nothing deletes a row: the table is the announcement history
+    (REQ-06), and the admin refuses deletes (``OutboxEventAdmin``)."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.TextField()
@@ -419,12 +433,32 @@ class OutboxEvent(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     published_at = models.DateTimeField(null=True, blank=True)
     stream_entry_id = models.TextField(null=True, blank=True)
+    stream = models.TextField(null=True, blank=True)
+    envelope = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = 'outbox_event'
         indexes = [
             models.Index(fields=['created_at'], name='idx_outbox_unpublished',
                          condition=models.Q(published_at__isnull=True)),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=(models.Q(stream__isnull=True, envelope__isnull=True)
+                       | models.Q(stream__isnull=False, envelope__isnull=False)),
+                name='outbox_stream_iff_envelope',
+            ),
+            # One answer per librarian request (durable-artifact-event-
+            # history.md REQ-04): at most one row destined for the
+            # librarian's response stream per request, keyed on the stored
+            # envelope's correlationId (the request's messageId). The
+            # librarian's lookup under its advisory lock is what keeps a
+            # second insert from being attempted; this is its backstop.
+            models.UniqueConstraint(
+                KeyTextTransform('correlationId', 'envelope'),
+                condition=models.Q(stream='aigang:librarian:responses'),
+                name='uniq_outbox_librarian_answer',
+            ),
         ]
 
     def __str__(self) -> str:

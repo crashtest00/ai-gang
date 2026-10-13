@@ -30,7 +30,7 @@ from redis.exceptions import ResponseError
 from librarian.consumer import create_librarian_consumer
 from librarian.envelope import REQUEST_KIND, build_envelope, to_stream_fields
 from librarian.stream_topology import REQUEST_STREAM, RESPONSE_STREAM
-from tests.artifacts_support import admin_client, upload
+from tests.artifacts_support import admin_client, drain_outbox, upload
 
 # Long enough that a slow container never trips it, short enough that a
 # genuinely lost response fails the test rather than hanging the suite.
@@ -153,9 +153,12 @@ def publish_request(env, payload: dict, *, task_id=None) -> tuple[str, str]:
 
 
 def await_response(env, message_id: str, cursor: str, timeout: float = RESPONSE_TIMEOUT_SECONDS) -> dict:
-    """Block for the one response correlated to ``message_id``."""
+    """Block for the one response correlated to ``message_id``. The
+    librarian commits its answer to the outbox on its own thread, so the
+    outbox is drained onto the response stream before every read."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        drain_outbox(env.redis)
         response = env.redis.xread({RESPONSE_STREAM: cursor}, count=20, block=250)
         for _stream, entries in response or []:
             for entry_id, fields in entries:

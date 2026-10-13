@@ -19,19 +19,24 @@ with the project segment absent because there is no project. As with
 an interested subscriber creates its own.
 
 **Envelope.** The same wire shape ``workitems/envelope.py`` defines, down
-to the single ``data`` field and the ``msg-<uuid>`` message id, and
-published through ``workitems.streams.publish``, which validates the
-envelope against ``workitems.envelope`` before it writes — the same
-validation ``librarian/responses.py`` now goes through too, so this is no
-longer the one publish path this service has, only the one every V4
-stream write shares. No ``dedupe_key`` is passed, so there is no SET-NX
-here: ``publish``'s dedupe is opt-in and keyed by caller-supplied
-``dedupe_key`` (``workitems/streams.py``), and an upload has no natural
-key to dedupe on — a re-upload of the same bytes to the same path is a
-second, legitimate event (``action`` is ``replaced``, not a duplicate of
-the first). ``kind`` is ``Kind.ARTIFACT_EVENT``, in that module's
-``VALID_KINDS``, so a consumer using its ``from_stream_fields`` reads
-these entries like any other.
+to the single ``data`` field and the ``msg-<uuid>`` message id. ``kind`` is
+``Kind.ARTIFACT_EVENT``, in that module's ``VALID_KINDS``, so a consumer
+using its ``from_stream_fields`` reads these entries like any other.
+
+**Durability** (durable-artifact-event-history.md REQ-01, REQ-03). The
+envelope is not published here. ``record_upload`` writes it to Core's
+transactional outbox (``workitems.store.write_outbox_event``) inside the
+same transaction as the ``artifact`` row it announces, naming this stream
+as its destination; ``python manage.py relay`` publishes it verbatim once
+Redis takes it. An upload whose transaction rolls back announces nothing,
+and a committed upload is announced even if Redis is down when it commits.
+The envelope is validated against ``workitems.envelope`` when the row is
+written, so a malformed one cannot commit. Its ``messageId`` and
+``createdAt`` are fixed then too, so a relay retry republishes the same
+message, and the relay's per-row dedupe key (``outbox:<row id>``) keeps a
+retry from adding a second entry. A re-upload of the same bytes to the
+same path is still a second, legitimate event (``action`` is ``replaced``)
+with its own row.
 
 One field is unlike a work item's: ``project`` carries the fixed sentinel
 ``_instance``, because the envelope requires a non-empty project and an
@@ -41,11 +46,10 @@ artifact has none.
 from __future__ import annotations
 
 from datetime import datetime, timezone as dt_timezone
-from typing import Any, Optional
+from typing import Any
 
 from workitems.envelope import SCHEMA_VERSION, Kind, new_message_id
-from workitems.redis_client import get_client
-from workitems.streams import publish
+from workitems.store import write_outbox_event
 
 ARTIFACT_EVENT_STREAM = 'aigang:artifacts:events'
 ARTIFACT_EVENT_KIND = Kind.ARTIFACT_EVENT
@@ -81,22 +85,13 @@ def _build_upload_envelope(artifact, *, created: bool) -> dict[str, Any]:
     }
 
 
-def publish_upload(artifact, *, created: bool, client: Optional[Any] = None) -> str:
-    """Publish the upload event and return its stream entry id.
+def record_upload(artifact, *, created: bool) -> str:
+    """Write the upload event to the outbox and return the outbox row's id.
 
-    Called from the admin's ``save_model`` through
-    ``transaction.on_commit``, so nothing is announced for an upload whose
-    record did not commit. The converse gap — a commit whose publish then
-    fails — is real: the caller catches and logs it (``artifacts/admin.py``)
-    so the committed upload still answers success, and the transactional
-    outbox ``workitems`` uses for that guarantee is proposed, not built,
-    because this spec does not require it.
-
-    ``workitems.streams.publish`` rather than a bare ``XADD``: it validates
-    the envelope against ``workitems.envelope`` before anything reaches the
-    stream, so a malformed event cannot be written here and rejected by
-    every reader.
+    Called from the admin's ``save_model`` inside the transaction that
+    saves the ``artifact`` row, after the save has assigned the stored
+    path. The row commits or rolls back with the upload; the relay
+    publishes it to ``aigang:artifacts:events``.
     """
-    client = client or get_client()
-    result = publish(client, ARTIFACT_EVENT_STREAM, _build_upload_envelope(artifact, created=created))
-    return result['entryId']
+    return write_outbox_event(stream=ARTIFACT_EVENT_STREAM,
+                              envelope=_build_upload_envelope(artifact, created=created))

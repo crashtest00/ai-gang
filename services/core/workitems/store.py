@@ -60,6 +60,7 @@ from django.utils import timezone
 from artifacts.models import Artifact
 
 from . import assignment, jira_writer, project_config, status_vocabulary, write_gate
+from .envelope import validate_envelope
 from .models import (
     OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink,
     WorkItemReleaseDetail, WorkItemSpecificationLink, WorkItemStoryDetail,
@@ -122,14 +123,50 @@ class ReleaseGateError(Exception):
         self.outstanding = outstanding
 
 
-def write_outbox_event(*, project: str, event_type: str, work_item_id: Optional[str], payload: dict) -> str:
+def write_outbox_event(*, project: Optional[str] = None, event_type: Optional[str] = None,
+                       work_item_id: Optional[str] = None, payload: Optional[dict] = None,
+                       stream: Optional[str] = None, envelope: Optional[dict] = None) -> str:
     """Write an outbox row in the SAME transaction as the
     datastore change it describes. Callers MUST already be inside a
     transaction.atomic() block. Public: reused directly by catchup.py and
     admin.py (both need to emit an outbound event for a write that isn't
-    one of this module's own named mutations)."""
+    one of this module's own named mutations). Returns the row's id.
+
+    Two forms (durable-artifact-event-history.md REQ-02):
+
+    - **A work-item event** — ``project``, ``event_type``, ``payload`` and
+      optionally ``work_item_id``; no ``stream``, no ``envelope``. The
+      relay derives the stream (``aigang:workitems:{project}:events``) and
+      builds the envelope around ``payload``, exactly as before these two
+      parameters existed.
+    - **An announcement** — ``stream`` and ``envelope`` together, and none
+      of the other four. ``envelope`` is a complete platform envelope
+      (``workitems/envelope.py``), validated here so a malformed one is
+      refused before it can commit (``EnvelopeError``), and the relay
+      publishes it to ``stream`` verbatim, keeping its ``messageId`` and
+      ``createdAt``. The row's ``project``, ``event_type`` and ``payload``
+      are copied from it — ``project``; ``payload.eventType`` where
+      present, else ``kind``; and ``payload`` — so the admin list and
+      filters read the same for both kinds of row.
+
+    The pairing is enforced by the database: ``outbox_stream_iff_envelope``
+    (``models.OutboxEvent``) refuses a row naming a stream without an
+    envelope, or carrying an envelope without a stream, with an
+    ``IntegrityError``.
+    """
+    if envelope is not None:
+        if project is not None or event_type is not None or payload is not None or work_item_id is not None:
+            raise TypeError('write_outbox_event: an announcement row takes its project, event_type and payload '
+                            'from its envelope; pass stream and envelope only')
+        validate_envelope(envelope)
+        project = envelope['project']
+        event_type = envelope['payload'].get('eventType') or envelope['kind']
+        payload = envelope['payload']
+    elif project is None or event_type is None or payload is None:
+        raise TypeError('write_outbox_event: a work-item row needs project, event_type and payload')
     event = OutboxEvent.objects.create(
         project=project, event_type=event_type, work_item_id=work_item_id, payload=payload,
+        stream=stream, envelope=envelope,
     )
     return str(event.id)
 

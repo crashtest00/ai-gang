@@ -18,7 +18,7 @@ from librarian.failures import MISSING_FIELD
 from librarian.responses import STATUS_DELIVERED, STATUS_FAILED
 from librarian.stream_topology import REQUEST_GROUP, REQUEST_STREAM, RESPONSE_STREAM
 from tests.librarian_support import (  # noqa: F401 - librarian_env is a fixture
-    await_response, librarian_env, make_repo, publish_request, request_delivery, seed_artifact,
+    await_response, drain_outbox, librarian_env, make_repo, publish_request, request_delivery, seed_artifact,
 )
 
 MOCKUP = b'\x89PNG\r\n\x1a\n-pretend-this-is-a-mockup-'
@@ -143,6 +143,7 @@ def test_an_entry_that_is_not_a_librarian_envelope_is_dead_lettered_and_not_answ
 
     dead = _await_dead_letter(librarian_env)
     assert dead['reason'] == 'invalid_envelope'
+    drain_outbox(librarian_env.redis)
     assert librarian_env.redis.xlen(RESPONSE_STREAM) == 0
 
 
@@ -154,6 +155,7 @@ def test_a_response_replayed_onto_the_request_stream_is_dead_lettered(librarian_
 
     dead = _await_dead_letter(librarian_env)
     assert 'not a request' in dead['reason']
+    drain_outbox(librarian_env.redis)
     assert librarian_env.redis.xlen(RESPONSE_STREAM) == 0
 
 

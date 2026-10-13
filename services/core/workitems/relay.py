@@ -16,6 +16,11 @@ layer because `dedupe_key` below reuses the exact same idempotency key on
 every attempt for a given outbox row (streams.py's own SET NX pattern,
 the Streams layer's existing idempotency mechanism).
 
+One relay, one pass, every row in ``created_at`` order: work-item events
+and the announcements that name their own stream (V4's upload event and
+the librarian's answers, durable-artifact-event-history.md) interleave in
+the same loop under the same per-row ``dedupe_key``.
+
 Direct port of the Node service's src/relay.js.
 """
 
@@ -48,25 +53,7 @@ def relay_once(redis_client, *, batch_size: int = 20, row_delay_ms: int = 0) -> 
 
     processed = 0
     for row in rows:
-        envelope = {
-            'schemaVersion': '1',
-            'messageId': str(row.id),  # deterministic: stable across retries of the SAME outbox row.
-            'kind': Kind.WORK_ITEM_EVENT,
-            'project': row.project,
-            'taskId': None,
-            'contextId': None,
-            'correlationId': None,
-            'createdAt': row.created_at.isoformat(),
-            'payload': {
-                'outboxId': str(row.id),
-                'eventType': row.event_type,
-                'workItemId': str(row.work_item_id) if row.work_item_id else None,
-                'data': row.payload,
-            },
-        }
-        validate_envelope(envelope)
-
-        stream = event_stream_name(row.project)
+        stream, envelope = _destination_and_envelope(row)
         result = publish(redis_client, stream, envelope, dedupe_key=f'outbox:{row.id}')
 
         OutboxEvent.objects.filter(id=row.id).update(
@@ -78,6 +65,44 @@ def relay_once(redis_client, *, batch_size: int = 20, row_delay_ms: int = 0) -> 
             time.sleep(row_delay_ms / 1000)
 
     return processed
+
+
+def _destination_and_envelope(row: OutboxEvent) -> tuple[str, dict[str, Any]]:
+    """Where a row is published, and what.
+
+    A row that names a stream (an announcement, durable-artifact-event-
+    history.md REQ-02/REQ-03) carries the envelope its publisher built: it
+    is published there verbatim, so its ``kind``, ``correlationId``,
+    unnested payload, ``messageId`` and ``createdAt`` are the publisher's,
+    fixed when the row was written and therefore the same on every retry.
+
+    A row that names none (every work-item event) is published exactly as
+    it always was: to the stream derived from its project, in an envelope
+    built here from its columns.
+    """
+    if row.stream is not None:
+        envelope = row.envelope
+        validate_envelope(envelope)
+        return row.stream, envelope
+
+    envelope = {
+        'schemaVersion': '1',
+        'messageId': str(row.id),  # deterministic: stable across retries of the SAME outbox row.
+        'kind': Kind.WORK_ITEM_EVENT,
+        'project': row.project,
+        'taskId': None,
+        'contextId': None,
+        'correlationId': None,
+        'createdAt': row.created_at.isoformat(),
+        'payload': {
+            'outboxId': str(row.id),
+            'eventType': row.event_type,
+            'workItemId': str(row.work_item_id) if row.work_item_id else None,
+            'data': row.payload,
+        },
+    }
+    validate_envelope(envelope)
+    return event_stream_name(row.project), envelope
 
 
 def run_loop(redis_client, *, poll_interval_ms: int = 1000, batch_size: int = 20, row_delay_ms: int = 0,

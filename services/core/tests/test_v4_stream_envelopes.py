@@ -21,7 +21,7 @@ from librarian.stream_topology import REQUEST_STREAM, RESPONSE_STREAM
 from workitems.envelope import Kind, from_stream_fields
 from artifacts.events import ARTIFACT_EVENT_STREAM
 from tests.artifacts_support import (  # noqa: F401 - committed_artifact_env is a fixture
-    MARKDOWN_BYTES, admin_client, committed_artifact_env, upload,
+    MARKDOWN_BYTES, admin_client, committed_artifact_env, drain_outbox, upload,
 )
 from tests.librarian_support import (  # noqa: F401 - librarian_env is a fixture
     librarian_env, make_repo, request_delivery, seed_artifact,
@@ -33,6 +33,7 @@ MOCKUP = b'\x89PNG\r\n\x1a\n-pretend-this-is-a-mockup-'
 def _sole_envelope(client, stream: str) -> dict:
     """The one entry on a stream, decoded with the SHARED envelope — the
     decode `workitems.streams.Consumer` applies to every entry it reads."""
+    drain_outbox(client)
     entries = client.xrange(stream)
     assert len(entries) == 1, f'{stream}: expected one entry, got {len(entries)}'
     envelope = from_stream_fields(entries[0][1])

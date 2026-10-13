@@ -10,13 +10,12 @@ from the same client library the deployment uses.
 
 from __future__ import annotations
 
-import logging
 import socket
 
+import pytest
 import redis
 from django.test import Client
 
-from artifacts import events
 from artifacts.events import (
     ACTION_CREATED, ACTION_REPLACED, ARTIFACT_EVENT_KIND, ARTIFACT_EVENT_STREAM, ARTIFACT_UPLOADED, INSTANCE_SCOPE,
 )
@@ -135,34 +134,52 @@ def _a_closed_port() -> int:
         return probe.getsockname()[1]
 
 
-def test_an_upload_whose_event_cannot_be_published_still_succeeds(committed_artifact_env, monkeypatch, caplog):
-    """The publish runs from `transaction.on_commit`, and Django's admin
-    wraps `changeform_view` in `transaction.atomic` — so the callback
-    fires as that block exits, inside the view. An exception there reaches
-    the uploader as a server error for an upload that is already
-    committed, and re-uploading mints a second id for the same file.
+def _redis_that_is_down():
+    return redis.Redis.from_url(f'redis://127.0.0.1:{_a_closed_port()}/0', decode_responses=True,
+                                socket_connect_timeout=2)
 
-    Through the real admin add view, with the publisher's Redis client
-    pointed at a closed port: the record commits, the response is the
-    normal redirect, one ERROR line names the artifact and what was lost,
-    and nothing reaches the stream.
+
+def test_an_upload_made_while_redis_is_down_is_announced_once_redis_is_back(committed_artifact_env, monkeypatch):
+    """durable-artifact-event-history.md REQ-01's Acceptance, replacing the
+    test of the logged loss it removes.
+
+    "Redis stopped" is a client pointed at a closed port, so the failure
+    comes from the same client library the deployment uses without stopping
+    the shared test container: every Redis client this service builds
+    (``workitems.redis_client``) is pointed there while the upload runs, and
+    the relay is first run against it too.
+
+    The upload goes through the real admin add view. It succeeds without a
+    server error, the ``artifact`` row exists, and exactly one outbox row
+    for it is waiting with ``published_at IS NULL``. A relay pass against
+    the stopped Redis fails and leaves it waiting. With Redis back, the
+    relay publishes it, and the stream carries exactly one entry.
     """
-    port = _a_closed_port()
-    monkeypatch.setattr(events, 'get_client', lambda: redis.Redis.from_url(
-        f'redis://127.0.0.1:{port}/0', decode_responses=True, socket_connect_timeout=2,
-    ))
+    from workitems import redis_client as redis_client_module
+    from workitems.models import OutboxEvent
+    from workitems.relay import relay_once
 
-    with caplog.at_level(logging.ERROR, logger='artifacts.admin'):
-        response = post_upload(admin_client(), content=MARKDOWN_BYTES, filename='prd.md', url=ADD_URL)
+    monkeypatch.setattr(redis_client_module, 'get_client', _redis_that_is_down)
+    monkeypatch.setattr(redis_client_module, 'new_client', _redis_that_is_down)
+
+    response = post_upload(admin_client(), content=MARKDOWN_BYTES, filename='prd.md', url=ADD_URL)
 
     assert response.status_code == 302
     artifact = Artifact.objects.get()
     assert artifact.file.name
+    rows = list(OutboxEvent.objects.filter(stream=ARTIFACT_EVENT_STREAM))
+    assert len(rows) == 1
+    assert rows[0].published_at is None
+    assert rows[0].envelope['payload']['artifactId'] == str(artifact.id)
 
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR and r.name == 'artifacts.admin']
-    assert len(errors) == 1, [r.getMessage() for r in errors]
-    message = errors[0].getMessage()
-    assert str(artifact.id) in message
-    assert ACTION_CREATED in message
+    with pytest.raises(redis.exceptions.ConnectionError):
+        relay_once(_redis_that_is_down())
+    assert OutboxEvent.objects.get(id=rows[0].id).published_at is None
+    assert committed_artifact_env.redis.xlen(ARTIFACT_EVENT_STREAM) == 0
 
-    assert read_events(committed_artifact_env) == []
+    published = read_events(committed_artifact_env)
+
+    assert len(published) == 1
+    assert published[0]['payload']['artifactId'] == str(artifact.id)
+    assert published[0]['payload']['action'] == ACTION_CREATED
+    assert OutboxEvent.objects.get(id=rows[0].id).published_at is not None
