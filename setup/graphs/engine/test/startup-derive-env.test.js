@@ -30,12 +30,15 @@ const PLATFORM_ENV = [
   'AIGANG_ADMIN_PASSWORD=a-test-only-password',
   'PGPASSWORD=a-test-only-pg-password',
   'DJANGO_SECRET_KEY=a-test-only-django-key',
+  'MEMORY_PGPASSWORD=a-test-only-memory-pg-password',
+  'MEMORY_DJANGO_SECRET_KEY=a-test-only-memory-django-key',
 ].join('\n') + '\n';
 
 function makeRoot({ platformEnv = PLATFORM_ENV, scrummasterEnv = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-derive-env-'));
   fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'memory'), { recursive: true });
   fs.writeFileSync(path.join(root, '.env'), platformEnv);
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
   fs.copyFileSync(REAL_SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));

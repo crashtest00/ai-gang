@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 8 — build and start the project container, then reload the
+# Step 9 — build and start the project container, then reload the
 # services that read the project list at startup.
 #
 # The container's own entrypoint starts the Redis subscriber under pm2 on
@@ -7,7 +7,7 @@
 #
 # The reload at the end is the rest of this step. Two services read
 # services/scrummaster/config/projects.json once, when they start, and
-# both were started before step 6 registered the configured project in
+# both were started before step 7 registered the configured project in
 # it:
 #
 #   - ScrumMaster creates each configured project's streams and consumer

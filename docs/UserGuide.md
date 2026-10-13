@@ -8,11 +8,12 @@
 
 AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with GitHub on your behalf. They are never given a tracker: a work item reaches an agent through its prompt, and everything an agent reports goes back through ScrumMaster to the core service.
 
-Three shared services run alongside the project containers, and platform
-startup brings up all three: **Redis** (message broker), the **core
+Four shared services run alongside the project containers, and platform
+startup brings up all four: **Redis** (message broker), the **core
 service** (the datastore and the Django admin panel you write stories in,
-at `http://127.0.0.1:9100/django-admin/`), and **ScrumMaster** (work
-router). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes
+at `http://127.0.0.1:9100/django-admin/`), **ScrumMaster** (work
+router), and **Memory** (keeps every agent session's record after its
+container is gone). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes
 to `beta` when a ticket moves to Done) is a later addition an operator
 sets up separately; so are Jira, Cloudflare and the Beta VM.
 
@@ -146,8 +147,9 @@ into that service's own `.env` (and the project's), each written
 owner-readable only; nothing else holds a copy.
 The first section of `.env.template` is what startup needs: your Anthropic
 key, the project's `GH_TOKEN`, the Django admin account you will sign in
-with, and a PostgreSQL password and Django secret key you invent
-(`openssl rand -hex 24` twice). Everything below that first section
+with, and two PostgreSQL passwords and two Django secret keys you invent —
+one of each for the core service, one of each for Memory
+(`openssl rand -hex 24` four times). Everything below that first section
 belongs to Jira, Cloudflare, Jenkins and the Beta VM, which you add later
 if you want them — leave them blank.
 
@@ -155,13 +157,13 @@ if you want them — leave them blank.
 
 `docker compose up --exit-code-from ai-gang` builds and starts one
 container, and streams what it is doing. That container brings up the rest
-— Redis, the core service, ScrumMaster, and your project's own
+— Redis, the core service, ScrumMaster, Memory, and your project's own
 container — and then exits, and the command exits with the same status.
 Status 0 means AI Gang is up. Nothing to run in between. (The
 `--exit-code-from` flag is what carries the container's status out to your
 shell; plain `docker compose up` would return 0 even after a failed run.)
 
-A first run builds four images and takes a while. Run it in the
+A first run builds five images and takes a while. Run it in the
 foreground and watch; if you would rather watch from elsewhere,
 `.ai-gang/status.json` in the checkout says which step is in progress and
 how each service is doing, and `.ai-gang/startup.log` holds the same
@@ -253,9 +255,10 @@ another project by hand to an AI Gang that is already running.*
 
 ### Before you run the script
 
-One thing must exist before `init-project.sh` can finish:
+Two things must exist before `init-project.sh` can finish:
 
-1. **GitHub repository** — create it on GitHub first (empty is fine). The script will prompt for its HTTPS URL, your `GH_TOKEN` (fine-grained PAT — entered securely, not echoed to the terminal), and will push the initial commit automatically. No deploy key setup required.
+1. **Memory's shared harness volume**, `aigang-harness` — platform startup creates it; by hand, see `docs/ClaudeInstructions.md` "2.6 Memory". The script checks for it before asking anything and refuses, naming Memory, without it.
+2. **GitHub repository** — create it on GitHub first (empty is fine). The script will prompt for its HTTPS URL, your `GH_TOKEN` (fine-grained PAT — entered securely, not echoed to the terminal), and will push the initial commit automatically. No deploy key setup required.
 
 ### The fast path: ask Claude
 
@@ -286,7 +289,7 @@ The script will prompt for:
 
 It creates:
 
-- `projects/hello-world/docker-compose.yml` — pre-configured with the `ai-gang` network, env file, and agent-docs mount; container startup runs `gh auth setup-git` using `GH_TOKEN`
+- `projects/hello-world/docker-compose.yml` — pre-configured with the `ai-gang` network, env file, agent-docs mount, and the harness mount (the project's subdirectory of Memory's shared `aigang-harness` volume at `/home/aigang/.claude/projects`, so agent sessions survive a recreate); container startup runs `gh auth setup-git` using `GH_TOKEN`
 - `projects/hello-world/.env` — with `PROJECT_NAME`, `REDIS_HOST`, the Claude credential for the platform's `authMethod` (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`), `GITHUB_URL`, and `GH_TOKEN`
 - `projects/hello-world/src/CLAUDE.md` — project map stub; fill in before the first agent run
 - The Jira project (company-managed Kanban) with all custom fields applied to every screen

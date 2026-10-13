@@ -268,6 +268,8 @@ const PLATFORM_ENV = [
   'AIGANG_ADMIN_PASSWORD=a-test-only-password',
   'PGPASSWORD=a-test-only-pg-password',
   'DJANGO_SECRET_KEY=a-test-only-django-key',
+  'MEMORY_PGPASSWORD=a-test-only-memory-pg-password',
+  'MEMORY_DJANGO_SECRET_KEY=a-test-only-memory-django-key',
 ].join('\n') + '\n';
 
 // A checkout the real entrypoint can validate, derive from and record
@@ -280,6 +282,7 @@ function runnableCheckout() {
   fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
   fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'memory'), { recursive: true });
   fs.copyFileSync(SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
   fs.writeFileSync(path.join(root, '.env'), PLATFORM_ENV);

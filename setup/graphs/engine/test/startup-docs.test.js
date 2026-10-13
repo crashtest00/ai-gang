@@ -190,7 +190,7 @@ test("the UserGuide's example configuration is one the validator accepts", () =>
 test('the services the documents say startup brings up are the ones it checks', () => {
   // confirm-health.sh is the definition of "AI Gang is up".
   const health = read(path.join(STARTUP_DIR, 'confirm-health.sh'));
-  for (const service of ['redis', 'core-api', 'scrummaster']) {
+  for (const service of ['redis', 'core-api', 'scrummaster', 'memory']) {
     assert.ok(health.includes(`check ${service} `), `confirm-health.sh does not check ${service}`);
   }
   assert.match(health, /check "\$PROJECT_NAME" project_ok/);
@@ -201,13 +201,17 @@ test('the services the documents say startup brings up are the ones it checks', 
   assert.ok(guide.includes('core service'));
   assert.ok(guide.includes('ScrumMaster'));
   assert.ok(guide.includes('Redis'));
+  assert.ok(guide.includes('**Memory**'), 'the opening service list must name Memory');
+  const whatHappens = guide.slice(guide.indexOf('### What happens then'));
+  assert.match(whatHappens, /Redis, the core service, ScrumMaster, Memory,? and your project/,
+    "'What happens then' must list Memory among the services startup brings up");
   // Jenkins is not part of this flow and must not be claimed as part of it.
   assert.match(guide, /\*\*Jenkins\*\*[^.]*is a later addition/);
 });
 
 test('the phases the section claims to cover, and those it excludes, both exist in the document', () => {
   const doc = read(CLAUDE_DOC);
-  for (const heading of ['### 2.1 Redis', '### 2.2 ScrumMaster', '### 3.0 Create Project Repo',
+  for (const heading of ['### 2.1 Redis', '### 2.2 ScrumMaster', '### 2.6 Memory', '### 3.0 Create Project Repo',
     '### 3.1 Project Initialisation', '### 3.2 Container Setup', '### 3.5 Start the Redis Subscriber',
     '### 2.0 Cloudflare Tunnel', '### 2.3 Jenkins', '### 3.6 Jenkins Pipeline', '### 3.7 Release Promotion']) {
     assert.ok(doc.includes(heading), `the section refers to a phase with no heading: ${heading}`);
@@ -290,16 +294,39 @@ test('every variable the .env.example declares is one settings.py reads, or a do
   }
 });
 
-test('the variables derive-env.sh actually writes are all declared in the .env.example', () => {
-  const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
-  const derive = read(path.join(STARTUP_DIR, 'derive-env.sh'));
-  const written = [...derive.matchAll(/echo "([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]);
-  assert.ok(written.length > 0);
-  for (const name of new Set(written)) {
-    assert.match(
-      example,
-      new RegExp(`^#?\\s*${name}=`, 'm'),
-      `derive-env.sh writes ${name} but the .env.example does not declare it`
-    );
+// derive-env.sh writes two generated files, each in its own block: the core
+// service's and Memory's. Each block's variables are checked against that
+// service's own .env.example, so a variable one service needs cannot pass
+// because the other declares it.
+function deriveEnvBlock(derive, heading) {
+  const start = derive.indexOf(`# --- ${heading} `);
+  assert.ok(start >= 0, `derive-env.sh has no "${heading}" block`);
+  const next = derive.indexOf('\n# --- ', start + 1);
+  return derive.slice(start, next === -1 ? undefined : next);
+}
+
+for (const [heading, service] of [['core service', 'core'], ['Memory', 'memory']]) {
+  test(`the variables derive-env.sh writes for ${service} are all declared in that service's .env.example`, () => {
+    const example = read(path.join(REPO_ROOT, 'services', service, '.env.example'));
+    const block = deriveEnvBlock(read(path.join(STARTUP_DIR, 'derive-env.sh')), heading);
+    const written = [...block.matchAll(/echo "([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]);
+    assert.ok(written.length > 0);
+    for (const name of new Set(written)) {
+      assert.match(
+        example,
+        new RegExp(`^#?\\s*${name}=`, 'm'),
+        `derive-env.sh writes ${name} for ${service} but services/${service}/.env.example does not declare it`
+      );
+    }
+  });
+}
+
+test("every variable Memory's .env.example declares is one Memory's settings read", () => {
+  const example = read(path.join(REPO_ROOT, 'services', 'memory', '.env.example'));
+  const settings = read(path.join(REPO_ROOT, 'services', 'memory', 'memory', 'settings.py'));
+  const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
+  assert.ok(declared.length > 0);
+  for (const name of new Set(declared)) {
+    assert.ok(settings.includes(`'${name}'`), `${name} is in services/memory/.env.example but memory/settings.py does not read it`);
   }
 });

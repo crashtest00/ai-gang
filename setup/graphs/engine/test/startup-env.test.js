@@ -56,6 +56,8 @@ const FILLED = {
   AIGANG_ADMIN_PASSWORD: 'a-test-only-password',
   PGPASSWORD: 'a-test-only-pg-password',
   DJANGO_SECRET_KEY: 'a-test-only-django-key',
+  MEMORY_PGPASSWORD: 'a-test-only-memory-pg-password',
+  MEMORY_DJANGO_SECRET_KEY: 'a-test-only-memory-django-key',
 };
 
 // The platform configuration validate-env.sh reads the method from, through
@@ -404,7 +406,7 @@ test('a missing .env is reported, naming the file', () => {
 
 test('no secret value is echoed by a passing or failing run', () => {
   const secrets = [FILLED.ANTHROPIC_API_KEY, FILLED.CLAUDE_CODE_OAUTH_TOKEN, FILLED.GH_TOKEN, FILLED.AIGANG_ADMIN_PASSWORD,
-    FILLED.PGPASSWORD, FILLED.DJANGO_SECRET_KEY];
+    FILLED.PGPASSWORD, FILLED.DJANGO_SECRET_KEY, FILLED.MEMORY_PGPASSWORD, FILLED.MEMORY_DJANGO_SECRET_KEY];
   for (const root of [makeRoot(), makeRoot({}, { omit: ['GH_TOKEN'] })]) {
     const result = runValidateEnv(root);
     const output = `${result.stdout}${result.stderr}`;

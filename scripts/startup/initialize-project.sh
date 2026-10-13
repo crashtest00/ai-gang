@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 6 — initialize the configured project.
+# Step 7 — initialize the configured project.
 #
 # This is scripts/init-project.sh, the same script an operator runs by
 # hand, driven from the configuration instead of from prompts: the name,

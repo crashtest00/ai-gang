@@ -217,6 +217,22 @@ load_decisions() {
 # `docker compose` run exactly where an operator would run it: from the
 # service's own directory, so the project name, the .env it interpolates
 # and every relative bind mount are what that compose file expects.
+# The shared harness volume every project container mounts its own
+# subdirectory of, at the agent harness's `projects/` directory (Durable
+# Agent Session Record REQ-01). Created by start-memory.sh;
+# scripts/init-project.sh refuses to generate a project without it.
+AIGANG_HARNESS_VOLUME=aigang-harness
+
+# Memory is up when both of its long-running containers are running: the
+# copier, which keeps the archive, and the API, which serves it. Used by
+# start-memory.sh and confirm-health.sh's `memory` check alike.
+memory_running() {
+  local name
+  for name in memory-copier memory-api; do
+    [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] || return 1
+  done
+}
+
 compose_in() {
   local dir="$1"; shift
   ( cd "$AIGANG_ROOT/$dir" && docker compose "$@" )
