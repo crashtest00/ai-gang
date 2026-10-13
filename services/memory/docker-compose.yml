@@ -1,0 +1,103 @@
+# AI Gang Memory — the archive half of V6's Memory (Durable Agent Session
+# Record, §4). Its own image, its own PostgreSQL and its own named archive
+# volume, on the shared `ai-gang` network. It never connects to Core's
+# database, and nothing on the dispatch path waits for it (REQ-02).
+#
+#   - memory-postgres — Memory's database: the manifest
+#   - migrate         — one-shot `manage.py migrate`; the others wait on it
+#   - memory-copier   — copies every session from the shared harness volume
+#                       into the archive: file-change events plus the
+#                       reconciling pass (REQ-03); session status (REQ-06)
+#   - memory-api      — the manifest, file, notes and counts reads and the
+#                       changed-since listing (REQ-08, REQ-09)
+#
+# scripts/startup/start-memory.sh creates the shared harness volume
+# (`docker volume create aigang-harness`) and then brings this stack up.
+services:
+  memory-postgres:
+    image: postgres:16-alpine
+    container_name: memory-postgres
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${PGUSER}
+      - POSTGRES_PASSWORD=${PGPASSWORD}
+      - POSTGRES_DB=${PGDATABASE}
+    volumes:
+      - memory-postgres-data:/var/lib/postgresql/data
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    image: aigang-memory
+    env_file: .env
+    command: python manage.py migrate --noinput
+    networks:
+      - ai-gang
+    depends_on:
+      memory-postgres:
+        condition: service_healthy
+
+  memory-copier:
+    build: .
+    image: aigang-memory
+    container_name: memory-copier
+    env_file: .env
+    command: python manage.py run_copier
+    # Root: the harness writes transcripts 0600 as its own uid (REQ-01; the
+    # session pickup spike §9.5, S1), and only that uid or root can read them.
+    user: "0:0"
+    environment:
+      - MEMORY_HARNESS_ROOT=/harness
+      - MEMORY_ARCHIVE_ROOT=/var/lib/aigang/memory/archive
+    volumes:
+      # The whole shared harness volume, read-only: every project is one
+      # subdirectory of it, so adding a project never changes this file.
+      - aigang-harness:/harness:ro
+      - memory-archive:/var/lib/aigang/memory/archive
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  memory-api:
+    build: .
+    image: aigang-memory
+    container_name: memory-api
+    env_file: .env
+    command: gunicorn memory.wsgi:application --bind 0.0.0.0:9200
+    environment:
+      - MEMORY_ARCHIVE_ROOT=/var/lib/aigang/memory/archive
+    volumes:
+      - memory-archive:/var/lib/aigang/memory/archive:ro
+    networks:
+      ai-gang:
+        aliases:
+          - memory
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+networks:
+  ai-gang:
+    external: true
+
+volumes:
+  memory-postgres-data:
+  # The archive: the only copy of a session once the harness has deleted it
+  # from the source volume, so never treated as disposable (§4).
+  memory-archive:
+  # The shared harness volume. External, as in every project's compose file,
+  # so no `docker compose down -v` here or in a project deletes it.
+  aigang-harness:
+    external: true
+    name: aigang-harness
