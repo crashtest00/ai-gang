@@ -164,6 +164,19 @@ class Consumer:
     consuming a retry slot, any other exception is a transient failure left
     pending for reclaim/retry up to max_attempts.
 
+    **Archive mode** (``archive=True``, durable-a2a-message-record.md §4,
+    "`streams.Consumer` needs an archive mode") is opt-in and used only by the
+    A2A archive group (``a2a_archive.py``). It shares the read, reclaim and
+    acknowledge machinery above and changes four things, so that no path in
+    it can call ``dead_letter``: the handler is called as
+    ``handler(entry_id, fields)`` with the entry id and the raw stream fields,
+    so it sees the entry id it stores and the ``data`` field verbatim; an
+    entry that is not a valid envelope is passed to the handler like any
+    other, not dead-lettered; a failure is retried without an attempt limit
+    (``max_attempts`` is ignored); and ``PermanentError`` or an exception
+    carrying ``permanent`` is an ordinary failure, left pending. Every other
+    consumer runs with ``archive=False`` and behaves exactly as before.
+
     Runs its blocking XREADGROUP loop on a dedicated connection (mirrors
     streams.js's `readClient = client.duplicate()`) so multiple consumers
     sharing a connection pool don't block each other's blocking reads, and
@@ -178,7 +191,8 @@ class Consumer:
                  max_attempts: int = DEFAULT_MAX_ATTEMPTS,
                  block_ms: int = DEFAULT_BLOCK_MS,
                  reclaim_interval_ms: int = DEFAULT_RECLAIM_INTERVAL_MS,
-                 batch_size: int = DEFAULT_BATCH_SIZE):
+                 batch_size: int = DEFAULT_BATCH_SIZE,
+                 archive: bool = False):
         self._redis_factory = redis_factory
         self.stream = stream
         self.group = group
@@ -189,6 +203,7 @@ class Consumer:
         self.block_ms = block_ms
         self.reclaim_interval_ms = reclaim_interval_ms
         self.batch_size = batch_size
+        self.archive = archive
 
         self._client = redis_factory()
         self._read_client = None
@@ -204,6 +219,10 @@ class Consumer:
         return self._client.hincrby(attempts_key(self.stream, self.group), entry_id, 1)
 
     def _process_entry(self, entry_id: str, fields: dict) -> None:
+        if self.archive:
+            self._process_archive_entry(entry_id, fields)
+            return
+
         envelope = from_stream_fields(fields)
         if envelope is None:
             dead_letter(self._client, self.stream, self.group, entry_id, {'raw': fields}, 'invalid_envelope',
@@ -227,6 +246,26 @@ class Consumer:
                             f'retry exhausted: {err}', attempt_number)
                 return
             # Leave pending — reclaimable once idle past retry_delay_ms.
+
+    def _process_archive_entry(self, entry_id: str, fields: dict) -> None:
+        """Archive mode's whole failure handling: acknowledge once the
+        handler returns, and otherwise leave the entry pending for the
+        reclaim loop to retry, for as long as it takes. The attempt count is
+        still kept, for ``health``'s ``retryCount``, but nothing compares it
+        to a limit, and nothing here writes to a ``:dead`` stream."""
+        attempt_number = self._bump_attempts(entry_id)
+        try:
+            self.handler(entry_id, fields)
+            self._client.xack(self.stream, self.group, entry_id)
+            self._client.hdel(attempts_key(self.stream, self.group), entry_id)
+            record_success(self._client, self.stream, self.group)
+        except Exception as err:  # noqa: BLE001 - every failure, permanent or not, is retried
+            # A failed acknowledgement lands here too, after the handler's
+            # transaction committed: the entry stays pending and its
+            # redelivery finds what it stored (REQ-05), so it is acknowledged
+            # then without a second write.
+            print(f'[streams] archive entry {entry_id} on {self.stream}/{self.group} failed '
+                  f'(attempt {attempt_number}), left pending for retry: {err!r}')
 
     def _reclaim_stale(self) -> None:
         try:

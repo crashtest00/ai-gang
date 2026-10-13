@@ -69,7 +69,28 @@ def health(request):
         else 'degraded' if any(r['status'] == 'degraded' for r in reports) \
         else 'ok'
     status_code = 503 if overall == 'unhealthy' else 200
-    return JsonResponse({'status': overall, 'streams': reports}, status=status_code)
+    return JsonResponse({'status': overall, 'streams': reports, 'a2aRecord': a2a_record_volume()},
+                        status=status_code)
+
+
+# durable-a2a-message-record.md §4, "Volume": the A2A tables, in the order a
+# record is built from them.
+A2A_TABLES = ('a2a_task', 'a2a_message', 'a2a_artifact', 'a2a_conflict', 'a2a_verdict')
+
+
+def a2a_record_volume() -> list[dict]:
+    """Each A2A table's row count and size (``pg_total_relation_size``: the
+    table, its indexes and its TOAST data), for the health view. Informational
+    only: it sets no health status, since no row count is unhealthy."""
+    from django.db import connection
+
+    volume = []
+    with connection.cursor() as cursor:
+        for table in A2A_TABLES:
+            cursor.execute(f'SELECT count(*), pg_total_relation_size(%s) FROM {table}', [table])
+            row_count, size_bytes = cursor.fetchone()
+            volume.append({'table': table, 'rowCount': row_count, 'sizeBytes': size_bytes})
+    return volume
 
 
 def registry_redis_client():
@@ -234,6 +255,38 @@ def get_work_item(request, work_item_id):
     specification_link = readstore.get_specification_link(work_item_id, actor=actor)
     artifact_links = readstore.list_artifact_links(work_item_id, actor=actor)
     return JsonResponse(serialize_work_item_with_references(item, specification_link, artifact_links))
+
+
+@require_http_methods(['GET'])
+def get_a2a_task(request, task_id: str):
+    """durable-a2a-message-record.md REQ-06: a Task's full durable A2A
+    record — every message with its verdict, reason, ``finishedState`` and
+    outcome, verdicts whose message is not yet archived, the state history
+    and the current ``state`` derived at this read. A direct read, recorded
+    in ``access_log``."""
+    actor = request.headers.get('X-Actor', 'http-client')
+    record = store.get_a2a_task(task_id, actor=actor)
+    if record is None:
+        return JsonResponse({'error': 'not found'}, status=404)
+    return JsonResponse(record)
+
+
+@require_http_methods(['GET'])
+def list_a2a_tasks(request):
+    """durable-a2a-message-record.md REQ-11: the paged, changed-since
+    enumeration of A2A Tasks, each with its full record. ``?cursor=`` is the
+    ``nextCursor`` of the previous page (empty: every Task), ``?limit=`` the
+    page size. Writes no access-log row, so a rebuild does not write one per
+    Task."""
+    try:
+        limit = int(request.GET.get('limit', '50'))
+    except ValueError:
+        return _error_response(store.ValidationError('limit must be a positive integer'))
+    try:
+        result = store.list_a2a_tasks(request.GET.get('cursor') or None, limit=limit)
+    except store.ValidationError as err:
+        return _error_response(err)
+    return JsonResponse(result)
 
 
 @require_http_methods(['GET'])
