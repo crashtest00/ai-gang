@@ -326,7 +326,8 @@ test("every variable Memory's .env.example declares is one Memory's settings rea
   const settings = read(path.join(REPO_ROOT, 'services', 'memory', 'memory', 'settings.py'));
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
-  for (const name of new Set(declared)) {
+  // POSTGRES_* are read by the postgres image (memory-postgres), not by settings.py.
+  for (const name of new Set(declared.filter((n) => !n.startsWith('POSTGRES_')))) {
     assert.ok(settings.includes(`'${name}'`), `${name} is in services/memory/.env.example but memory/settings.py does not read it`);
   }
 });

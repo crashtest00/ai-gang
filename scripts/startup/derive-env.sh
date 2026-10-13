@@ -27,6 +27,10 @@
 #     own (Durable Agent Session Record REQ-02): the platform .env's
 #     MEMORY_PGPASSWORD and MEMORY_DJANGO_SECRET_KEY. Its role, database and
 #     host are fixed, Memory's own, and name nothing of the core service's.
+#     The same three values are also written as POSTGRES_USER/POSTGRES_PASSWORD/
+#     POSTGRES_DB, which memory-postgres reads through its env_file: its
+#     compose file interpolates nothing from the caller's environment, which
+#     at platform startup holds the core service's PGPASSWORD.
 #
 #   services/scrummaster/.env — updated in place, never rewritten, so a
 #     value already set directly in that file by hand, or by its own
@@ -157,6 +161,9 @@ MEMORY_TMP="$(mktemp)"
   echo "PGUSER=memory"
   echo "PGPASSWORD=$(env_value MEMORY_PGPASSWORD)"
   echo "PGDATABASE=memory"
+  echo "POSTGRES_USER=memory"
+  echo "POSTGRES_PASSWORD=$(env_value MEMORY_PGPASSWORD)"
+  echo "POSTGRES_DB=memory"
   echo "DJANGO_SECRET_KEY=$(env_value MEMORY_DJANGO_SECRET_KEY)"
 } > "$MEMORY_TMP"
 chmod 600 "$MEMORY_TMP"

@@ -17,18 +17,18 @@ services:
   memory-postgres:
     image: postgres:16-alpine
     container_name: memory-postgres
+    # POSTGRES_USER/PASSWORD/DB come from .env alone, never from ${...}
+    # interpolation: Compose reads the calling process's environment first,
+    # and platform startup runs with Core's PGUSER/PGPASSWORD/PGDATABASE
+    # loaded, which would initialise this database with Core's credential.
     env_file: .env
-    environment:
-      - POSTGRES_USER=${PGUSER}
-      - POSTGRES_PASSWORD=${PGPASSWORD}
-      - POSTGRES_DB=${PGDATABASE}
     volumes:
       - memory-postgres-data:/var/lib/postgresql/data
     networks:
       - ai-gang
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PGUSER} -d ${PGDATABASE}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
