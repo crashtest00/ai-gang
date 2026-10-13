@@ -148,14 +148,16 @@ def core(redis_client, redis_factory):
 # ---------------------------------------------------------------------------
 
 class ScrumMaster:
-    def __init__(self):
+    def __init__(self, *, catalog_path: str | None = None, projects_path: str | None = None):
+        from django.conf import settings
         host, port = redis_host_port()
         env = {
             **os.environ,
             'REDIS_HOST': host,
             'REDIS_PORT': port,
-            'AGENTS_CATALOG_PATH': os.environ['AGENTS_CATALOG_PATH'],
-            'PROJECTS_CONFIG_PATH': os.environ['PROJECTS_CONFIG_PATH'],
+            # The catalog core's registry reads, so both sides see one topology.
+            'AGENTS_CATALOG_PATH': catalog_path or settings.AGENTS_CATALOG_PATH or os.environ['AGENTS_CATALOG_PATH'],
+            'PROJECTS_CONFIG_PATH': projects_path or settings.PROJECTS_CONFIG_PATH or os.environ['PROJECTS_CONFIG_PATH'],
             # No core HTTP API runs in these tests: the gateway's one read
             # (a work item's status, for a log line) degrades to "not known".
             'WORKITEM_SERVICE_URL': 'http://127.0.0.1:9',
@@ -202,8 +204,11 @@ class ScrumMaster:
     def start_gateway(self, project: str = PROJECT, **timing) -> None:
         self.request('startGateway', project=project, **timing)
 
-    def stop_gateway(self) -> None:
-        self.request('stopGateway')
+    def stop_gateway(self, project: str | None = None) -> None:
+        self.request('stopGateway', project=project)
+
+    def replay(self, stream: str, dead_entry_id: str) -> str:
+        return self.request('replay', stream=stream, deadEntryId=dead_entry_id)['entryId']
 
     def fail_publishes(self, count: int, which: str = 'projection') -> None:
         self.request('failPublishes', count=count, which=which)

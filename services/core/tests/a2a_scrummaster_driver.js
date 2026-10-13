@@ -16,10 +16,11 @@
 //   dispatch      { workItemId, project, agentId, dispatchId? }
 //                 -> { taskId, contextId, messageId }
 //   startGateway  { project, retryDelayMs?, reclaimIntervalMs?, maxAttempts?, blockMs? }
-//                 the gateway consumer, through gateway._gatewayConsumerOptions
-//                 (the handler and dead-letter hook startGatewaySubscriber
-//                 wires), with test timing
-//   stopGateway   {}
+//                 one project's gateway consumer, through
+//                 gateway._gatewayConsumerOptions (the handler and dead-letter
+//                 hook startGatewaySubscriber wires), with test timing
+//   stopGateway   { project? }   one project's, or every one
+//   replay        { stream, deadEntryId }  streams.replay of a dead letter
 //   failPublishes { count, which: 'projection' | 'verdict' | 'all' }
 //                 the next `count` matching publishCommand calls throw
 //   taskState     { taskId } -> { state, failedMessageIds, messageIds }
@@ -42,7 +43,7 @@ console.log = (...args) => console.error(...args);
 
 const reply = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 
-let gatewayConsumer = null;
+const gatewayConsumers = new Map();
 const failures = { count: 0, which: 'projection' };
 const realPublishCommand = canonicalWorkItems.publishCommand;
 canonicalWorkItems.publishCommand = async (project, payload, options) => {
@@ -73,8 +74,8 @@ const operations = {
   },
 
   async startGateway({ project, retryDelayMs = 200, reclaimIntervalMs = 100, maxAttempts = 3, blockMs = 100 }) {
-    if (gatewayConsumer) throw new Error('the gateway consumer is already running');
-    gatewayConsumer = streams.createConsumer(redisModule.getClient(), {
+    if (gatewayConsumers.has(project)) throw new Error(`the gateway consumer for ${project} is already running`);
+    const gatewayConsumer = streams.createConsumer(redisModule.getClient(), {
       stream: registry.gatewayStreamName(project),
       group: registry.GATEWAY_GROUP,
       consumerName: 'a2a-driver',
@@ -85,13 +86,22 @@ const operations = {
       blockMs,
     });
     await gatewayConsumer.start();
+    gatewayConsumers.set(project, gatewayConsumer);
     return {};
   },
 
-  async stopGateway() {
-    if (gatewayConsumer) await gatewayConsumer.stop();
-    gatewayConsumer = null;
+  async stopGateway({ project } = {}) {
+    for (const [name, consumer] of [...gatewayConsumers]) {
+      if (project && name !== project) continue;
+      await consumer.stop();
+      gatewayConsumers.delete(name);
+    }
     return {};
+  },
+
+  async replay({ stream, deadEntryId }) {
+    const result = await streams.replay(redisModule.getClient(), streams.deadLetterStreamName(stream), deadEntryId);
+    return { entryId: result.entryId };
   },
 
   async failPublishes({ count, which = 'projection' }) {
@@ -128,7 +138,7 @@ async function main() {
       reply({ ok: false, error: err && err.stack ? err.stack : String(err) });
     }
   }
-  if (gatewayConsumer) await gatewayConsumer.stop();
+  await operations.stopGateway({});
   await redisModule.getClient().quit().catch(() => {});
 }
 
