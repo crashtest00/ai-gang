@@ -86,10 +86,18 @@ test.beforeEach(() => taskStore._reset());
 // (REQ-04, REQ-05), so this one harness serves every test below. It collects
 // the commands published and stubs the one HTTP read the gateway still makes
 // (a work item's own persisted status, for reporting only).
+//
+// From v6.0 the gateway also publishes its verdict on each A2A submission as a
+// `recordA2AVerdict` command (Durable A2A Message Record REQ-04). Those are
+// collected in a list of their own, `calls.verdicts`, so that every assertion
+// on `calls` — the projection's commands — reads exactly as it did before.
 function mockCanonicalWrites(t) {
   const calls = [];
+  const verdicts = [];
+  Object.defineProperty(calls, 'verdicts', { value: verdicts, enumerable: false });
   t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
-    calls.push({ project, payload });
+    if (payload.command === 'recordA2AVerdict') verdicts.push({ project, payload });
+    else calls.push({ project, payload });
     return { deduped: false };
   });
   t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
@@ -237,7 +245,10 @@ test('a completed message retries its pending side effect without a terminal gua
   const { contextId, messageId } = registerTask();
   t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
   let postAttempts = 0;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async () => {
+  // Fails the first projection publish and counts the projection's alone; a
+  // `recordA2AVerdict` (REQ-04) is not part of the projection.
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, payload) => {
+    if (payload.command === 'recordA2AVerdict') return { deduped: false };
     postAttempts += 1;
     if (postAttempts === 1) throw new Error('temporary core outage');
     return { deduped: false };
@@ -366,6 +377,10 @@ function dispatchEnv({ contextId, messageId }) {
       A2A_CONTEXT_ID: contextId,
       A2A_LAST_MESSAGE_ID: messageId,
       AIGANG_COMMONS_DIR: path.join(dispatchDir, 'commons'),
+      // The harness session id the constructor writes into every message
+      // (Durable A2A Message Record REQ-12), set explicitly: the runner's own
+      // environment may not export one.
+      CLAUDE_CODE_SESSION_ID: 'gateway-test-session',
       // The constructor is mounted read-only beside `services/`, outside this
       // package, so its own `redis` comes from here.
       NODE_PATH: path.join(__dirname, '../node_modules'),
@@ -473,7 +488,10 @@ test('the skill documents a subtask\'s two references as optional, and they trav
   ], { contextId, messageId });
 
   let command = null;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -497,7 +515,10 @@ test('a subtask request that leaves both references out is created all the same 
   ], { contextId, messageId });
 
   let command = null;
-  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => { command = c; });
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});

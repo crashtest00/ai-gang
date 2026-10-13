@@ -51,7 +51,15 @@ const consumers = [];
 // successor that names this messageId as its own referenceMessageId is
 // still rejected outright by taskStore's lineage check instead of reading it
 // as merely unresolved (accepted-but-not-yet-applied) and deferring forever.
-function markDeadLetteredSubmissionFailed(envelope) {
+//
+// From v6.0 the hook also tells core what it recorded (Durable A2A Message
+// Record REQ-04): `'updated'` — the message already had an outcome in
+// taskStore — publishes the outcome `failed`; `'recorded'` or `'unknown-task'`
+// — no Task this process holds had recorded the message — publishes the
+// verdict `refused`, `dead_lettered`. The consumer calls the hook with the
+// envelope, reason and attempt count only, so it is given the stream's
+// project by `gatewayConsumerOptions` below.
+async function markDeadLetteredSubmissionFailed(envelope, projectName) {
   const taskId = envelope && envelope.taskId;
   const messageId = envelope && envelope.payload && envelope.payload.message && envelope.payload.message.messageId;
   if (!taskId || !messageId) return;
@@ -64,6 +72,10 @@ function markDeadLetteredSubmissionFailed(envelope) {
       `recording its failure directly so a successor referencing it as its own predecessor is not deferred forever`
     );
   }
+  const verdict = result === 'updated'
+    ? { outcome: 'failed' }
+    : { verdict: 'refused', reason: 'dead_lettered' };
+  await publishVerdictLogged(projectName, { taskId, messageId, sourceMessageId: envelope.messageId, ...verdict });
 }
 
 // The exact handler/onDeadLetter wiring one project's gateway stream
@@ -74,8 +86,47 @@ function markDeadLetteredSubmissionFailed(envelope) {
 function gatewayConsumerOptions(projectName) {
   return {
     handler: envelope => handleGatewayEnvelope(envelope, projectName),
-    onDeadLetter: markDeadLetteredSubmissionFailed,
+    onDeadLetter: envelope => markDeadLetteredSubmissionFailed(envelope, projectName),
   };
+}
+
+// ScrumMaster's verdict on one A2A submission, or an outcome update for it
+// (Durable A2A Message Record REQ-04), as a `recordA2AVerdict` command on the
+// project's existing command stream: no new stream and no new envelope kind.
+// `fields` carries `taskId`, `messageId` (the A2A message's own),
+// `sourceMessageId` (the gateway envelope's), and either `verdict` (with
+// `reason`, and `finishedState`, for a refusal) or `outcome`.
+//
+// Published without a `dedupeKey`, as `postComment` publishes
+// `appendComment`: a `dedupeKey` is claimed before the XADD, so a publish
+// whose XADD failed after its claim would be discarded on the retry and never
+// reach core. A repeated command is harmless instead — core stores a
+// redelivery once, and a re-publication changes no verdict or outcome.
+async function publishVerdict(projectName, fields) {
+  await canonicalWorkItems.publishCommand(projectName, {
+    command: 'recordA2AVerdict',
+    actor: 'scrummaster',
+    ...fields,
+  });
+}
+
+// Every verdict publication but `applied` is caught and logged, never raised:
+// an outcome follows the projection, so raising would run the projection
+// again on the redelivery; a refusal is acknowledged on its first delivery
+// deliberately (reportTaskAlreadyFinished), and raising would retry it into a
+// dead letter recorded against the Task. A lost refusal or outcome leaves the
+// message without a verdict, or reading `pending`, in core; nothing here
+// changes because of it.
+async function publishVerdictLogged(projectName, fields) {
+  try {
+    await publishVerdict(projectName, fields);
+  } catch (err) {
+    const what = fields.verdict ? `verdict "${fields.verdict}"` : `outcome "${fields.outcome}"`;
+    console.error(
+      `[gateway] Could not publish the ${what} for message ${fields.messageId} of task ${fields.taskId} ` +
+      `to core: ${err.message} — core's record of it will lack this update`
+    );
+  }
 }
 
 async function startGatewaySubscriber() {
@@ -415,8 +466,25 @@ async function handleA2ASubmission(envelope, projectName) {
       errors.push(err.message);
     }
   }
+  // Durable A2A Message Record REQ-04: each exit below publishes
+  // ScrumMaster's verdict on this submission to core.
+  const refuse = (reason, extra = {}) => publishVerdictLogged(projectName, {
+    taskId: envelope.taskId,
+    messageId: msg.message.messageId,
+    sourceMessageId: envelope.messageId,
+    verdict: 'refused',
+    reason,
+    ...extra,
+  });
+
   if (errors.length > 0) {
     console.warn(`[gateway] Rejected invalid A2A submission for task ${envelope.taskId}:`, errors.join('; '));
+    // Only a message core can key — by its Task and its own messageId — is
+    // given a verdict; core stores nothing for any other.
+    if (typeof envelope.taskId === 'string' && envelope.taskId &&
+        typeof msg.message?.messageId === 'string' && msg.message.messageId) {
+      await refuse('invalid');
+    }
     return null;
   }
 
@@ -424,18 +492,21 @@ async function handleA2ASubmission(envelope, projectName) {
   const record = taskStore.getTaskById(taskId);
   if (!record) {
     console.warn(`[gateway] Unknown task ${taskId} on ${registry.gatewayStreamName(projectName)} — dropping`);
+    await refuse('unknown_task');
     return null;
   }
 
   const taskProjectName = record.metadata.projectName?.toLowerCase();
   if (taskProjectName && taskProjectName !== registry.normalizeProjectName(projectName)) {
     console.warn(`[gateway] Task ${taskId} belongs to project "${taskProjectName}", not "${projectName}" — dropping`);
+    await refuse('wrong_project');
     return null;
   }
 
   const message = msg.message;
   if (message.role !== 'agent') {
     console.warn(`[gateway] Task ${taskId} submission has role "${message.role}", expected "agent" — dropping`);
+    await refuse('wrong_role');
     return null;
   }
 
@@ -451,9 +522,28 @@ async function handleA2ASubmission(envelope, projectName) {
     });
   } catch (err) {
     if (err instanceof taskStore.A2ATerminalTaskError) {
+      await refuse('task_finished', { finishedState: stateBeforeApplying });
       await reportTaskAlreadyFinished(record, stateBeforeApplying, projectName, envelope);
       return { ticket_key: record.id, alreadyFinished: stateBeforeApplying };
     }
+    throw err;
+  }
+
+  // applyTransition returned: taskStore has recorded the message and moved
+  // the Task to its state (or found it already succeeded). Published before
+  // any of the projection and RAISED on failure, as a failed appendComment
+  // publication is: idempotency.once then records no outcome, the entry stays
+  // pending, and its redelivery applies the still-pending message again
+  // without recording it twice, and publishes this again.
+  try {
+    await publishVerdict(projectName, {
+      taskId, messageId: message.messageId, sourceMessageId: envelope.messageId, verdict: 'applied',
+    });
+  } catch (err) {
+    console.error(
+      `[gateway] Could not publish the "applied" verdict for message ${message.messageId} of task ${taskId} ` +
+      `to core: ${err.message} — the entry stays pending and will be redelivered`
+    );
     throw err;
   }
 
@@ -512,6 +602,12 @@ async function handleA2ASubmission(envelope, projectName) {
 
   if (outcome === null) taskStore.markMessageFailed(taskId, message.messageId);
   else taskStore.markMessageSucceeded(taskId, message.messageId);
+  await publishVerdictLogged(projectName, {
+    taskId,
+    messageId: message.messageId,
+    sourceMessageId: envelope.messageId,
+    outcome: outcome === null ? 'failed' : 'succeeded',
+  });
   return outcome;
 }
 

@@ -54,6 +54,12 @@ function commandsOf(command) {
   return fakeCore.commands.filter(c => c.command === command);
 }
 
+// The projection's commands, without the `recordA2AVerdict` commands the
+// gateway also publishes from v6.0 (Durable A2A Message Record REQ-04).
+function projectionCommands() {
+  return fakeCore.commands.filter(c => c.command !== 'recordA2AVerdict');
+}
+
 // Register a Task in the in-memory store the way handlers.js's dispatchTask
 // would have when ScrumMaster originally assigned it — a gateway submission
 // is only ever meaningful for a Task that already exists.
@@ -210,7 +216,21 @@ test('a gateway envelope claiming the wrong project is dead-lettered without any
     await gateway.stopGatewaySubscriber();
   }
 
-  assert.deepEqual(fakeCore.commands, [], 'nothing should have been written to core');
+  assert.deepEqual(projectionCommands(), [], 'nothing should have been written to core');
+  // Durable A2A Message Record REQ-04: the dead-letter hook still tells core
+  // the message was refused. The Task is one this process holds, so
+  // recordDeadLetteredMessageFailure returns 'recorded' and the refusal is
+  // `dead_lettered`, published to the project whose stream it arrived on.
+  assert.deepEqual(commandsOf('recordA2AVerdict'), [{
+    project: 'hello-world',
+    command: 'recordA2AVerdict',
+    actor: 'scrummaster',
+    taskId: 'HW-1',
+    messageId: foreignEnvelope.payload.message.messageId,
+    sourceMessageId: foreignEnvelope.messageId,
+    verdict: 'refused',
+    reason: 'dead_lettered',
+  }]);
 });
 
 test('comment operation appends exactly once even if delivered twice with the same messageId', async () => {

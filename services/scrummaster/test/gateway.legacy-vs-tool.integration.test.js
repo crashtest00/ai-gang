@@ -159,6 +159,9 @@ function publishThroughConstructor(args) {
           A2A_CONTEXT_ID: TASK_ID,
           A2A_LAST_MESSAGE_ID: SEED_MESSAGE_ID,
           AIGANG_COMMONS_DIR: commonsDir,
+          // Durable A2A Message Record REQ-12: the constructor refuses without
+          // the harness session id, and the runner's environment may lack it.
+          CLAUDE_CODE_SESSION_ID: 'legacy-vs-tool-session',
         },
       },
       (err, stdout, stderr) => {
@@ -186,7 +189,10 @@ function normalizeEntry(envelope) {
     payload: {
       state: envelope.payload.state,
       message: {
-        topLevelKeys: Object.keys(envelope.payload.message).sort(),
+        // `metadata` is left out: the constructor's message carries the
+        // harness session id there (Durable A2A Message Record REQ-12) and the
+        // legacy hand-authored one does not, as it carries no other id either.
+        topLevelKeys: Object.keys(envelope.payload.message).filter(key => key !== 'metadata').sort(),
         kind: envelope.payload.message.kind,
         role: envelope.payload.message.role,
         taskId: envelope.payload.message.taskId,
@@ -213,6 +219,9 @@ function normalizeCommands() {
   return fakeCanonical.commands.map(command => {
     const out = { ...command };
     if (typeof out.sourceMessageId === 'string') out.sourceMessageId = '<message-id>';
+    // A verdict names the A2A message it is about (Durable A2A Message Record
+    // REQ-04), whose id is fresh per round like the envelope id above.
+    if (out.command === 'recordA2AVerdict' && typeof out.messageId === 'string') out.messageId = '<message-id>';
     if (out.message && Array.isArray(out.message.subtasks)) {
       out.message = {
         ...out.message,
@@ -271,8 +280,10 @@ async function round(publish) {
     // Every projection is a canonical command, including create_subtask, which
     // materializes the subtask in core and dispatches from its own ready event
     // rather than here.
+    // Waits for a projection command: the `applied` verdict (REQ-04) is
+    // published before any of the projection.
     await waitFor(
-      async () => fakeCanonical.commands.length > 0,
+      async () => fakeCanonical.commands.some(command => command.command !== 'recordA2AVerdict'),
       'the gateway to apply the submission'
     );
     // Let any follow-on step (transition, dispatch) finish too.
