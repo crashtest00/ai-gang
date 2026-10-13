@@ -9,7 +9,9 @@
  * Every case runs `a2a-submit.js` as a real child process, from a copy of the
  * commons laid out the way a dispatch lays it out —
  * `<dispatch>/commons/tools/` beside an empty `<dispatch>/state/` — with the
- * seven environment variables the subscriber exports, against the real test
+ * seven environment variables the subscriber exports — and the harness's own
+ * CLAUDE_CODE_SESSION_ID, set here to a fixed value rather than taken from
+ * whatever runs the suite (V6 Durable A2A Message Record REQ-12) — against the real test
  * Redis (redis://localhost:16399, services/core/docker-compose.test.yml; start
  * it first if it is not up, never `down` it). No internal function is called
  * in the tool's place, and what is asserted is the entry that reached the
@@ -35,6 +37,9 @@ const STREAM = `aigang:gateway:${PROJECT}`;
 const TASK_ID = 'HW-1';
 const CONTEXT_ID = 'HW-CTX-1';
 const DISPATCH_MESSAGE_ID = 'msg-dispatch-abc';
+// The harness session id every submission carries (REQ-12). Fixed, so no case
+// depends on whether the runner's own environment exports one.
+const SESSION_ID = '0a99a2fd-1c2b-4d3e-8f40-5a6b7c8d9e0f';
 
 let client;
 let root;
@@ -76,23 +81,27 @@ function newDispatch() {
   };
 }
 
-function submit(dispatch, args, { env = {}, taskId = TASK_ID } = {}) {
+function submit(dispatch, args, { env = {}, unset = [], taskId = TASK_ID } = {}) {
+  const childEnv = {
+    ...process.env,
+    PROJECT_NAME: PROJECT,
+    REDIS_HOST: 'localhost',
+    REDIS_PORT: '16399',
+    A2A_TASK_ID: taskId,
+    A2A_CONTEXT_ID: CONTEXT_ID,
+    A2A_LAST_MESSAGE_ID: DISPATCH_MESSAGE_ID,
+    AIGANG_COMMONS_DIR: dispatch.commonsDir,
+    CLAUDE_CODE_SESSION_ID: SESSION_ID,
+    ...env,
+  };
+  // Deleted from the child's environment, not left to the runner's.
+  for (const name of unset) delete childEnv[name];
   return new Promise(resolve => {
     execFile(
       process.execPath,
       [dispatch.tool, ...args],
       {
-        env: {
-          ...process.env,
-          PROJECT_NAME: PROJECT,
-          REDIS_HOST: 'localhost',
-          REDIS_PORT: '16399',
-          A2A_TASK_ID: taskId,
-          A2A_CONTEXT_ID: CONTEXT_ID,
-          A2A_LAST_MESSAGE_ID: DISPATCH_MESSAGE_ID,
-          AIGANG_COMMONS_DIR: dispatch.commonsDir,
-          ...env,
-        },
+        env: childEnv,
       },
       (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout, stderr })
     );
@@ -480,6 +489,56 @@ test('REQ-03: a session with no dispatch context is refused, naming the variable
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /A2A_TASK_ID/);
   assert.match(result.stderr, /A2A_LAST_MESSAGE_ID/);
+  assert.equal(await client.xLen(STREAM), 0);
+});
+
+// ---------------------------------------------------------------------------
+// V6 Durable A2A Message Record REQ-12 — every message names its session
+// ---------------------------------------------------------------------------
+
+test('REQ-12: every operation\'s message carries the harness session id as metadata.sessionId', async () => {
+  for (const { name, args } of CASES) {
+    await client.del(STREAM);
+    const dispatch = newDispatch();
+    const entry = await onlyEntry(await submit(dispatch, args));
+    assert.deepEqual(entry.payload.message.metadata, { sessionId: SESSION_ID },
+      `"${name}" must carry the session id CLAUDE_CODE_SESSION_ID names, and nothing else in metadata`);
+  }
+});
+
+test('REQ-12: each run\'s own session id is the one written, not one shared across runs', async () => {
+  const first = await onlyEntry(await submit(newDispatch(), ['comment', '--text', 'one'],
+    { env: { CLAUDE_CODE_SESSION_ID: 'session-one' } }));
+  await client.del(STREAM);
+  const second = await onlyEntry(await submit(newDispatch(), ['comment', '--text', 'two'],
+    { env: { CLAUDE_CODE_SESSION_ID: 'session-two' } }));
+  assert.equal(first.payload.message.metadata.sessionId, 'session-one');
+  assert.equal(second.payload.message.metadata.sessionId, 'session-two');
+});
+
+test('REQ-12: with CLAUDE_CODE_SESSION_ID unset the tool refuses, naming the cause, even beside a transcript', async () => {
+  // A transcript the harness wrote, where a guess would look: the tool must
+  // not take the session id from it, because parallel runs in one container
+  // would make "the most recent transcript" ambiguous.
+  const home = fs.mkdtempSync(path.join(root, 'home-'));
+  const projectsDir = path.join(home, '.claude', 'projects', '-workspace');
+  fs.mkdirSync(projectsDir, { recursive: true });
+  fs.writeFileSync(path.join(projectsDir, `${crypto.randomUUID()}.jsonl`), '{"type":"user"}\n');
+
+  const dispatch = newDispatch();
+  const result = await submit(dispatch, ['comment', '--text', 'hello'], {
+    env: { HOME: home }, unset: ['CLAUDE_CODE_SESSION_ID'],
+  });
+  assert.notEqual(result.code, 0, 'a submission without a session id must not be published');
+  assert.match(result.stderr, /CLAUDE_CODE_SESSION_ID is not set/);
+  assert.match(result.stderr, /Nothing was published/);
+  assert.equal(await client.xLen(STREAM), 0, 'nothing reaches the gateway stream');
+});
+
+test('REQ-12: an empty CLAUDE_CODE_SESSION_ID is refused like an unset one', async () => {
+  const result = await submit(newDispatch(), ['comment', '--text', 'hello'], { env: { CLAUDE_CODE_SESSION_ID: '' } });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /CLAUDE_CODE_SESSION_ID is not set/);
   assert.equal(await client.xLen(STREAM), 0);
 });
 

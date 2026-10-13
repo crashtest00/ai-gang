@@ -21,8 +21,10 @@
  *   a2a-submit.js <operation> [flags]
  *
  * Reads: PROJECT_NAME, A2A_TASK_ID, A2A_CONTEXT_ID, A2A_LAST_MESSAGE_ID,
- * AIGANG_COMMONS_DIR (whose sibling `state/` directory holds the chain), and
- * REDIS_HOST/REDIS_PORT for the connection.
+ * AIGANG_COMMONS_DIR (whose sibling `state/` directory holds the chain),
+ * REDIS_HOST/REDIS_PORT for the connection, and CLAUDE_CODE_SESSION_ID — the
+ * session id the agent harness assigned to this run, which every message
+ * carries as `metadata.sessionId` (V6 Durable A2A Message Record REQ-12).
  */
 
 const fs = require('fs');
@@ -316,6 +318,29 @@ function dispatchContext() {
   return context;
 }
 
+// The session id the agent harness assigned to the run that is calling this
+// tool (V6 Durable A2A Message Record REQ-12). The harness assigns it, not the
+// dispatcher, so it is read from the harness as its binding states: Claude
+// Code exports it to the commands its tools run as CLAUDE_CODE_SESSION_ID,
+// equal to the run's transcript file name without `.jsonl`. It is never
+// guessed from the most recently written transcript, which parallel runs in
+// one container would make ambiguous — so without the variable this tool
+// refuses, and publishes nothing.
+const SESSION_ID_VARIABLE = 'CLAUDE_CODE_SESSION_ID';
+
+function harnessSessionId() {
+  const sessionId = process.env[SESSION_ID_VARIABLE];
+  if (!sessionId) {
+    fail([
+      `${TOOL}: this session's harness session id is not available (${SESSION_ID_VARIABLE} is not set).`,
+      'Every message an agent submits carries the session id its harness assigned to the run that sent it,',
+      `and this tool reads it only from ${SESSION_ID_VARIABLE}, which the agent harness exports to the commands its tools run.`,
+      'Nothing was published.',
+    ]);
+  }
+  return sessionId;
+}
+
 // Per-session state, in the `state/` directory beside the commons snapshot:
 // the snapshot itself is a content-hashed copy nothing writes into, and this
 // state is deleted with the session (Agent Commons REQ-02).
@@ -409,6 +434,7 @@ function buildSubmission(name, operation, args, context) {
     role: 'agent',
     referenceMessageId: previous || context.lastMessageId,
     parts,
+    metadata: { sessionId: context.sessionId },
   };
 
   const artifacts = operation.artifacts ? operation.artifacts(args, context) : undefined;
@@ -439,7 +465,7 @@ async function main() {
   const args = parseOperationArgs(operation, rest);
   checkRequired(first, operation, args);
 
-  const context = dispatchContext();
+  const context = { ...dispatchContext(), sessionId: harnessSessionId() };
   const payload = buildSubmission(first, operation, args, context);
 
   try {
