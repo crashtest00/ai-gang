@@ -52,6 +52,30 @@ function writePlatformConfig(root, authMethod = 'api-key') {
   return file;
 }
 
+// scripts/init-project.sh checks for Memory's shared harness volume ahead of
+// every prompt, and creates the project's subdirectory of it, both through
+// `docker` (Durable Agent Session Record REQ-01). This stand-in answers both
+// without a daemon or the volume: `docker volume inspect` succeeds unless
+// AIGANG_TEST_NO_HARNESS_VOLUME is set, `docker run` succeeds, and every
+// call is logged to AIGANG_TEST_DOCKER_ARGV.
+function stubDockerForHarness(root) {
+  const bin = path.join(root, 'docker-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const stub = path.join(bin, 'docker');
+  fs.writeFileSync(stub, [
+    '#!/usr/bin/env bash',
+    'printf "%s\\n" "$*" >> "$AIGANG_TEST_DOCKER_ARGV"',
+    'if [[ "$1" == "volume" && "$2" == "inspect" ]]; then',
+    '  [[ -n "${AIGANG_TEST_NO_HARNESS_VOLUME:-}" ]] && exit 1',
+    '  exit 0',
+    'fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+  fs.chmodSync(stub, 0o755);
+  return { PATH: `${bin}${path.delimiter}${process.env.PATH}`, AIGANG_TEST_DOCKER_ARGV: path.join(root, 'docker-argv.log') };
+}
+
 function makeIsolatedEnv(extra = {}) {
   const root = makeTempDir('aigang-config-init-');
   const projectsDir = path.join(root, 'projects');
@@ -60,6 +84,7 @@ function makeIsolatedEnv(extra = {}) {
   fs.writeFileSync(projectsConfigPath, JSON.stringify({ projects: [] }, null, 2));
   const env = {
     ...process.env,
+    ...stubDockerForHarness(root),
     AIGANG_PROJECTS_DIR: projectsDir,
     AIGANG_PROJECTS_CONFIG: projectsConfigPath,
     HQ_ENV: path.join(root, 'nonexistent.env'),
@@ -623,4 +648,71 @@ test('a genuine interrupt after registration, then a retry with the same config:
   const registryAfterRefusal = readProjectsConfig(projectsConfigPath);
   const matchesAfterRefusal = registryAfterRefusal.projects.filter((p) => p.name === 'acceptance-project');
   assert.equal(matchesAfterRefusal.length, 1, 'a refused retry must not mutate the registry');
+});
+
+// ---- Memory's shared harness volume (Durable Agent Session Record REQ-01) ----
+
+function dockerCalls(env) {
+  return fs.existsSync(env.AIGANG_TEST_DOCKER_ARGV)
+    ? fs.readFileSync(env.AIGANG_TEST_DOCKER_ARGV, 'utf8').trim().split('\n').filter(Boolean)
+    : [];
+}
+
+test('without the shared harness volume the script refuses, naming Memory, before any prompt or write', () => {
+  const { root, projectsDir, projectsConfigPath, env } = makeIsolatedEnv({ AIGANG_TEST_NO_HARNESS_VOLUME: '1' });
+  const configPath = writeConfigFile(root, 'config.json', VALID_CONFIG);
+
+  const result = runScript(['--config', configPath], { env });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /aigang-harness/);
+  assert.match(result.stderr, /Memory/);
+  assert.doesNotMatch(result.stdout, /Continue\? \[y\/N\]/, 'no prompt is reached');
+  assert.deepEqual(fs.readdirSync(projectsDir), [], 'no project directory is created');
+  assert.deepEqual(readProjectsConfig(projectsConfigPath).projects, []);
+  const calls = dockerCalls(env);
+  assert.deepEqual(calls, ['volume inspect aigang-harness'], 'the volume is checked, never created');
+});
+
+test('the interactive flow refuses without the volume before asking anything', () => {
+  const { projectsDir, env } = makeIsolatedEnv({ AIGANG_TEST_NO_HARNESS_VOLUME: '1' });
+  const result = runScript([], { env, input: 'interactive-project\n\ny\n' });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Memory/);
+  assert.doesNotMatch(result.stdout, /Project name/);
+  assert.deepEqual(fs.readdirSync(projectsDir), []);
+});
+
+test("the generated compose file mounts the project's own subdirectory of the shared volume at the harness's projects/ directory only", () => {
+  const { root, projectsDir, env } = makeIsolatedEnv();
+  const configPath = writeConfigFile(root, 'config.json', VALID_CONFIG);
+
+  const result = runScript(['--config', configPath], { env });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+
+  const compose = fs.readFileSync(path.join(projectsDir, 'acceptance-project', 'docker-compose.yml'), 'utf8');
+  assert.match(compose, /- type: volume\n\s+source: harness\n\s+target: \/home\/aigang\/\.claude\/projects\n\s+volume:\n\s+subpath: acceptance-project\n/);
+  assert.match(compose, /\nvolumes:\n  harness:\n    external: true\n    name: aigang-harness\n/);
+  // Nothing else of the harness's configuration directory is mounted.
+  assert.equal((compose.match(/\.claude/g) || []).length, 1);
+
+  const run = dockerCalls(env).find((call) => call.startsWith('run '));
+  assert.ok(run, 'the subdirectory is created through docker run');
+  assert.match(run, /-v aigang-harness:\/harness/);
+  assert.match(run, /chown 1000:1000/);
+  assert.match(run, / acceptance-project$/);
+});
+
+test("a re-run creates the project's subdirectory again and leaves an existing compose file untouched", () => {
+  const { root, projectsDir, env } = makeIsolatedEnv();
+  const configPath = writeConfigFile(root, 'config.json', VALID_CONFIG);
+  assert.equal(runScript(['--config', configPath], { env }).status, 0);
+  const composePath = path.join(projectsDir, 'acceptance-project', 'docker-compose.yml');
+  const before = fs.readFileSync(composePath, 'utf8');
+  fs.writeFileSync(env.AIGANG_TEST_DOCKER_ARGV, '');
+
+  const retry = runScript(['--config', configPath], { env });
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+  assert.ok(dockerCalls(env).some((call) => call.startsWith('run ') && call.endsWith(' acceptance-project')));
+  assert.equal(fs.readFileSync(composePath, 'utf8'), before);
 });

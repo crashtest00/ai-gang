@@ -38,10 +38,10 @@ const CONFIG = {
   repository: { url: 'https://github.com/an-org/a-repo.git' },
 };
 
-// A `docker` that answers the four questions these two steps ask —
-// is the project container running, does the API answer /health, is the
-// project's subscriber up, and does the project's command stream have a
-// consumer group — and records every call. The consumer group appears
+// A `docker` that answers the questions these two steps ask — is the
+// project container running, are Memory's copier and API running, does the
+// API answer /health, is the project's subscriber up, and does the
+// project's command stream have a consumer group — and records every call. The consumer group appears
 // when, and only when, the consumers have been restarted: without that
 // restart the stand-in behaves exactly as the daemon did on the live run.
 //
@@ -50,7 +50,7 @@ const CONFIG = {
 // redis-cli's own reply arriving in more than one read: the target group
 // is in the first write, everything after it (consumers, pending, and
 // more) in the second.
-function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds = 0 } = {}) {
+function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds = 0, stoppedContainers = [] } = {}) {
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
   const stub = path.join(bin, 'docker');
@@ -70,7 +70,16 @@ function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds =
     '  fi',
     '  exit 0',
     'fi',
-    'if [[ "$1" == "inspect" ]]; then printf "true\\n"; exit 0; fi',
+    // Memory's two containers (confirm-health.sh's `memory` check, through
+    // lib.sh's memory_running) report running unless named as stopped;
+    // any other inspect answers true, as before.
+    'if [[ "$1" == "inspect" ]]; then',
+    ...stoppedContainers.map((name) => `  if [[ "$*" == *" ${name}"* ]]; then printf "false\\n"; exit 0; fi`),
+    '  case "$*" in',
+    '    *" memory-copier"*|*" memory-api"*) printf "true\\n"; exit 0 ;;',
+    '  esac',
+    '  printf "true\\n"; exit 0',
+    'fi',
     'if [[ "$1" == "exec" ]]; then',
     '  shift',
     '  case "$*" in',
@@ -276,3 +285,34 @@ test('health fails, naming the project, when the consumers are not serving it', 
   assert.equal(doc.adminUrl, null, 'a failed health check must not publish an address to open');
   assert.ok(doc.error.includes(PROJECT));
 });
+
+// ---- Memory's check (Durable Agent Session Record REQ-01) ----
+
+test('health checks Memory, and passes when its copier and API are both running', () => {
+  const root = makeRoot();
+  const env = environment(root);
+  fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
+  completeStepsBefore('confirm-health', env);
+
+  const result = runStep('confirm-health.sh', env);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(record(env).services.memory, 'healthy');
+  for (const name of ['memory-copier', 'memory-api']) {
+    assert.ok(calls(env).some((c) => c.command.startsWith('inspect') && c.command.includes(name)),
+      `the memory check must ask whether ${name} is running`);
+  }
+});
+
+for (const stopped of ['memory-api', 'memory-copier']) {
+  test(`health fails, naming memory, when ${stopped} is stopped`, () => {
+    const root = makeRoot();
+    const env = environment(root, { stoppedContainers: [stopped] });
+    fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
+    completeStepsBefore('confirm-health', env);
+
+    const result = runStep('confirm-health.sh', env);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not healthy: .*\bmemory\b/);
+    assert.equal(record(env).services.memory, 'unhealthy');
+  });
+}

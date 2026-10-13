@@ -102,10 +102,11 @@ what the container builds the agent's own instructions from.
 | 3 | `scripts/startup/start-core.sh` | Build and start the core service and apply its database migrations |
 | 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
 | 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
-| 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
-| 7 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
-| 8 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
-| 9 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
+| 6 | `scripts/startup/start-memory.sh` | Create the shared harness volume, then build and start Memory |
+| 7 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
+| 8 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
+| 9 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
+| 10 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
 
 Before the first of them, the entrypoint has already run
 `scripts/startup/validate-config.sh`, `scripts/startup/validate-env.sh`,
@@ -179,7 +180,7 @@ leaves out, and `.ai-gang/agent.log` for the part of it the agent wrote.
 ### Which phases below this flow covers
 
 Included, performed by the steps above: **2.1** (Redis), **2.2**
-(ScrumMaster), **3.1** (project initialisation), **3.2** (container
+(ScrumMaster), **2.6** (Memory), **3.1** (project initialisation), **3.2** (container
 setup), **3.3** (the project map stub `init-project.sh` writes — filling
 it in is still the operator's), **3.4** (Claude Code and git access in the
 project container, exercised by the end-to-end test below) and **3.5**
@@ -487,6 +488,55 @@ This creates the unprivileged `beta-deploy` account with rootless Docker, genera
 
 Verify: `curl http://$BETA_VM_HOST:$BETA_VM_TRAEFIK_PORT` reaches Traefik (a 404 is expected — no routes exist until the first `deploy.sh`/`preview-deploy.sh` runs).
 
+### 2.6 Memory
+
+Memory keeps every agent session's record — what the agent read, reasoned,
+tried and produced, as its harness wrote it — after the project container
+that ran it is gone. Each project container mounts its own subdirectory of
+one shared Docker volume, `aigang-harness`, at the agent harness's
+`~/.claude/projects` directory; Memory's copier reads every project's
+sessions from that volume into Memory's own archive. Platform startup does
+this as its `start-memory` step. By hand, for an install that does not use
+platform startup:
+
+1. In the platform `.env` (`~/ai-gang/.env`), set `MEMORY_PGPASSWORD` and
+   `MEMORY_DJANGO_SECRET_KEY` (`openssl rand -hex 24` each). Memory never
+   uses the core service's database or key.
+2. Run `scripts/startup/derive-env.sh` to write `services/memory/.env`. It
+   also regenerates `services/core/.env` and sets ScrumMaster's keys, as at
+   startup, so the platform `.env`'s `PGPASSWORD` and `DJANGO_SECRET_KEY`
+   must be set too.
+3. Create the shared volume and start Memory:
+   ```bash
+   docker volume create aigang-harness
+   cd ~/ai-gang/services/memory && docker compose up -d --build
+   ```
+
+The volume must exist before any project is initialised: `init-project.sh`
+(3.1) refuses without it. Memory's compose file and every project's name it
+`external`, so no `docker compose down -v` deletes it.
+
+Memory runs four containers: `memory-postgres` (its own database),
+`migrate` (one-shot), `memory-copier` (copies sessions, as root, because the
+harness writes transcripts readable only by its own user) and `memory-api`
+(reads sessions, notes and counts on port 9200 inside the `ai-gang`
+network). Memory is healthy when `memory-copier` and `memory-api` are both
+running — the `memory` line of `scripts/startup/confirm-health.sh`.
+
+**Size the host's inotify watch limit.** The copier watches every directory
+on the harness volume — one per project, plus one or more per session the
+harness still keeps — and falls back to its 30-minute reconciling pass for
+any directory it cannot watch, so a low limit costs promptness, never data
+(the copier logs `could not watch …`). Check the limit with
+`sysctl fs.inotify.max_user_watches`, and raise it above the number of
+directories under the volume (`sudo find /var/lib/docker/volumes/aigang-harness/_data -type d | wc -l`),
+with room for growth:
+
+```bash
+echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/90-aigang-inotify.conf
+sudo sysctl --system
+```
+
 ---
 
 ## Phase 3: Per-Repo Container Setup
@@ -522,6 +572,10 @@ the file has validated. A runnable example is
 values are published in `setup/graphs/engine/lib/config/catalog.js`.
 `GitHub HTTPS URL` and `GH_TOKEN` are still prompted for either way.
 
+**Before running this**: Memory's shared harness volume, `aigang-harness`,
+must exist — see 2.6 Memory. The script checks for it before asking
+anything, and refuses, naming Memory, without it.
+
 Without `--config`, the alternative is the fully interactive flow:
 
 ```bash
@@ -541,7 +595,8 @@ target reaches that graph's remediation node (or this script's own
 equivalent guidance) rather than an empty, unexplained repository.
 
 Creates:
-- `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
+- `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount, and the harness mount: the project's subdirectory of `aigang-harness` at `/home/aigang/.claude/projects`, so the agent sessions the container runs survive a recreate and reach Memory
+- `aigang-harness:/<name>/` — the project's subdirectory of the shared harness volume, owned by the harness user; created on every run, so a re-created volume gets it back
 - `projects/<name>/.env` — `PROJECT_NAME`, `REDIS_HOST`, the Claude credential (`ANTHROPIC_API_KEY` for `authMethod` `api-key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth-token`), `GITHUB_URL`, `GH_TOKEN`
 - `projects/<name>/src/CLAUDE.md` — project map stub
 - GitHub branches `dev`, `beta`, `prod` with branch protection rules

@@ -26,6 +26,16 @@ services:
       # Mount shared agent definitions (read-only)
       # All containers can see these best practices
       - ../../setup:/agent-docs:ro
+
+      # The agent harness's session folder, and nothing else of its
+      # configuration: this project's subdirectory of the shared harness
+      # volume, which Memory copies every session from. Change `subpath`
+      # to the project name, as scripts/init-project.sh does.
+      - type: volume
+        source: harness
+        target: /home/aigang/.claude/projects
+        volume:
+          subpath: my-app
       
       # Optional: Mount SSH keys for git operations
       # Uncomment if you need to push/pull from inside container
@@ -74,7 +84,11 @@ services:
   #     - "5432:5432"
   #   restart: unless-stopped
 
-# Optional: Define named volumes
-# Uncomment if using database or other persistent services
-# volumes:
-#   db-data:
+# Named volumes. `harness` is the shared harness volume Memory's startup
+# step creates; it is external, so no `docker compose down -v` deletes it.
+volumes:
+  harness:
+    external: true
+    name: aigang-harness
+  # Uncomment if using database or other persistent services
+  # db-data:

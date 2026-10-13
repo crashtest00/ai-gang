@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Step 9 — confirm every service is healthy, then record completion and
+# Step 10 — confirm every service is healthy, then record completion and
 # the Django admin address.
 #
-# The four services this flow brings up are Redis, the core service,
-# ScrumMaster and the configured project's container. Jira, Cloudflare,
+# The five services this flow brings up are Redis, the core service,
+# ScrumMaster, Memory and the configured project's container. Jira, Cloudflare,
 # Jenkins and the Beta VM are later phases an operator adds, and are not
 # checked here because this flow never started them.
 #
@@ -50,6 +50,10 @@ scrummaster_ok() {
   docker exec scrummaster node -e \
     "fetch('http://localhost:9000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 }
+# Memory is healthy when both its copier and its API are running
+# (lib.sh's memory_running): a stopped copier leaves sessions uncopied, a
+# stopped API leaves the archive unreadable.
+memory_ok() { memory_running; }
 # The project container is healthy when its Redis subscriber is up: that
 # is the process that turns a dispatched story into an agent run, and a
 # container without it is running but deaf.
@@ -62,6 +66,7 @@ log "confirming service health"
 check redis redis_ok
 check core-api wis_ok
 check scrummaster scrummaster_ok
+check memory memory_ok
 check "$PROJECT_NAME" project_ok
 check core-consumers consumers_ok
 

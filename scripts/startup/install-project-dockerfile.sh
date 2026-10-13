@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 7 — install the project container's Dockerfile from the template
+# Step 8 — install the project container's Dockerfile from the template
 # its configured stack profile selects.
 #
 # scripts/init-project.sh writes the project's docker-compose.yml with

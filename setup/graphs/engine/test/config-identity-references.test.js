@@ -44,6 +44,30 @@ function writePlatformConfig(root, authMethod = 'api-key') {
   return file;
 }
 
+// scripts/init-project.sh checks for Memory's shared harness volume ahead of
+// every prompt, and creates the project's subdirectory of it, both through
+// `docker` (Durable Agent Session Record REQ-01). This stand-in answers both
+// without a daemon or the volume: `docker volume inspect` succeeds unless
+// AIGANG_TEST_NO_HARNESS_VOLUME is set, `docker run` succeeds, and every
+// call is logged to AIGANG_TEST_DOCKER_ARGV.
+function stubDockerForHarness(root) {
+  const bin = path.join(root, 'docker-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const stub = path.join(bin, 'docker');
+  fs.writeFileSync(stub, [
+    '#!/usr/bin/env bash',
+    'printf "%s\\n" "$*" >> "$AIGANG_TEST_DOCKER_ARGV"',
+    'if [[ "$1" == "volume" && "$2" == "inspect" ]]; then',
+    '  [[ -n "${AIGANG_TEST_NO_HARNESS_VOLUME:-}" ]] && exit 1',
+    '  exit 0',
+    'fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+  fs.chmodSync(stub, 0o755);
+  return { PATH: `${bin}${path.delimiter}${process.env.PATH}`, AIGANG_TEST_DOCKER_ARGV: path.join(root, 'docker-argv.log') };
+}
+
 function makeIsolatedEnv() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-config-identity-refs-'));
   const projectsDir = path.join(root, 'projects');
@@ -52,6 +76,7 @@ function makeIsolatedEnv() {
   fs.writeFileSync(projectsConfigPath, JSON.stringify({ projects: [] }, null, 2));
   const env = {
     ...process.env,
+    ...stubDockerForHarness(root),
     AIGANG_PROJECTS_DIR: projectsDir,
     AIGANG_PROJECTS_CONFIG: projectsConfigPath,
     HQ_ENV: path.join(root, 'nonexistent.env'),
