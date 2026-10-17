@@ -14,12 +14,12 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from extraction.models import ExtractionRecord
-from index import render
 from index.models import CLASSES, PROJECT_CLASSES, IndexUnit
 from index.status import index_status
 from tests.index_support import (  # noqa: F401 - fixtures
     archive_api, checkout, core, index_once, redis_client, resolve_session_unit, search, seeded, units,
 )
+from tests.retrieval_support import read_source, status_core, unexplained  # noqa: F401 - fixture
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -48,22 +48,21 @@ def test_req01_a_class_not_yet_indexed_is_observable_not_an_empty_result(seeded)
     assert index_status()['reasons'] == []
 
 
-def test_req02_every_units_reference_resolves_to_its_source_and_matches_it(seeded, core, archive_api, checkout):
+def test_req02_every_units_reference_resolves_to_its_source_and_matches_it(seeded, core, status_core, archive_api,
+                                                                         checkout):
+    from retrieval import sources
     index_once()
-    records = core.snapshot()
     checked = set()
     for unit in units():
         ref = unit.reference
-        if unit.source_class == 'work_item':
-            sections = {name: r.text for name, r in render.work_item(records['work_items'][ref['workItemId']])}
-            source = sections[ref['section']]
-        elif unit.source_class == 'work_item_comment':
-            source = render.comment(records['comments'][ref['commentId']]).text
-        elif unit.source_class == 'delivery_artifact':
-            source = render.delivery_artifact(records['delivery'][ref['deliveryArtifactId']]).text
-        elif unit.source_class == 'a2a_message':
-            message = next(m for m in records['a2a'][ref['taskId']]['messages'] if m['messageId'] == ref['messageId'])
-            source = render.a2a_message(message).text
+        if unit.source_class in ('work_item', 'work_item_comment', 'delivery_artifact', 'a2a_message'):
+            # A Core record: follow each named field into the JSON Core's own read
+            # returns, and confirm the unit's text is those fields' values there
+            # (Knowledge Retrieval REQ-04). Memory's rendering is not the source.
+            body = read_source(core, sources.address(unit.source_class, ref))
+            assert ref['fields'] and unexplained(unit.text, ref['fields'], body) == [], unit.source_key
+            checked.add(unit.source_class)
+            continue
         elif unit.source_class in ('specification', 'library_file'):
             record = ExtractionRecord.objects.get(artifact_id=ref['artifactId'])
             # REQ-02: the extraction's stamp, the currency key of its REQ-03.

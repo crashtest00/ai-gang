@@ -214,6 +214,14 @@ def test_ac07_the_field_check_catches_text_its_fields_do_not_hold():
     assert unexplained('Delivery artifact (build): x\n', fields[:1], body)
     # A field left unnamed leaves its value unexplained.
     assert unexplained(text, fields[:1], body)
+    # A record word the rendering also writes is caught where the rendering would
+    # not put it: "to" is only " to " in a history line, "Status" only "Status: "
+    # at the start of a line.
+    stray = f'Delivery artifact (commit): to {url}\n'
+    moved = [fields[0], {**fields[1], 'span': [31, 31 + len(url)]}]
+    assert unexplained(stray, moved, body) == [('outside', '): to ')]
+    assert unexplained(text + 'Status\n', fields, body) == [('outside', '\nStatus\n')]
+    assert unexplained(text + 'from (none)\n', fields, body) == [('outside', '\nfrom (none)\n')]
 
 
 def test_req04_each_core_class_passage_names_the_fields_of_its_read_that_hold_its_text(client, indexed, core):
@@ -297,8 +305,63 @@ def test_req04_an_a2a_passage_names_each_part_and_artifact_it_holds(client, inde
     at = ['messages', {'messageId': message['messageId']}]
     paths = [f['path'] for f in passage['reference']['fields']]
     assert at + ['parts', 0, 'text'] in paths and at + ['parts', 1, 'data'] in paths
-    assert at + ['artifacts', {'artifactId': 'art-okapi'}, 'artifact', 'parts', 0, 'text'] in paths
+    assert at + ['artifacts', 0, 'artifact', 'parts', 0, 'text'] in paths
     assert at + ['role'] in paths and at + ['direction'] in paths
+
+
+def _a2a_artifact(message, artifact_id, position, name, text):
+    # The shape services/core/workitems/store.py's _a2a_artifact_view returns.
+    return {'artifactId': artifact_id, 'name': name, 'parts': [], 'messageId': message['messageId'],
+            'position': position, 'referenceArtifactId': None, 'metadata': None,
+            'recordedAt': message['recordedAt'],
+            'artifact': {'artifactId': artifact_id, 'name': name, 'parts': [{'kind': 'text', 'text': text}]}}
+
+
+def test_req04_an_a2a_artifact_whose_id_repeats_in_its_message_is_named_by_its_place(client, indexed, core):
+    # Core keeps the same artifactId twice in one message (A2AArtifact); positions
+    # are unique per message and may skip one Core did not store.
+    task = core.a2a_task(['Please time the ibex cache.'])
+    message = task['messages'][0]
+    message['artifacts'] = [_a2a_artifact(message, 'art-ibex', 0, 'ibex-first', 'The ibex cache was cold.'),
+                            _a2a_artifact(message, 'art-ibex', 2, 'ibex-second',
+                                          'The ibex cache warmed in twelve seconds.')]
+    core.put('a2a', task)
+    index_once()
+    passage = top(client, 'How long did the ibex cache take to warm?')
+    assert passage['class'] == 'a2a_message'
+    body = _check_core_passage(passage, core)
+    at = ['messages', {'messageId': message['messageId']}, 'artifacts']
+    paths = [f['path'] for f in passage['reference']['fields']]
+    assert at + [1, 'artifact', 'parts', 0, 'text'] in paths and at + [1, 'artifact', 'name'] in paths
+    assert follow(body, at + [1, 'artifact', 'parts', 0, 'text']) == 'The ibex cache warmed in twelve seconds.'
+    assert follow(body, at + [0, 'artifact', 'parts', 0, 'text']) == 'The ibex cache was cold.'
+
+
+def test_req04_offsets_count_code_points_and_a_non_string_value_is_its_json_text(client, indexed, core):
+    from index.chunking import UNIT_MAX_CHARS
+    # A data part (a non-string value) longer than one unit, with characters
+    # outside the Basic Multilingual Plane before the passage that holds the fact.
+    filler = ' '.join(['\U0001F9A6 otter log line'] * 120)
+    fact = 'The jackal kiln \U0001F525 fires at nine hundred degrees.'
+    data = {'log': f'{filler} {fact}', 'runs': 2}
+    value_text = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    assert len(value_text) > UNIT_MAX_CHARS
+    task = core.a2a_task(['Kiln report attached.'])
+    message = task['messages'][0]
+    message['parts'] = [{'kind': 'data', 'data': data}]
+    core.put('a2a', task)
+    index_once()
+    passage = top(client, 'What temperature does the jackal kiln fire at?')
+    assert passage['class'] == 'a2a_message' and 'jackal kiln \U0001F525' in passage['text']
+    _check_core_passage(passage, core)
+    path = ['messages', {'messageId': message['messageId']}, 'parts', 0, 'data']
+    entry, = [f for f in passage['reference']['fields'] if f['path'] == path]
+    start, end, offset = *entry['span'], entry['valueOffset']
+    assert offset > 0
+    assert passage['text'][start:end] == value_text[offset:offset + end - start]
+    # Code points, not UTF-16 units: the emoji before the passage would shift a UTF-16 offset.
+    assert len(value_text[:offset].encode('utf-16-le')) // 2 > offset
+    assert '\\u' not in passage['text']
 
 
 def _source_text(ref, source_class, core, archive_api, checkout):

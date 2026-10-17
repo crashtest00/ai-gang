@@ -14,7 +14,20 @@ item, comment, delivery artifact or A2A message return JSON, so for those
 classes it is the reference's ``fields`` instead: the JSON path of each field
 value the passage holds, where in the passage it sits, and from which
 character of the value (``index.render``'s docstring), so a consumer checks
-the passage against the JSON field by field. The reference's own
+the passage against the JSON field by field::
+
+    {"path": [<step>, ...], "span": [start, end], "valueOffset": n}
+    passage[start:end] == value_text[n:n + (end - start)]
+
+``span`` and ``valueOffset`` count Unicode code points (Python string
+indices; not UTF-16 code units, as a JavaScript string counts, nor UTF-8
+bytes), so a character outside the Basic Multilingual Plane, an emoji, is
+one. ``value_text`` is the value at ``path`` itself when it is a string, and
+otherwise its JSON text as ``json.dumps(value, sort_keys=True,
+ensure_ascii=False)`` writes it: keys sorted, ``", "`` and ``": "`` between
+items, non-ASCII characters as themselves rather than ``\\uXXXX`` escapes.
+``valueOffset`` is above 0 where the passage starts inside a value longer
+than one unit. The reference's own
 ``section``/``offset``/``end`` are its place in Memory's rendering of the
 record and are not repeated there.
 
