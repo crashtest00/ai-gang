@@ -109,15 +109,17 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 │  │                                                       │  │
 │  │  Inbound (core -> ScrumMaster):                       │  │
 │  │   aigang:workitems:{project}:events  group: dispatch  │  │
-│  │   aigang:workitems:{project}  group: core (commands)  │  │
 │  │                                                       │  │
 │  │  Inbound (ScrumMaster -> agents):                     │  │
-│  │   aigang:agent:{project}:{suffix} group: agent-{suffix}│  │
-│  │                                  group: core-a2a-archive│  │
+│  │   aigang:agent:{project}:{suffix}                     │  │
+│  │     groups: agent-{suffix}, core-a2a-archive          │  │
 │  │                                                       │  │
 │  │  Outbound (agents -> ScrumMaster):                    │  │
-│  │   aigang:gateway:{project}       group: scrummaster   │  │
-│  │                                  group: core-a2a-archive│  │
+│  │   aigang:gateway:{project}                            │  │
+│  │     groups: scrummaster, core-a2a-archive             │  │
+│  │                                                       │  │
+│  │  Outbound (ScrumMaster -> core):                      │  │
+│  │   aigang:workitems:{project}     group: core          │  │
 │  │                                                       │  │
 │  │  Failed messages: <source-stream>:dead                │  │
 │  └───────────────────────────────────────────────────────┘  │
