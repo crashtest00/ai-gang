@@ -61,6 +61,10 @@ class WorkItem(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(default=timezone.now)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item'
         indexes = [
@@ -108,6 +112,10 @@ class WorkItemStoryDetail(models.Model):
     value_hypothesis = models.TextField(null=True, blank=True)
     test_measurement = models.TextField(null=True, blank=True)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item_story_detail'
 
@@ -134,6 +142,10 @@ class WorkItemReleaseDetail(models.Model):
     build_identifier = models.TextField(null=True, blank=True)
     preview_url = models.TextField(null=True, blank=True)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item_release_detail'
 
@@ -154,6 +166,10 @@ class WorkItemLink(models.Model):
     # 'blocks' / 'is_blocked_by' at minimum; open vocabulary, not a fixed enum.
     link_type = models.TextField()
     created_at = models.DateTimeField(default=timezone.now)
+
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = 'work_item_link'
@@ -192,6 +208,10 @@ class WorkItemHistory(models.Model):
     actor = models.TextField()
     occurred_at = models.DateTimeField(default=timezone.now)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item_history'
         indexes = [
@@ -214,6 +234,10 @@ class WorkItemArtifact(models.Model):
     artifact_type = models.TextField()
     reference = models.TextField()
     created_at = models.DateTimeField(default=timezone.now)
+
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = 'work_item_artifact'
@@ -274,6 +298,10 @@ class WorkItemSpecificationLink(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(default=timezone.now)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item_specification_link'
         indexes = [
@@ -311,6 +339,10 @@ class WorkItemArtifactLink(models.Model):
     position = models.PositiveIntegerField()
     created_at = models.DateTimeField(default=timezone.now)
 
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
+
     class Meta:
         db_table = 'work_item_artifact_link'
         ordering = ['position']
@@ -344,6 +376,10 @@ class WorkItemComment(models.Model):
     reference_function = models.TextField(null=True, blank=True)
     source_message_id = models.TextField(unique=True, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
+
+    # The enumeration's change cursor (corpus-indexing.md REQ-11): stamped by the
+    # database on every insert and update (migration 0010), never by code.
+    change_xid = models.BigIntegerField(null=True, blank=True, editable=False)
 
     class Meta:
         db_table = 'work_item_comment'

@@ -14,6 +14,8 @@ a self-declared header (product owner, September 20, 2026).
 
 from __future__ import annotations
 
+import uuid
+
 from django.http import FileResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
@@ -63,3 +65,28 @@ def get_artifact(request, artifact_id):
         return JsonResponse({'error': 'artifact file missing', 'path': artifact.path}, status=404)
 
     return FileResponse(handle, content_type=ARTIFACT_CONTENT_TYPE)
+
+
+MAX_LISTING_PAGE = 1000
+
+
+@require_http_methods(['GET'])
+def list_artifacts(request):
+    """``GET /artifacts[?cursor=&limit=]`` — every artifact's id and
+    ``updatedAt``, a page at a time in id order (artifact-text-extraction.md
+    REQ-04). ``cursor`` is the previous page's ``nextCursor``; ``hasMore``
+    says whether another page follows. A read of the records only: no bytes,
+    no access-log row per file."""
+    try:
+        limit = int(request.GET.get('limit', str(MAX_LISTING_PAGE)))
+        after = uuid.UUID(request.GET['cursor']) if request.GET.get('cursor') else None
+    except ValueError:
+        return JsonResponse({'error': 'cursor must be an artifact id and limit a positive integer'}, status=400)
+    if limit < 1:
+        return JsonResponse({'error': 'limit must be a positive integer'}, status=400)
+    rows, has_more = readstore.list_artifacts(after, limit=min(limit, MAX_LISTING_PAGE))
+    return JsonResponse({
+        'artifacts': [{'id': str(a.id), 'updatedAt': a.updated_at.isoformat()} for a in rows],
+        'nextCursor': str(rows[-1].id) if rows else request.GET.get('cursor') or None,
+        'hasMore': has_more,
+    })
