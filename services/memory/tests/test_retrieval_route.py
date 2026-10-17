@@ -5,7 +5,6 @@ REQ-01 … REQ-07 and the Acceptance steps track 3 handed to this track
 
 import hashlib
 import json
-import re
 import subprocess
 import urllib.parse
 import urllib.request
@@ -23,7 +22,9 @@ from tests.index_support import (  # noqa: F401 - fixtures
     archive_api, checkout, core, extraction, index_once, redis_client, resolve_session_unit, seeded, stream,
     upload_event, work_item_event,
 )
-from tests.retrieval_support import ask, passages, status_core  # noqa: F401 - fixtures
+from tests.retrieval_support import (  # noqa: F401 - fixtures
+    ask, follow, passages, read_source, status_core, unexplained,
+)
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -185,85 +186,119 @@ def test_req02_retrieval_changes_no_authoritative_record_and_its_log_is_not_retu
 
 CORE_CLASSES = ('work_item', 'work_item_comment', 'delivery_artifact', 'a2a_message')
 
-# The labels a Core record's passage may carry around its fields' values. They
-# are written out here, not taken from index.render: the check is that a passage
-# holds nothing its record does not, so it must not be derived from the code
-# that wrote the passage.
-LABELS = {'Work item', 'Type', 'Status', 'Priority', 'External key', 'Assignee', 'Description', 'Behavior',
-          'Acceptance criteria', 'Constraints', 'Edge cases', 'Out of scope', 'Value hypothesis',
-          'Test measurement', 'Release notes', 'Candidate commit', 'Build', 'Preview', 'Comment by', 'File',
-          'Function', 'Delivery artifact', 'Artifact', 'A2A'}
-_LABELLED = re.compile(r'^(?P<label>[^:()]+)(?: \((?P<qualifier>[^)]*)\))?:(?: (?P<rest>.*))?$')
-_HISTORY = re.compile(r'^(?P<at>\S*) (?P<actor>\S*): (?P<field>\S+) from (?P<old>.*) to (?P<new>.*)$')
+
+def _check_core_passage(passage, core):
+    """REQ-04 for a Core record's passage: its reference names the fields of
+    the JSON its ``read`` returns, and the passage is drawn from those
+    fields' values, read from the same Core stub the indexer read."""
+    fields = passage['reference']['fields']
+    assert fields and passage['source']['location'] == {'fields': fields}
+    body = read_source(core, passage['source'])
+    assert unexplained(passage['text'], fields, body) == [], passage
+    return body
 
 
-def _record(ref, source_class, records):
-    if source_class == 'work_item':
-        return records['work_items'][ref['workItemId']]
-    if source_class == 'work_item_comment':
-        return records['comments'][ref['commentId']]
-    if source_class == 'delivery_artifact':
-        return records['delivery'][ref['deliveryArtifactId']]
-    return next(m for m in records['a2a'][ref['taskId']]['messages'] if m['messageId'] == ref['messageId'])
+def test_ac07_the_field_check_catches_text_its_fields_do_not_hold():
+    body = {'artifacts': [{'id': 'd1', 'artifact_type': 'commit',
+                           'reference': 'https://git.example.com/org/zebrafish-api/commit/4242'}]}
+    at, url = ['artifacts', {'id': 'd1'}], body['artifacts'][0]['reference']
+    text = f'Delivery artifact (commit): {url}\n'
+    fields = [{'path': at + ['artifact_type'], 'span': [19, 25], 'valueOffset': 0},
+              {'path': at + ['reference'], 'span': [28, 28 + len(url)], 'valueOffset': 0}]
+    assert unexplained(text, fields, body) == []
+    # Words the record holds nowhere, outside every named field.
+    added = text + 'https git example com org zebrafish api commit 4242\n'
+    assert unexplained(added, fields, body) == [('outside', '\nhttps git example com org zebrafish api commit 4242\n')]
+    # A field named that does not hold the text at its span.
+    assert unexplained(text, [fields[0], {**fields[1], 'valueOffset': 1}], body)
+    assert unexplained('Delivery artifact (build): x\n', fields[:1], body)
+    # A field left unnamed leaves its value unexplained.
+    assert unexplained(text, fields[:1], body)
 
 
-def _values(value) -> list:
-    """Every value the record holds, as text: each scalar, and each object or
-    list whole as JSON (a field whose value is structured is written whole)."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, (dict, list)):
-        out = [json.dumps(value, sort_keys=True, ensure_ascii=False)]
-        for item in (value.values() if isinstance(value, dict) else value):
-            out += _values(item)
-        return out
-    return [json.dumps(value)]
+def test_req04_each_core_class_passage_names_the_fields_of_its_read_that_hold_its_text(client, indexed, core):
+    questions = {'work_item': 'Which sensor drifts in cold rooms?',
+                 'work_item_comment': 'What was the culprit about the cache?',
+                 'delivery_artifact': 'Which commit fixed the axolotl timeout?',
+                 'a2a_message': 'Who asked for a review of the ocelot migration?'}
+    item_id = indexed['item']['id']
+    for source_class, question in questions.items():
+        passage = top(client, question)
+        assert passage['class'] == source_class, question
+        body = _check_core_passage(passage, core)
+        paths = [f['path'] for f in passage['reference']['fields']]
+        if source_class == 'work_item':
+            assert passage['source']['read'] == f'/work-items/{item_id}?full=true'
+            assert ['description'] in paths and ['display_name'] in paths
+        elif source_class == 'work_item_comment':
+            comment_id = passage['reference']['commentId']
+            assert ['comments', {'id': comment_id}, 'body'] in paths
+            assert 'pelican cache' in follow(body, ['comments', {'id': comment_id}, 'body'])
+        elif source_class == 'delivery_artifact':
+            artifact_id = passage['reference']['deliveryArtifactId']
+            assert ['artifacts', {'id': artifact_id}, 'reference'] in paths
+        else:
+            message_id = passage['reference']['messageId']
+            assert passage['source']['read'] == f"/a2a/tasks/{passage['reference']['taskId']}"
+            assert ['messages', {'messageId': message_id}, 'parts', 0, 'text'] in paths
 
 
-def _unexplained_lines(text, record) -> list:
-    """The lines of ``text`` that are not a label around values of
-    ``record``'s own fields."""
-    values = _values(record)
-
-    def held(piece):
-        return piece == '' or any(piece in v for v in values)
-
-    def is_value(piece):
-        return piece in values
-
-    out = []
-    for line in text.split('\n'):
-        if held(line):
-            continue
-        history = _HISTORY.match(line)
-        if history and all(is_value(history[k]) for k in ('at', 'actor', 'field')) and all(
-                history[k] == '(none)' or is_value(history[k]) for k in ('old', 'new')):
-            continue
-        labelled = _LABELLED.match(line)
-        if labelled:
-            label, named = labelled['label'], None
-            for prefix in ('A2A ', 'Artifact '):
-                # An A2A message's label names its role ("message" when it has none);
-                # an artifact's, the artifact's name.
-                if label.startswith(prefix):
-                    label, named = prefix.strip(), label[len(prefix):]
-            if label in LABELS and held(labelled['rest'] or '') and (
-                    not named or named == 'message' or is_value(named)) and (
-                    labelled['qualifier'] is None or is_value(labelled['qualifier'])):
-                continue
-        out.append(line)
-    return out
+def test_req04_a_work_item_passage_spanning_several_fields_names_each(client, indexed, core):
+    record = core.records['work_items'][indexed['item']['id']]
+    record['storyDetail'] = {'work_item_id': record['id'], 'behavior': 'The tapir scale reports grams.',
+                             'acceptance_criteria': 'Weighing a tapir twice gives the same grams.',
+                             'constraints': None, 'edge_cases': None, 'out_of_scope': None,
+                             'value_hypothesis': None, 'test_measurement': None}
+    core.put('work_items', record)
+    index_once()
+    passage = top(client, 'How does the tapir scale report grams?')
+    assert passage['class'] == 'work_item' and passage['reference']['section'] == 'fields'
+    _check_core_passage(passage, core)
+    paths = [f['path'] for f in passage['reference']['fields']]
+    assert ['storyDetail', 'behavior'] in paths and ['storyDetail', 'acceptance_criteria'] in paths
+    assert ['description'] in paths and len(paths) >= 5
 
 
-def test_ac07_the_record_check_catches_text_its_record_does_not_hold():
-    record = {'artifact_type': 'commit', 'reference': 'https://git.example.com/org/zebrafish-api/commit/4242'}
-    good = 'Delivery artifact (commit): https://git.example.com/org/zebrafish-api/commit/4242\n'
-    assert _unexplained_lines(good, record) == []
-    added = good + 'https git example com org zebrafish api commit 4242\n'
-    assert _unexplained_lines(added, record) == ['https git example com org zebrafish api commit 4242']
-    assert _unexplained_lines('Delivery artifact (build): x\n', record) == ['Delivery artifact (build): x']
+def test_req04_a_history_passage_names_the_history_entry_and_its_fields(client, indexed, core):
+    record = core.records['work_items'][indexed['item']['id']]
+    record['history'].append({'id': 'hist-capybara', 'work_item_id': record['id'], 'field': 'assignee_agent_id',
+                              'old_value': None, 'new_value': 'capybara-wrangler', 'actor': 'scrummaster',
+                              'occurred_at': '2026-10-12T09:00:00+00:00'})
+    core.put('work_items', record)
+    index_once()
+    passage = top(client, 'Who was the capybara wrangler?')
+    assert passage['class'] == 'work_item' and passage['reference']['section'] == 'history'
+    body = _check_core_passage(passage, core)
+    paths = [f['path'] for f in passage['reference']['fields']]
+    entry = ['history', {'id': 'hist-capybara'}]
+    assert all(entry + [key] in paths for key in ('occurred_at', 'actor', 'field', 'new_value'))
+    # A missing old value is rendered "(none)", which is no field.
+    assert entry + ['old_value'] not in paths
+    assert follow(body, entry + ['new_value']) == 'capybara-wrangler'
+    # The entry before it, with an old value, is named too.
+    first = record['history'][0]['id']
+    assert ['history', {'id': first}, 'old_value'] in paths
+
+
+def test_req04_an_a2a_passage_names_each_part_and_artifact_it_holds(client, indexed, core):
+    task = core.a2a_task(['Please benchmark the okapi parser.'])
+    message = task['messages'][0]
+    message['parts'].append({'kind': 'data', 'data': {'okapiRuns': 3}})
+    message['artifacts'] = [{'artifactId': 'art-okapi', 'name': 'okapi-results', 'parts': [], 'messageId':
+                             message['messageId'], 'position': 0, 'referenceArtifactId': None, 'metadata': None,
+                             'recordedAt': message['recordedAt'],
+                             'artifact': {'artifactId': 'art-okapi', 'name': 'okapi-results',
+                                          'parts': [{'kind': 'text', 'text': 'The okapi parser ran in 40 ms.'}]}}]
+    core.put('a2a', task)
+    index_once()
+    passage = top(client, 'How fast was the okapi parser benchmark?')
+    assert passage['class'] == 'a2a_message'
+    _check_core_passage(passage, core)
+    at = ['messages', {'messageId': message['messageId']}]
+    paths = [f['path'] for f in passage['reference']['fields']]
+    assert at + ['parts', 0, 'text'] in paths and at + ['parts', 1, 'data'] in paths
+    assert at + ['artifacts', {'artifactId': 'art-okapi'}, 'artifact', 'parts', 0, 'text'] in paths
+    assert at + ['role'] in paths and at + ['direction'] in paths
 
 
 def _source_text(ref, source_class, core, archive_api, checkout):
@@ -293,10 +328,10 @@ def test_ac07_every_passage_in_a_result_set_resolves_to_its_source_and_matches_i
         for passage in passages(client, question, limit=5):
             ref = passage['reference']
             if passage['class'] in CORE_CLASSES:
-                # Core's records: every line of the passage is the record's own field values.
-                record = _record(ref, passage['class'], core.snapshot())
-                assert _unexplained_lines(passage['text'], record) == [], (question, passage['class'])
-                assert passage['source']['owner'] == 'core' and passage['source']['location']
+                # Core's records: the passage is drawn from the fields its reference names,
+                # in the JSON its read returns.
+                _check_core_passage(passage, core)
+                assert passage['source']['owner'] == 'core'
                 resolved.add(passage['class'])
                 continue
             source = _source_text(ref, passage['class'], core, archive_api, checkout)
