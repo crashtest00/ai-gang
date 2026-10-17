@@ -20,7 +20,9 @@ The indexer reads each stream through a consumer group of its own,
 ``memory-indexer``, created at the stream's beginning. An entry is
 acknowledged only after what it caused is committed, so an indexer stopped
 in between reads it again from its pending list on restart (REQ-04's
-"backlog is indexed without loss").
+"backlog is indexed without loss"). An entry it cannot act on is recorded
+as a failure and acknowledged, so one bad entry never stops the streams
+(``handle``, REQ-09).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import logging
 from datetime import datetime
 
 import redis
+from django.db import InterfaceError, OperationalError, transaction
 
 from . import follow, reads, store
 
@@ -40,6 +43,7 @@ WORK_ITEM_STREAMS = 'aigang:workitems:*:events'
 ARTIFACT_STREAM = 'aigang:artifacts:events'
 RECORD_DELETED = 'work_item.record_deleted'
 ARTIFACT_UPLOADED = 'artifact.uploaded'
+EVENT_ENTRY = 'event_entry'  # an IndexFailure's class for a stream entry; it has no units
 
 _ALL_CORE = tuple(reads.CORE_ENUMERATIONS)
 
@@ -57,26 +61,76 @@ def catch_ups_for(event_type: str) -> tuple[str, ...]:
     return _ALL_CORE  # an event type this indexer does not know: read everything that may have changed
 
 
-def apply(stream: str, fields: dict) -> None:
-    """Act on one stream entry. Raises nothing for an entry that is not an
-    event this indexer reads: it is logged and acknowledged."""
+class MalformedEntry(ValueError):
+    """A stream entry that is not an event in the shape Core's relay
+    publishes."""
+
+
+def _payload(fields: dict) -> dict:
     try:
-        envelope = json.loads(fields.get('data', ''))
-        payload = envelope.get('payload') or {}
-    except (ValueError, TypeError, AttributeError):
-        log.warning('skipping an entry on %s: not an envelope', stream)
-        return
+        envelope = json.loads(fields.get('data') or '')
+    except (ValueError, TypeError) as err:
+        raise MalformedEntry(f'the entry\'s data is not a JSON envelope ({err})') from err
+    if not isinstance(envelope, dict):
+        raise MalformedEntry('the entry\'s envelope is not a JSON object')
+    payload = envelope.get('payload')
+    if not isinstance(payload, dict):
+        raise MalformedEntry('the envelope\'s payload is not a JSON object')
+    return payload
+
+
+def _uploaded_at(value) -> datetime:
+    try:
+        uploaded_at = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError as err:
+        raise MalformedEntry(f'uploadedAt {value!r} is not an ISO 8601 time') from err
+    if uploaded_at.tzinfo is None:
+        raise MalformedEntry(f'uploadedAt {value!r} has no time zone')
+    return uploaded_at
+
+
+def apply(stream: str, fields: dict) -> None:
+    """Act on one stream entry. Raises ``MalformedEntry`` for an entry that
+    is not an event in the relay's shape; ``handle`` records it."""
+    payload = _payload(fields)
     event_type = payload.get('eventType') or ''
     if stream == ARTIFACT_STREAM:
         if event_type == ARTIFACT_UPLOADED and payload.get('artifactId') and payload.get('uploadedAt'):
-            uploaded_at = datetime.fromisoformat(payload['uploadedAt'].replace('Z', '+00:00'))
-            follow.note_upload(str(payload['artifactId']), uploaded_at, str(payload.get('action') or ''))
+            follow.note_upload(str(payload['artifactId']), _uploaded_at(payload['uploadedAt']),
+                               str(payload.get('action') or ''))
         return
     if event_type == RECORD_DELETED:
         follow.apply_deletion(payload.get('data') or {})
         return
     for name in catch_ups_for(event_type):
         store.request_catch_up(name)
+
+
+def handle(stream: str, entry_id: str, fields: dict) -> None:
+    """Act on one entry under the index's writer lock, so a deletion or an
+    upload never interleaves with a catch-up, a retry or a rebuild.
+
+    An entry the indexer cannot act on is never fatal and never skipped
+    silently (REQ-09): it is logged and recorded as a failure naming the
+    stream, the entry and the reason, with the entry kept for a retry, and
+    a work-item stream's entry also asks for a catch-up of every Core read,
+    so whatever write it announced is still read. Only a lost connection
+    to the index's own database or to Redis stops the consumer, before the
+    entry is acknowledged, so it is read again."""
+    with store.index_lock():
+        try:
+            with transaction.atomic():
+                apply(stream, fields)
+        except (redis.RedisError, OperationalError, InterfaceError):
+            raise
+        except Exception as err:  # noqa: BLE001 - REQ-09: one entry's failure is recorded, never fatal
+            log.exception('cannot act on entry %s of %s', entry_id, stream)
+            store.record_failure(f'event:{stream}:{entry_id}', EVENT_ENTRY, f'{type(err).__name__}: {err}',
+                                 {'read': follow.EVENTS, 'stream': stream, 'entryId': entry_id,
+                                  'fields': dict(fields)})
+            if stream != ARTIFACT_STREAM:
+                for name in _ALL_CORE:
+                    store.request_catch_up(name)
 
 
 class EventConsumer:
@@ -121,7 +175,7 @@ class EventConsumer:
             if position == '0' and not entries:
                 self.streams[stream] = False
             for entry_id, entry_fields in entries:
-                apply(stream, entry_fields or {})
+                handle(stream, entry_id, entry_fields or {})
                 self.client.xack(stream, GROUP, entry_id)
                 handled += 1
         return handled

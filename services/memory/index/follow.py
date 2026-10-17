@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import datetime
 from typing import Callable, Optional
 
 from django.conf import settings
@@ -37,6 +38,7 @@ SESSIONS = 'memory:sessions'
 NOTES = 'memory:notes'
 LIBRARY = 'library'
 PLATFORM = 'platform'
+EVENTS = 'events'  # an event-stream entry the indexer could not act on (REQ-09)
 FOLLOWED_READS = tuple(reads.CORE_ENUMERATIONS) + (SESSIONS, NOTES, LIBRARY, PLATFORM)
 
 
@@ -321,7 +323,9 @@ def library_behind() -> list[str]:
 def index_library_file(artifact_id: str) -> None:
     """A library file's units from its retained extraction record, never
     its bytes (REQ-01). A failed extraction contributes no units; it stays
-    the extraction feature's recorded failure (its REQ-06)."""
+    the extraction feature's recorded failure (its REQ-06). When a later
+    upload of the file is already announced, this extraction is no longer
+    current and its units are written as not current (REQ-04)."""
     key = f'artifact:{artifact_id}'
     record = ExtractionRecord.objects.filter(artifact_id=artifact_id).first()
     if record is None:
@@ -330,7 +334,10 @@ def index_library_file(artifact_id: str) -> None:
     units = []
     if record.outcome == OUTCOME_EXTRACTED:
         reference = {'artifactId': artifact_id, 'stamp': stamp, 'format': record.format}
-        units = _cuts_with_lines(record.text or '', reference, record.source_updated_at)
+        superseded = PendingArtifact.objects.filter(artifact_id=artifact_id,
+                                                    updated_at__gt=record.source_updated_at).exists()
+        units = [{**unit, 'current': not superseded}
+                 for unit in _cuts_with_lines(record.text or '', reference, record.source_updated_at)]
     store.replace_units(key, store.library_class(artifact_id), {**stamp, 'outcome': record.outcome}, units)
 
 
@@ -357,7 +364,9 @@ def _settle_pending() -> None:
 def note_upload(artifact_id: str, uploaded_at, action: str) -> None:
     """An ``artifact.uploaded`` event: the file is "not indexed yet" until
     its extraction is recorded (REQ-05), and after a re-upload its earlier
-    units are no longer current (REQ-04)."""
+    units are no longer current (REQ-04). Only an upload later than the one
+    the units were built from does that: an earlier upload's event read late
+    leaves the current units current."""
     with transaction.atomic():
         pending = PendingArtifact.objects.select_for_update().filter(artifact_id=artifact_id).first()
         if pending is None:
@@ -367,7 +376,8 @@ def note_upload(artifact_id: str, uploaded_at, action: str) -> None:
             pending.updated_at, pending.action = uploaded_at, action
             pending.save(update_fields=['updated_at', 'action'])
         source = IndexSource.objects.filter(pk=f'artifact:{artifact_id}').first()
-        if source is not None and source.stamp.get('updatedAt') != uploaded_at.isoformat():
+        indexed_from = source.stamp.get('updatedAt') if source is not None else None
+        if source is not None and (not indexed_from or uploaded_at > datetime.fromisoformat(indexed_from)):
             IndexUnit.objects.filter(source_key=f'artifact:{artifact_id}').update(current=False)
     _settle_pending()
 
@@ -427,6 +437,12 @@ def retry_failures(source_key: Optional[str] = None) -> int:
         elif read == PLATFORM:
             follow_platform(force=True)
             ok = not IndexFailure.objects.filter(source_key=failure.source_key).exists()
+        elif read == EVENTS:
+            from . import events
+            ok = _guarded(failure.source_key, failure.source_class, payload,
+                          lambda: events.apply(payload['stream'], payload['fields']))
+            if ok:
+                IndexFailure.objects.filter(source_key=failure.source_key).delete()
         else:
             continue
         fixed += 1 if ok and not IndexFailure.objects.filter(source_key=failure.source_key).exists() else 0
