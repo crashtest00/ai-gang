@@ -95,8 +95,10 @@ In practice that means:
 ## Retrieval
 
 Retrieval is a direct synchronous GET, unauthenticated like the service's
-other reads, and recorded in the `artifact_access_log` table rather than on
-Streams (`internal-work-item-service.md` REQ-04).
+other reads. A read of one artifact (`GET /artifacts/<id>`) is recorded in
+the `artifact_access_log` table rather than on Streams
+(`internal-work-item-service.md` REQ-04); the listing, `GET /artifacts`,
+writes no `artifact_access_log` row.
 
 | Method and path | Returns |
 | --- | --- |
@@ -165,7 +167,7 @@ rows are the event history, queryable after the stream is trimmed.
 | Table | Holds |
 | --- | --- |
 | `artifact` | The artifact record: id, path, original filename, uploader, timestamps |
-| `artifact_access_log` | One row per retrieval, per `internal-work-item-service.md` REQ-04 |
+| `artifact_access_log` | One row per retrieval of a single artifact (the `GET /artifacts` listing writes none), per `internal-work-item-service.md` REQ-04 |
 
 Both are in the same Postgres instance as canonical work items, so the
 work-item side's "does this artifact id resolve" check is a local read

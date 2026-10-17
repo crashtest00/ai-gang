@@ -2017,8 +2017,9 @@ def list_work_item_comments_changed(cursor: Optional[str] = None, *, limit: int 
     """REQ-11, work-item comments: a paged, changed-since enumeration. Each
     record is the comment as ``serialize_comment`` returns it, with the
     ``project`` of the work item it belongs to (its link: ``work_item_id``).
-    Writes no access-log row. A comment is append-only, so a comment is
-    "changed" only when it is new."""
+    Writes no access-log row. Core has no comment-update path (and no
+    database trigger makes the table append-only), and an UPDATE would still
+    be returned because the ``change_xid`` trigger stamps on UPDATE."""
     from .serializers import serialize_comment
 
     def build(ids):
@@ -2063,8 +2064,11 @@ def record_deletion(obj, *, actor: str) -> None:
     ``transaction.atomic`` block, ``GatedAdminMixin``). The row rides the
     project's work-item stream as ``work_item.record_deleted``; the payload
     names the record's class and id and the work item it belonged to, so the
-    indexer removes that record's units. Only ``dispatchConsumer`` and the
-    Jira writer read the stream by event type, and neither names this one."""
+    indexer removes that record's units. Three readers act on the stream by
+    event type: ScrumMaster's ``dispatchConsumer``, Core's Jira writer, and
+    Memory's indexer (``services/memory/index/events.py``,
+    ``RECORD_DELETED``). Only the indexer consumes this type; the other two
+    ignore it."""
     record_class = _ENUMERATION_RECORD_CLASSES.get(type(obj))
     if record_class is None:
         raise TypeError(f'record_deletion: {type(obj).__name__} is not a work-item record')
