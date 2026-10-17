@@ -192,7 +192,7 @@ end_step() {
   status step-done "$id"
 }
 
-# The four configured values, read back through the same validator that
+# The five configured values, read back through the same validator that
 # gated the run. Steps call this rather than parsing the configuration
 # themselves, so no step can act on a value the validator never approved.
 # Sets PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK, REPOSITORY_URL and
