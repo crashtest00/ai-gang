@@ -18,6 +18,7 @@ import json
 import uuid
 
 import pytest
+import redis
 from django.contrib import admin as django_admin
 from django.db import IntegrityError, connection, transaction
 from django.test import RequestFactory
@@ -37,6 +38,7 @@ from tests import artifact_event_history_pre_change as pre_change
 from tests.artifacts_support import (  # noqa: F401 - committed_artifact_env is a fixture
     MARKDOWN_BYTES, admin_client, change_url, committed_artifact_env, drain_outbox, post_upload, read_events, upload,
 )
+from tests.test_artifacts_events import _redis_that_is_down  # noqa: F401 - helper, not a test
 from tests.librarian_support import (  # noqa: F401 - librarian_env is a fixture
     librarian_env, make_repo, request_delivery, seed_artifact,
 )
@@ -79,6 +81,52 @@ def test_req01_an_edit_of_only_the_original_filename_writes_no_row(committed_art
     assert client.post(change_url(artifact.id), data={'original_filename': 'renamed.md'}).status_code == 302
 
     assert Artifact.objects.get(id=artifact.id).original_filename == 'renamed.md'
+    assert len(_announcement_rows()) == 1
+
+
+def _redis_stopped(monkeypatch):
+    from workitems import redis_client as redis_client_module
+    monkeypatch.setattr(redis_client_module, 'get_client', _redis_that_is_down)
+    monkeypatch.setattr(redis_client_module, 'new_client', _redis_that_is_down)
+
+
+def test_req01_a_replacement_saved_while_redis_is_down_is_announced_once_redis_is_back(
+        committed_artifact_env, monkeypatch):
+    client = admin_client()
+    artifact = upload(client, content=MARKDOWN_BYTES, filename='prd.md')
+    assert [e['payload']['action'] for e in read_events(committed_artifact_env)] == [ACTION_CREATED]
+
+    with monkeypatch.context() as down:
+        _redis_stopped(down)
+        response = post_upload(client, content=b'# v2\n', filename='prd.md', url=change_url(artifact.id))
+        assert response.status_code == 302
+        rows = _announcement_rows()
+        assert len(rows) == 2
+        assert rows[1].published_at is None
+        assert rows[1].envelope['payload']['action'] == ACTION_REPLACED
+        with pytest.raises(redis.exceptions.ConnectionError):
+            relay_once(_redis_that_is_down())
+        assert OutboxEvent.objects.get(id=rows[1].id).published_at is None
+
+    events = read_events(committed_artifact_env)
+    assert [e['payload']['action'] for e in events] == [ACTION_CREATED, ACTION_REPLACED]
+    assert OutboxEvent.objects.get(id=rows[1].id).published_at is not None
+
+
+def test_req01_a_filename_only_edit_saved_while_redis_is_down_succeeds_and_writes_no_row(
+        committed_artifact_env, monkeypatch):
+    client = admin_client()
+    artifact = upload(client, content=MARKDOWN_BYTES, filename='prd.md')
+    assert len(read_events(committed_artifact_env)) == 1
+
+    with monkeypatch.context() as down:
+        _redis_stopped(down)
+        response = client.post(change_url(artifact.id), data={'original_filename': 'renamed.md'})
+        assert response.status_code == 302
+        assert Artifact.objects.get(id=artifact.id).original_filename == 'renamed.md'
+        assert len(_announcement_rows()) == 1
+
+    assert len(read_events(committed_artifact_env)) == 1
     assert len(_announcement_rows()) == 1
 
 
@@ -357,8 +405,9 @@ def test_migrating_a_database_with_pre_feature_artifacts_creates_no_announcement
     from django.db.migrations.executor import MigrationExecutor
 
     before = [('workitems', '0007_v52_jira_decomposition_record')]
-    after = [('workitems', '0008_v60_outbox_stream_and_envelope')]
     executor = MigrationExecutor(connection)
+    # Restore every migration above 0007 (other apps' too), not just 0008.
+    leaves = executor.loader.graph.leaf_nodes()
     executor.migrate(before)
     try:
         artifact_id = uuid.uuid4()
@@ -372,7 +421,7 @@ def test_migrating_a_database_with_pre_feature_artifacts_creates_no_announcement
             assert cursor.fetchone()[0] == 0
     finally:
         executor = MigrationExecutor(connection)
-        executor.migrate(after)
+        executor.migrate(leaves)
 
     assert Artifact.objects.filter(id=artifact_id).exists()
     assert not OutboxEvent.objects.exists()
