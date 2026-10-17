@@ -139,10 +139,10 @@ stream.
 
 The envelope is the wire shape `workitems/envelope.py` defines (single
 `data` field, `msg-<uuid>` message id, `schemaVersion` 1). Its `kind`,
-`artifact_event`, is deliberately **not** in that module's `VALID_KINDS`,
-because adding it belongs to the track that owns `workitems/`; a consumer
-using `workitems.envelope.from_stream_fields` would reject these entries
-until it is added. There is no such consumer today.
+`artifact_event`, is in that module's `VALID_KINDS`
+(`workitems/envelope.py`), and `store.write_outbox_event` validates the
+envelope against it on write. There is no stream consumer of these entries
+today.
 
 The event is written to Core's transactional outbox in the same
 transaction as the `artifact` row it announces, naming

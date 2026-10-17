@@ -99,6 +99,9 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 │  │     group, exactly once per messageId                  │  │
 │  │   - Publishes the corresponding canonical command       │  │
 │  │     to core                                             │  │
+│  │   - Publishes a recordA2AVerdict command to core for    │  │
+│  │     each submission it handles (Durable A2A Message     │  │
+│  │     Record REQ-04)                                      │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                             │
 │  ┌───────────────────────────────────────────────────────┐  │
@@ -106,12 +109,15 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 │  │                                                       │  │
 │  │  Inbound (core -> ScrumMaster):                       │  │
 │  │   aigang:workitems:{project}:events  group: dispatch  │  │
+│  │   aigang:workitems:{project}  group: core (commands)  │  │
 │  │                                                       │  │
 │  │  Inbound (ScrumMaster -> agents):                     │  │
 │  │   aigang:agent:{project}:{suffix} group: agent-{suffix}│  │
+│  │                                  group: core-a2a-archive│  │
 │  │                                                       │  │
 │  │  Outbound (agents -> ScrumMaster):                    │  │
 │  │   aigang:gateway:{project}       group: scrummaster   │  │
+│  │                                  group: core-a2a-archive│  │
 │  │                                                       │  │
 │  │  Failed messages: <source-stream>:dead                │  │
 │  └───────────────────────────────────────────────────────┘  │
@@ -260,6 +266,17 @@ record that a dev-agent ticket's block was lifted (`dispatchConsumer.js`'s
 
 ScrumMaster runs one durable Streams consumer per project on that project's gateway stream (`aigang:gateway:{project-name}`, consumer group `scrummaster`) and processes outbound messages from that project's container(s). Project identity is derived from which stream a consumer is bound to — never from message content. All messages must conform to the message contract defined below, and each is processed at most once per messageId even if redelivered.
 
+Alongside the operations below, ScrumMaster publishes `recordA2AVerdict`
+commands to `core` on the project's command stream, so the message record
+holds ScrumMaster's verdict on each submission (Durable A2A Message Record
+REQ-04): a verdict at each exit of `handleA2ASubmission` (`applied`, or
+`refused` with a reason), an outcome after the projection, a `failed`
+outcome (or a `refused`/`dead_lettered` verdict when the message had none)
+from the gateway's dead-letter hook, and a `superseded` outcome from
+`dispatchTask` when a reopen supersedes an earlier dispatch. A failed
+publication is logged, not retried into a dead letter. The spec's table of
+verdicts and outcomes is authoritative.
+
 Nothing here writes to Jira. Each operation below resolves to a canonical
 command ScrumMaster publishes to `core`, which applies it to the work item and
 is the sole authority on what the item then is (V5.1 REQ-01, REQ-04).
@@ -397,7 +414,9 @@ not from any field in the payload, and cross-checks it against the Task's own
 `projectName` metadata recorded at dispatch time. An agent cannot claim a
 different project by writing a different value into its submission — the
 stream is the authority, and an envelope whose declared project doesn't match
-is rejected and dead-lettered without ever reaching `core`.
+is rejected and dead-lettered; the gateway's dead-letter hook publishes a
+`refused`/`dead_lettered` verdict for it to `core` (Durable A2A Message
+Record REQ-04), and nothing is projected onto a work item.
 
 Envelope `kind: "gateway_operation"`. `payload` is one A2A submission:
 
@@ -411,6 +430,7 @@ Envelope `kind: "gateway_operation"`. `payload` is one A2A submission:
     "contextId": "5a9e2f61-7c84-4d13-8b0a-6f3c91d7e204",
     "role": "agent",
     "referenceMessageId": "msg-<uuid-of-prior-message>",
+    "metadata": { "sessionId": "<agent-session-id>" },
     "parts": [
       { "kind": "text", "text": "<human-readable content>" },
       { "kind": "data", "data": { "operation": "comment | reassign | create_subtask" } }

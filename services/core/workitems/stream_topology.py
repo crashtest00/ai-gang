@@ -12,6 +12,9 @@ Event stream (writes out): aigang:workitems:{project}:events
 Webhook ingestion: reuses scrummaster's own aigang:webhooks:{project}
   stream (registry.webhook_stream_name) rather than a second stream — see
   webhook_consumer.py's module comment for why.
+A2A archive: consumer group "core-a2a-archive" (a2a_archive.A2A_ARCHIVE_GROUP)
+  on each project's gateway stream and on each enabled agent's channel stream
+  (a2a_archive.archive_targets), alongside ScrumMaster's own groups there.
 """
 
 COMMAND_GROUP = 'core'

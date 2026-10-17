@@ -214,9 +214,6 @@ load_decisions() {
     || die "configuration validation did not produce the expected decisions"
 }
 
-# `docker compose` run exactly where an operator would run it: from the
-# service's own directory, so the project name, the .env it interpolates
-# and every relative bind mount are what that compose file expects.
 # The shared harness volume every project container mounts its own
 # subdirectory of, at the agent harness's `projects/` directory (Durable
 # Agent Session Record REQ-01). Created by start-memory.sh;
@@ -233,6 +230,9 @@ memory_running() {
   done
 }
 
+# `docker compose` run exactly where an operator would run it: from the
+# service's own directory, so the project name, the .env it interpolates
+# and every relative bind mount are what that compose file expects.
 compose_in() {
   local dir="$1"; shift
   ( cd "$AIGANG_ROOT/$dir" && docker compose "$@" )
