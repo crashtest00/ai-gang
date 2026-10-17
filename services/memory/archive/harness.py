@@ -54,6 +54,19 @@ if the harness changes, it is here that Memory goes wrong.
   H12 git prints `[<branch> <hash>] <subject>` on its own line for a commit
       (specification REQ-07); `<branch>` may be `main (root-commit)` or
       `detached HEAD`, so the hash is the last word before `]`.
+  H13 A subagent transcript `<sid>/subagents/agent-<x>.jsonl` has a sidecar
+      `agent-<x>.meta.json` beside it: one JSON object whose `toolUseId`
+      names the `tool_use` block, in the parent session's transcript, that
+      started the subagent (Corpus Indexing REQ-10; build brief DR-5:
+      observed on the management host, harness 2.1.291, October 14 and 17,
+      2026; not yet in the binding).
+  H14 One model response is written as several `assistant` records, one per
+      content block, sharing `message.id`. Block types are `thinking`
+      (text in `thinking`), `text` (`text`) and `tool_use` (`id`, `name`,
+      `input`). A `user` record carries a prompt as a string
+      `message.content` or as `text` blocks, and tool results as
+      `tool_result` blocks (H11). Corpus Indexing REQ-10 cuts turns by this;
+      observed on the same host and version as H13.
 """
 
 import json
@@ -284,3 +297,70 @@ def is_squash_command(command):
 def commit_hashes(text):
     """The abbreviated hashes of git's `[<branch> <hash>]` lines, in order."""
     return [m.group(1) for m in _COMMIT_LINE.finditer(text)]
+
+
+# --- H13: a subagent's starting tool call ----------------------------------
+
+META_SUFFIX = '.meta.json'
+
+
+def is_subagent_transcript(archive_path):
+    """`<project>/<cwd>/<sid>/subagents/<name>.jsonl`, as a '/'-joined path."""
+    parts = tuple(archive_path.split('/'))
+    return is_classified_file(parts) and len(parts) == 5 and parts[3] == SUBAGENTS_DIR
+
+
+def subagent_meta_path(archive_path):
+    """The `.meta.json` beside a subagent transcript."""
+    return archive_path[: -len(TRANSCRIPT_SUFFIX)] + META_SUFFIX
+
+
+def subagent_tool_use_id(meta_bytes):
+    """The `toolUseId` a subagent's `.meta.json` names, or None."""
+    try:
+        meta = json.loads(meta_bytes)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    value = meta.get('toolUseId') if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+# --- H14: turns -------------------------------------------------------------
+
+def message_id(record):
+    """The model response an `assistant` record belongs to, or None."""
+    message = record.get('message') if isinstance(record, dict) else None
+    value = message.get('id') if isinstance(message, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def assistant_blocks(record):
+    """`(kind, text, tool_use_id, tool_name, tool_input)` for each block of an
+    `assistant` record; kind is `thinking`, `text` or `tool_use`."""
+    if not isinstance(record, dict) or record.get('type') != 'assistant':
+        return []
+    out = []
+    for block in _content_blocks(record):
+        if not isinstance(block, dict):
+            continue
+        kind = block.get('type')
+        if kind == 'thinking' and isinstance(block.get('thinking'), str):
+            out.append(('thinking', block['thinking'], None, None, None))
+        elif kind == 'text' and isinstance(block.get('text'), str):
+            out.append(('text', block['text'], None, None, None))
+        elif kind == 'tool_use' and isinstance(block.get('id'), str):
+            out.append(('tool_use', None, block['id'], block.get('name'), block.get('input')))
+    return out
+
+
+def user_prompt_text(record):
+    """The prompt text a `user` record carries (not its tool results), or None."""
+    if not isinstance(record, dict) or record.get('type') != 'user':
+        return None
+    message = record.get('message')
+    content = message.get('content') if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    texts = [b['text'] for b in _content_blocks(record)
+             if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
+    return '\n'.join(texts) if texts else None

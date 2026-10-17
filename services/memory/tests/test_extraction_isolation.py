@@ -115,6 +115,6 @@ def test_the_operator_docs_list_every_memory_container_compose_defines():
     section = guide[guide.index('### 2.6 Memory'):]
     section = section[:section.index('\n---')]
     listed = re.search(r'Memory runs (\w+) containers', section)
-    assert listed and listed.group(1) == {6: 'six'}.get(len(services), str(len(services)))
+    assert listed and listed.group(1) == {6: 'six', 7: 'seven'}.get(len(services), str(len(services)))
     for service in services:
         assert f'`{service}`' in section, service

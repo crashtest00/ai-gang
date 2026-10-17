@@ -18,6 +18,12 @@
 #                       memory-extractor through the spool volume
 #   - memory-extractor — parses those files (REQ-05): its own image
 #                       (extractor/), no database, no Redis, no network
+#   - memory-indexer  — the corpus index
+#                       (strategy/v6.0/v6.1/features/corpus-indexing.md): reads
+#                       Core's event streams and enumerations, the archive
+#                       through memory-api, the extraction record, and the
+#                       platform corpus from this Source checkout's git
+#                       history; keeps the index in memory-postgres
 #
 # scripts/startup/start-memory.sh creates the shared harness volume
 # (`docker volume create aigang-harness`) and then brings this stack up.
@@ -128,6 +134,33 @@ services:
     volumes:
       - memory-extraction-spool:/spool
     restart: unless-stopped
+
+  memory-indexer:
+    build: .
+    image: aigang-memory
+    container_name: memory-indexer
+    env_file: .env
+    command: python manage.py run_indexer
+    environment:
+      - MEMORY_API_URL=http://memory-api:9200
+      - MEMORY_PLATFORM_CORPUS_ROOT=/platform-source
+    volumes:
+      # The platform corpus (REQ-08): the Markdown under docs/ and setup/ in
+      # this deployment's own Source checkout, read at its current commit,
+      # so only the checkout's git directory is mounted, read-only. The
+      # working tree, and the platform .env in it, is not mounted.
+      - ../../.git:/platform-source/.git:ro
+    # Reads Core (http://core:9100), Redis and memory-api on ai-gang. It
+    # never mounts the harness volume or the archive (REQ-01): sessions and
+    # notes are read through memory-api.
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      memory-api:
+        condition: service_started
 
 networks:
   ai-gang:
