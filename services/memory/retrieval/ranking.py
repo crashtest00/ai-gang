@@ -19,6 +19,10 @@ answer, so a question nothing answers returns nothing (REQ-09's
 "nothing relevant exists"), and the same floor applies to units after the
 first, relative to the best.
 
+Candidates are the best ``CANDIDATES`` session units and, separately, the
+best ``CANDIDATES`` of every other class, so the session weight and cap
+act before any candidate limit could drop an authored unit (REQ-10).
+
 Scope is a ``WHERE`` clause of the one query that finds the units, so it is
 enforced where the query runs and never by filtering results afterwards
 (REQ-06). Units whose ``current`` flag is false (a library file's replaced
@@ -123,15 +127,23 @@ def rank(question: str, *, scope: Optional[str] = None, limit: int = 10,
     match_args = [v for t in present for v in (weights[t], _quote(t))]
     count_sql = ' + '.join("(search @@ to_tsquery('simple', %s))::int" for _ in present)
     match_args += [_quote(t) for t in present]
-    sql = (f'SELECT id, source_class, scope, source_key, work_item_id, reference, text, written_at, '
-           f'({match_sql}) AS matched, ({count_sql}) AS terms FROM index_unit '
-           "WHERE current AND search @@ to_tsquery('simple', %s) ")
+    # REQ-10: the candidate window is taken per weight class, so session
+    # units cannot fill it and cut an authored unit before the class weight
+    # and the session cap are applied. Within one partition every unit has
+    # the same weight, so its best CANDIDATES by ``matched`` are exactly its
+    # best CANDIDATES under any weighting.
+    inner = (f'SELECT id, source_class, scope, source_key, work_item_id, reference, text, written_at, '
+             f'({match_sql}) AS matched, ({count_sql}) AS terms FROM index_unit '
+             "WHERE current AND search @@ to_tsquery('simple', %s) ")
     args = match_args + [' | '.join(_quote(t) for t in present)]
     if scope is not None:
-        sql += 'AND scope = %s '
+        inner += 'AND scope = %s '
         args.append(scope)
-    sql += 'ORDER BY matched DESC, id LIMIT %s'
-    args.append(CANDIDATES)
+    sql = ('SELECT id, source_class, scope, source_key, work_item_id, reference, text, written_at, matched, terms '
+           'FROM (SELECT *, row_number() OVER (PARTITION BY source_class = %s ORDER BY matched DESC, id) AS place '
+           f'FROM ({inner}) AS found) AS windowed WHERE place <= %s ORDER BY matched DESC, id')
+    # Placeholders in text order: the partition's class, the inner query's, the window.
+    args = [CLASS_SESSION] + args + [CANDIDATES]
     with connection.cursor() as cur:
         cur.execute(sql, args)
         rows = cur.fetchall()
