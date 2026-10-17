@@ -102,8 +102,16 @@ Streams (`internal-work-item-service.md` REQ-04).
 | --- | --- |
 | `GET /artifacts/<id>` | The artifact's bytes, as `application/octet-stream` |
 | `GET /artifacts/<id>?record=true` | The record: `id`, `path`, `originalFilename`, `uploadedBy`, `createdAt`, `updatedAt` |
+| `GET /artifacts[?cursor=&limit=]` | The listing: `artifacts` (each `id` and `updatedAt`), `nextCursor`, `hasMore`; id order, at most 1000 a page |
 
-Both are defined in `artifacts/urls.py`; this app registers no other route.
+All three are defined in `artifacts/urls.py`; this app registers no other route.
+
+The listing exists for the extraction sweep (`artifact-text-extraction.md`
+REQ-04), which compares every file against its extraction record to find one
+no upload event announced. It returns identity and `updatedAt` only, never
+bytes, and writes no `artifact_access_log` row, so a sweep over the whole
+library does not write one row per file. Pass the previous page's
+`nextCursor` as `cursor` until `hasMore` is false.
 
 - An id with no record is `404`.
 - A record whose file is gone from the volume is also `404` — the record

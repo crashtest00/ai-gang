@@ -1866,3 +1866,217 @@ def list_a2a_tasks(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
         'nextCursor': _encode_a2a_cursor(next_state),
         'hasMore': has_more,
     }
+
+
+# ---------------------------------------------------------------------------
+# Core's enumeration of work items, comments and delivery artifacts
+# (corpus-indexing.md REQ-11) and the outbox row of an admin delete (REQ-07)
+# ---------------------------------------------------------------------------
+#
+#   list_work_items_changed          work items with their history and links.
+#   list_work_item_comments_changed  comments, each with its work item's project.
+#   list_delivery_artifacts_changed  delivery artifacts, each with its work
+#                                    item's project and specification link.
+#   record_deletion                  the outbox row `GatedAdminMixin` writes in a
+#                                    delete's transaction.
+#
+# The three reads follow `list_a2a_tasks`: the same `pg_snapshot_xmin` cursor
+# over `change_xid` (stamped by the database, migration 0010), so a row whose
+# transaction commits after a later one was read is returned again next round
+# and never skipped. None of them writes an access-log row.
+
+RECORD_DELETED_EVENT_TYPE = 'work_item.record_deleted'
+
+_ENUMERATION_RECORD_CLASSES = {
+    WorkItem: 'work_item',
+    WorkItemComment: 'comment',
+    WorkItemArtifact: 'delivery_artifact',
+    WorkItemLink: 'work_item_link',
+    WorkItemSpecificationLink: 'specification_link',
+    WorkItemArtifactLink: 'artifact_link',
+}
+
+
+def _decode_enumeration_cursor(cursor: Optional[str]) -> dict:
+    import base64
+    import binascii
+    import json
+    if not cursor:
+        return {'since': 0, 'upto': None, 'after': None}
+    try:
+        state = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        since, upto, after = state['since'], state.get('upto'), state.get('after')
+        if not isinstance(since, int) or (upto is not None and not isinstance(upto, int)):
+            raise ValueError('cursor fields have the wrong types')
+        if after is not None:
+            after = uuid.UUID(after)
+    except (ValueError, KeyError, TypeError, AttributeError, binascii.Error) as err:
+        raise ValidationError(f'not an enumeration cursor: {err}') from err
+    return {'since': since, 'upto': upto, 'after': after}
+
+
+def _enumerate_changed(cursor: Optional[str], limit: int, model, changed_q, build_records) -> dict:
+    """One page of a changed-since round over ``model``'s rows, in id order.
+
+    ``changed_q`` selects the rows that changed at or after the cursor's
+    transaction id; it is not applied to an empty cursor, which enumerates
+    every row (rows that predate migration 0010 have a NULL ``change_xid``).
+    ``build_records`` turns a page of ids into the response's records."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValidationError('limit must be a positive integer')
+    state = _decode_enumeration_cursor(cursor)
+    since = state['since']
+    upto = state['upto'] if state['upto'] is not None else _a2a_snapshot_xmin()
+
+    query = model.objects.filter(changed_q(since)) if since > 0 else model.objects.all()
+    if state['after'] is not None:
+        query = query.filter(id__gt=state['after'])
+    ids = list(query.order_by('id').values_list('id', flat=True)[:limit + 1])
+    has_more = len(ids) > limit
+    page = ids[:limit]
+
+    if has_more:
+        next_state = {'since': since, 'upto': upto, 'after': str(page[-1])}
+    else:
+        next_state = {'since': upto, 'upto': None, 'after': None}
+    return {
+        'records': build_records(page),
+        'nextCursor': _encode_a2a_cursor(next_state),
+        'hasMore': has_more,
+    }
+
+
+def list_work_items_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, work items: a paged, changed-since enumeration, each record
+    the same body ``GET /work-items/<id>?full=true`` returns (the item, its
+    story and release detail, its history, its links to other work items, its
+    specification link, its artifact links, its delivery artifacts and its
+    comments; the parent is ``parent_id``) and no access-log row.
+
+    A work item has changed when its own row, its detail, or any row hanging
+    off it was written at or above the cursor's transaction id. A deletion
+    leaves no row to compare: the delete writes an outbox row instead
+    (``record_deletion``). Returns ``{'workItems': [...], 'nextCursor': str,
+    'hasMore': bool}``; as ``list_a2a_tasks``, a work item can appear in two
+    rounds and no change is missed."""
+    from django.db.models import Exists, OuterRef, Q
+
+    from .serializers import serialize_work_item_full
+
+    def changed_q(since):
+        def hanging(model, field='work_item_id'):
+            return Exists(model.objects.filter(**{field: OuterRef('id'), 'change_xid__gte': since}))
+        return (
+            Q(change_xid__gte=since)
+            | hanging(WorkItemStoryDetail) | hanging(WorkItemReleaseDetail) | hanging(WorkItemHistory)
+            | hanging(WorkItemArtifact) | hanging(WorkItemSpecificationLink) | hanging(WorkItemArtifactLink)
+            | hanging(WorkItemComment)
+            | hanging(WorkItemLink, 'from_work_item_id') | hanging(WorkItemLink, 'to_work_item_id')
+        )
+
+    def build(ids):
+        items = {i.id: i for i in WorkItem.objects.filter(id__in=ids)}
+
+        def group(rows, key):
+            grouped: dict = {}
+            for row in rows:
+                grouped.setdefault(key(row), []).append(row)
+            return grouped
+
+        story = {d.work_item_id: d for d in WorkItemStoryDetail.objects.filter(work_item_id__in=ids)}
+        release = {d.work_item_id: d for d in WorkItemReleaseDetail.objects.filter(work_item_id__in=ids)}
+        spec = {s.work_item_id: s for s in WorkItemSpecificationLink.objects.filter(work_item_id__in=ids)}
+        history = group(WorkItemHistory.objects.filter(work_item_id__in=ids).order_by('occurred_at', 'id'),
+                        lambda r: r.work_item_id)
+        artifacts = group(WorkItemArtifact.objects.filter(work_item_id__in=ids).order_by('created_at', 'id'),
+                          lambda r: r.work_item_id)
+        comments = group(WorkItemComment.objects.filter(work_item_id__in=ids).order_by('created_at', 'id'),
+                         lambda r: r.work_item_id)
+        artifact_links = group(WorkItemArtifactLink.objects.filter(work_item_id__in=ids).order_by('position'),
+                               lambda r: r.work_item_id)
+        links: dict = {}
+        for link in WorkItemLink.objects.filter(Q(from_work_item_id__in=ids) | Q(to_work_item_id__in=ids)):
+            for end in {link.from_work_item_id, link.to_work_item_id}:
+                if end in items:
+                    links.setdefault(end, []).append(link)
+        return [
+            serialize_work_item_full({
+                'item': items[i], 'storyDetail': story.get(i), 'releaseDetail': release.get(i),
+                'links': links.get(i, []), 'history': history.get(i, []), 'artifacts': artifacts.get(i, []),
+                'comments': comments.get(i, []), 'specificationLink': spec.get(i),
+                'artifactLinks': artifact_links.get(i, []),
+            })
+            for i in ids if i in items
+        ]
+
+    page = _enumerate_changed(cursor, limit, WorkItem, changed_q, build)
+    return {'workItems': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def list_work_item_comments_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, work-item comments: a paged, changed-since enumeration. Each
+    record is the comment as ``serialize_comment`` returns it, with the
+    ``project`` of the work item it belongs to (its link: ``work_item_id``).
+    Writes no access-log row. A comment is append-only, so a comment is
+    "changed" only when it is new."""
+    from .serializers import serialize_comment
+
+    def build(ids):
+        rows = WorkItemComment.objects.filter(id__in=ids).select_related('work_item').order_by('id')
+        return [{**serialize_comment(row), 'project': row.work_item.project} for row in rows]
+
+    page = _enumerate_changed(cursor, limit, WorkItemComment, _changed_since, build)
+    return {'comments': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def list_delivery_artifacts_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, delivery artifacts (the ``work_item_artifact`` associations):
+    a paged, changed-since enumeration. Each record is the association as
+    ``serialize_artifact`` returns it, with the ``project`` of its work item
+    and that work item's specification link (``specification_link``, null when
+    it has none), which is what a consumer needs to relate it to the
+    requirement that authorized it. Writes no access-log row."""
+    from .serializers import serialize_artifact, serialize_specification_link
+
+    def build(ids):
+        rows = WorkItemArtifact.objects.filter(id__in=ids).select_related('work_item').order_by('id')
+        specs = {s.work_item_id: s for s in WorkItemSpecificationLink.objects.filter(
+            work_item_id__in={r.work_item_id for r in rows})}
+        return [
+            {**serialize_artifact(row), 'project': row.work_item.project,
+             'specification_link': serialize_specification_link(specs.get(row.work_item_id))}
+            for row in rows
+        ]
+
+    page = _enumerate_changed(cursor, limit, WorkItemArtifact, _changed_since, build)
+    return {'deliveryArtifacts': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def _changed_since(since: int):
+    from django.db.models import Q
+    return Q(change_xid__gte=since)
+
+
+def record_deletion(obj, *, actor: str) -> None:
+    """REQ-07's Core half: an outbox row naming a work-item row the admin is
+    deleting, written in the delete's own transaction (the caller holds the
+    ``transaction.atomic`` block, ``GatedAdminMixin``). The row rides the
+    project's work-item stream as ``work_item.record_deleted``; the payload
+    names the record's class and id and the work item it belonged to, so the
+    indexer removes that record's units. Only ``dispatchConsumer`` and the
+    Jira writer read the stream by event type, and neither names this one."""
+    record_class = _ENUMERATION_RECORD_CLASSES.get(type(obj))
+    if record_class is None:
+        raise TypeError(f'record_deletion: {type(obj).__name__} is not a work-item record')
+    if isinstance(obj, WorkItem):
+        work_item_id, project = obj.id, obj.project
+    elif isinstance(obj, WorkItemLink):
+        work_item_id, project = obj.from_work_item_id, obj.from_work_item.project
+    else:
+        work_item_id, project = obj.work_item_id, obj.work_item.project
+    data = {'recordClass': record_class, 'id': str(obj.pk), 'workItemId': str(work_item_id), 'deletedBy': actor}
+    if isinstance(obj, WorkItemLink):
+        data['toWorkItemId'] = str(obj.to_work_item_id)
+    _write_outbox_event(
+        project=project, event_type=RECORD_DELETED_EVENT_TYPE, work_item_id=work_item_id, payload=data,
+    )

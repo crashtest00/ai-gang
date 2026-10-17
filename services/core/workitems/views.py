@@ -290,6 +290,42 @@ def list_a2a_tasks(request):
     return JsonResponse(result)
 
 
+def _enumeration_response(request, enumerate_changed):
+    """The shared body of the three corpus-indexing.md REQ-11 routes:
+    ``?cursor=`` is the ``nextCursor`` of the previous page (empty: every
+    record), ``?limit=`` the page size. Writes no access-log row."""
+    try:
+        limit = int(request.GET.get('limit', '50'))
+    except ValueError:
+        return _error_response(store.ValidationError('limit must be a positive integer'))
+    try:
+        result = enumerate_changed(request.GET.get('cursor') or None, limit=limit)
+    except store.ValidationError as err:
+        return _error_response(err)
+    return JsonResponse(result)
+
+
+@require_http_methods(['GET'])
+def changed_work_items(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    work items, each with its history and links."""
+    return _enumeration_response(request, store.list_work_items_changed)
+
+
+@require_http_methods(['GET'])
+def changed_work_item_comments(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    work-item comments."""
+    return _enumeration_response(request, store.list_work_item_comments_changed)
+
+
+@require_http_methods(['GET'])
+def changed_delivery_artifacts(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    delivery artifacts."""
+    return _enumeration_response(request, store.list_delivery_artifacts_changed)
+
+
 @require_http_methods(['GET'])
 def list_work_items(request):
     """`specArtifactId`/`requirementId` are work-items.md REQ-06's forward

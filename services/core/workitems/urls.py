@@ -26,6 +26,13 @@ unchanged:
   POST /admin/work-items/<uuid>/release-candidate  — the release-candidate
     writeback target, new in V2.1
 
+  GET  /work-items/changes[?cursor=&limit=]
+  GET  /work-item-comments/changes[?cursor=&limit=]
+  GET  /work-item-artifacts/changes[?cursor=&limit=]  — corpus-indexing.md
+    REQ-11: the paged, changed-since enumerations of work items (each with its
+    history and links), work-item comments and delivery artifacts. Not
+    access-logged. Reads only.
+
   GET  /a2a/tasks[?cursor=&limit=]  — durable-a2a-message-record.md
     REQ-11: the paged, changed-since enumeration of A2A Tasks, each with its
     full record. Not access-logged.
@@ -53,6 +60,9 @@ urlpatterns = [
     path('health', views.health),
     path('projects/<str:project>/mode', views.project_mode),
     path('work-items', views.list_work_items),
+    path('work-items/changes', views.changed_work_items),
+    path('work-item-comments/changes', views.changed_work_item_comments),
+    path('work-item-artifacts/changes', views.changed_delivery_artifacts),
     path('work-items/<uuid:work_item_id>', views.get_work_item),
     path('work-item-artifacts/<uuid:work_item_artifact_id>/specification-link',
          views.get_specification_link_for_delivery_artifact),

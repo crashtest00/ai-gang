@@ -55,6 +55,7 @@ import uuid
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.http import HttpResponseRedirect
 from django.utils import timezone
 
@@ -145,13 +146,23 @@ class GatedAdminMixin:
             return self._flash(request, err, request.get_full_path())
 
     def delete_model(self, request, obj):
+        """corpus-indexing.md REQ-07: the delete writes an outbox row naming
+        the deleted record, in the delete's own transaction, so the index
+        learns of it (the row must be written while the object still has its
+        key)."""
         self._refuse_if_not_recorded(obj, 'deleting this row')
-        super().delete_model(request, obj)
+        with transaction.atomic():
+            store.record_deletion(obj, actor=_actor(request))
+            super().delete_model(request, obj)
 
     def delete_queryset(self, request, queryset):
-        for obj in queryset:
+        rows = list(queryset)
+        for obj in rows:
             self._refuse_if_not_recorded(obj, 'deleting the selected rows (the whole selection is refused)')
-        super().delete_queryset(request, queryset)
+        with transaction.atomic():
+            for obj in rows:
+                store.record_deletion(obj, actor=_actor(request))
+            super().delete_queryset(request, queryset)
 
 
 def _raise_as_form_error(err: Exception):
@@ -454,8 +465,6 @@ class WorkItemAdmin(GatedAdminMixin, admin.ModelAdmin):
         in work_item_history (mirroring store.js's own scope, which never
         tracked these either), but an outbound event still fires so a
         subscriber sees the change."""
-        from django.db import transaction
-
         with transaction.atomic():
             obj.updated_at = timezone.now()
             update_fields = list(changed_fields) + ['updated_at']
