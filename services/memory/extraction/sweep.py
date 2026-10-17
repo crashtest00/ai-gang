@@ -39,7 +39,7 @@ def sweep() -> dict:
         record = ExtractionRecord.objects.filter(artifact_id=artifact_id).first()
         if record is None:
             finding = 'sweep:missing'
-        elif record.source_updated_at != updated_at:
+        elif not record.is_current_for(updated_at):  # REQ-03's currency test
             finding = 'sweep:updated'
         else:
             try:

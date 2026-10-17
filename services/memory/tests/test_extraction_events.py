@@ -54,8 +54,11 @@ def test_req03_a_replaced_event_causes_a_new_extraction(core, spool_dir, extract
     finally:
         stop(worker)
     assert _record(artifact_id).text == 'Version two.\n'
-    assert list(ExtractionJob.objects.filter(artifact_id=artifact_id).order_by('id')
-                .values_list('trigger', flat=True)) == ['created', 'replaced']
+    # The first job is the created event's, or the startup sweep's if it got
+    # there first; the second is the replaced event's.
+    triggers = list(ExtractionJob.objects.filter(artifact_id=artifact_id).order_by('id')
+                    .values_list('trigger', flat=True))
+    assert len(triggers) == 2 and triggers[0] in ('created', 'sweep:missing') and triggers[1] == 'replaced'
 
 
 def test_an_entry_is_acknowledged_only_after_its_job_is_committed(core, redis_events):

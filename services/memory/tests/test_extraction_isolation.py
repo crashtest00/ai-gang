@@ -57,8 +57,12 @@ def test_the_running_extractor_holds_no_socket_of_any_kind(spool_dir):
     extractor = start_extractor(spool_dir)
     try:
         assert wait_for(lambda: (spool_dir / 'requests').exists(), 10)
-        fds = Path(f'/proc/{extractor.pid}/fd')
-        targets = [os.readlink(fd) for fd in fds.iterdir() if fd.exists()]
+        targets = []
+        for fd in os.listdir(f'/proc/{extractor.pid}/fd'):
+            try:
+                targets.append(os.readlink(f'/proc/{extractor.pid}/fd/{fd}'))
+            except OSError:
+                continue  # closed between the listing and the read
     finally:
         stop(extractor)
     assert targets, 'expected to read the extractor process\'s descriptors'

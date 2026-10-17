@@ -15,8 +15,9 @@ reason and never any text (REQ-06). The database enforces all of that:
 **Currency** (REQ-03) is not stored: a record is current only while its
 ``source_updated_at`` equals the ``updatedAt`` on Core's present record,
 which a consumer reads from Core. ``ExtractionRecord.is_current_for`` is
-that comparison, and the job's completion uses it to refuse a stale result
-(REQ-07).
+that comparison; the sweep uses it to find a re-upload whose event was lost,
+and a job's completion makes the same comparison against its own stamp to
+refuse a stale result (REQ-07).
 
 **The job store** tracks each extraction as a job whose state survives
 the process running it (REQ-07). A job is ``pending``, ``running`` (claimed,
