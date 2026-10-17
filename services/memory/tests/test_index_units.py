@@ -18,33 +18,10 @@ from index import render
 from index.models import CLASSES, PROJECT_CLASSES, IndexUnit
 from index.status import index_status
 from tests.index_support import (  # noqa: F401 - fixtures
-    FakeCore, archive_api, asst, chained, checkout, core, extraction, index_once, prompt, redis_client,
-    resolve_session_unit, search, text_block, units,
+    archive_api, checkout, core, index_once, redis_client, resolve_session_unit, search, seeded, units,
 )
-from tests.support import Session as Src, cost_state, enqueue
 
 pytestmark = pytest.mark.django_db(transaction=True)
-
-
-@pytest.fixture
-def seeded(core, redis_client, archive_api, checkout, roots, copier):
-    """One distinctive fact in each of the seven classes, plus the platform
-    corpus (the fixture's checkout)."""
-    harness, _ = roots
-    spec_id, _ = extraction(text='# Spec\n\nREQ-01: the quokka gateway retries three times.\n')
-    library_id, _ = extraction(text='Invoice ledger: the walrus budget closes on Fridays.\n')
-    item = core.work_item('Calibrate the narwhal sensor', 'The narwhal sensor drifts in cold rooms.',
-                          history=[('status', 'todo', 'in_progress')], spec_artifact=spec_id)
-    core.comment(item['id'], 'The pelican cache was the culprit.')
-    core.delivery(item['id'], 'commit', 'abc1234 fix the axolotl timeout')
-    core.a2a_task(['Requesting review of the ocelot migration.'], work_item_id=item['id'])
-    s = Src(harness)
-    s.append([enqueue()] + chained(prompt('Investigate the flamingo outage.'),
-                                  asst('m1', text_block('The flamingo outage came from a full disk.'))) + [cost_state()])
-    notes = s.notes_dir()
-    (notes / 'MEMORY.md').write_bytes(b'# Notes\n\nThe heron deploy needs a manual approval.\n')
-    copier.reconcile()
-    return {'item': item, 'spec': spec_id, 'library': library_id, 'session': s}
 
 
 def test_req01_every_class_is_indexed_and_each_fact_is_found_in_its_own_class(seeded):

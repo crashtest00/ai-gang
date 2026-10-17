@@ -101,21 +101,27 @@ class EventConsumer:
 
     def poll(self, block_ms: int = 1000) -> int:
         """Read once from every joined stream, act on each entry, and
-        acknowledge it. Returns how many entries were handled."""
+        acknowledge it. A stream's own unacknowledged entries are finished
+        before its new ones are read. Returns how many entries were handled."""
         handled = 0
         backlog = {s: '0' for s, draining in self.streams.items() if draining}
+        if backlog:
+            handled += self._read(backlog, None)
         live = {s: '>' for s, draining in self.streams.items() if not draining}
-        for streams, block in ((backlog, None), (live, block_ms if block_ms > 0 and not backlog else None)):
-            if not streams:
-                continue
-            response = self.client.xreadgroup(GROUP, self.consumer, streams, count=100, block=block) or []
-            got = {stream: entries for stream, entries in response}
-            for stream in streams:
-                entries = got.get(stream) or []
-                if streams is backlog and not entries:
-                    self.streams[stream] = False
-                for entry_id, entry_fields in entries:
-                    apply(stream, entry_fields or {})
-                    self.client.xack(stream, GROUP, entry_id)
-                    handled += 1
+        if live:
+            handled += self._read(live, block_ms if block_ms > 0 and not handled else None)
+        return handled
+
+    def _read(self, streams: dict, block) -> int:
+        response = self.client.xreadgroup(GROUP, self.consumer, streams, count=100, block=block) or []
+        got = {stream: entries for stream, entries in response}
+        handled = 0
+        for stream, position in streams.items():
+            entries = got.get(stream) or []
+            if position == '0' and not entries:
+                self.streams[stream] = False
+            for entry_id, entry_fields in entries:
+                apply(stream, entry_fields or {})
+                self.client.xack(stream, GROUP, entry_id)
+                handled += 1
         return handled
