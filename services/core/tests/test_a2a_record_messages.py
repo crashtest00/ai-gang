@@ -152,6 +152,10 @@ def test_req01_two_consumers_creating_one_task_record_concurrently_find_it(
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 with connection.cursor() as cursor:
+                    # PostgreSQL snapshots backend status once per transaction;
+                    # this runs inside the open one, so drop the snapshot or
+                    # every poll after the first repeats the first answer.
+                    cursor.execute('SELECT pg_stat_clear_snapshot()')
                     cursor.execute("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
                                    "AND query LIKE 'INSERT INTO \"a2a_task\"%%'")
                     if cursor.fetchone()[0] > 0:
@@ -162,10 +166,12 @@ def test_req01_two_consumers_creating_one_task_record_concurrently_find_it(
 
     monkeypatch.setattr(store, '_a2a_write_checkpoint', hold_first_task_insert)
     core.start_archive([GATEWAY_STREAM, BACKEND_STREAM])
-    wait_stored(dispatched['messageId'])
-    wait_stored(submission_id)
-    wait_archive_drained(redis_client, GATEWAY_STREAM)
-    wait_archive_drained(redis_client, BACKEND_STREAM)
+    # Above the hold's own 10 s deadline, so a slow second consumer cannot
+    # make these waits expire before the hold does.
+    wait_stored(dispatched['messageId'], timeout_s=30)
+    wait_stored(submission_id, timeout_s=30)
+    wait_archive_drained(redis_client, GATEWAY_STREAM, timeout_s=30)
+    wait_archive_drained(redis_client, BACKEND_STREAM, timeout_s=30)
 
     assert held['other_waited'], 'the second consumer reached its own Task-record insert while the first was open'
     assert A2ATask.objects.filter(id=work_item_id).count() == 1

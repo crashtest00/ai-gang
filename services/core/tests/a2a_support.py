@@ -394,13 +394,20 @@ def pending_in_archive_group(redis_client, stream: str) -> int:
         return 0
 
 
+def group_drained(redis_client, stream: str, group: str) -> bool:
+    """One XINFO GROUPS snapshot, the group read by name: it exists, nothing is
+    pending, and Redis reports a lag of exactly 0. A null lag (Redis cannot
+    compute it) is not drained, and the pending count and the lag come from the
+    same reply, so a delivery cannot land between the two reads."""
+    found = {g['name']: g for g in redis_client.xinfo_groups(stream)}.get(group)
+    return found is not None and found['pending'] == 0 and found.get('lag') == 0
+
+
 def wait_archive_drained(redis_client, stream: str, timeout_s: float = 10):
     """Every entry on ``stream`` delivered to and acknowledged by
     ``core-a2a-archive``: none pending and none undelivered."""
     def drained():
-        groups = {g['name']: g for g in redis_client.xinfo_groups(stream)}
-        group = groups.get(a2a_archive.A2A_ARCHIVE_GROUP)
-        return group is not None and group['pending'] == 0 and (group.get('lag') or 0) == 0
+        return group_drained(redis_client, stream, a2a_archive.A2A_ARCHIVE_GROUP)
     wait_for(drained, timeout_s=timeout_s, expected=f'core-a2a-archive drained on {stream}',
              observed=lambda: redis_client.xinfo_groups(stream))
 
