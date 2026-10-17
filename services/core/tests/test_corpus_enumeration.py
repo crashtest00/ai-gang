@@ -421,3 +421,146 @@ def test_req07_the_relay_publishes_the_row_on_the_project_stream_as_its_own_even
     payload = envelope['payload']
     assert payload['eventType'] == store.RECORD_DELETED_EVENT_TYPE
     assert payload['data']['id'] == comment['id']
+
+
+# ---------------------------------------------------------------------------
+# REQ-11 — a deleted child row re-enumerates its surviving work item(s)
+# ---------------------------------------------------------------------------
+
+def changed_ids(cursor):
+    """The work-item ids `/work-items/changes` returns from `cursor`."""
+    ids, after = set(), cursor
+    while True:
+        body = read(WORK_ITEMS, limit=50, cursor=after)
+        ids |= {r['id'] for r in body['workItems']}
+        after = body['nextCursor']
+        if not body['hasMore']:
+            return ids
+
+
+def settled_cursor():
+    _, cursor = enumerate_all(WORK_ITEMS, 'workItems', limit=50)
+    return cursor
+
+
+def test_req11_a_deleted_work_item_link_re_enumerates_both_ends(clean_db):
+    client = admin_client('stamp-link-admin')
+    source, target = make_work_item(project=PROJECT), make_work_item(project=PROJECT)
+    other = make_work_item(project=PROJECT)
+    link = store.create_link(source.id, target.id, 'blocks')
+    cursor = settled_cursor()
+    assert str(source.id) not in changed_ids(cursor)
+
+    resp = client.post(f"/django-admin/workitems/workitemlink/{link['id']}/delete/", {'post': 'yes'})
+    assert resp.status_code == 302
+
+    ids = changed_ids(cursor)
+    assert {str(source.id), str(target.id)} <= ids
+    assert str(other.id) not in ids
+
+
+def test_req11_a_deleted_comment_re_enumerates_its_work_item(clean_db):
+    client = admin_client('stamp-comment-admin')
+    item, other = make_work_item(project=PROJECT), make_work_item(project=PROJECT)
+    comment = store.append_comment(item.id, 'tester', 'gone soon')
+    cursor = settled_cursor()
+    assert changed_ids(cursor) == set()
+
+    client.post(f"/django-admin/workitems/workitemcomment/{comment['id']}/delete/", {'post': 'yes'})
+
+    assert changed_ids(cursor) == {str(item.id)}
+
+
+def test_req11_a_deleted_delivery_artifact_re_enumerates_its_work_item(clean_db):
+    client = admin_client('stamp-artifact-admin')
+    item = make_work_item(project=PROJECT)
+    delivery = store.attach_artifact(item.id, 'commit', 'abc')
+    cursor = settled_cursor()
+    assert changed_ids(cursor) == set()
+
+    client.post(f"/django-admin/workitems/workitemartifact/{delivery['id']}/delete/", {'post': 'yes'})
+
+    assert changed_ids(cursor) == {str(item.id)}
+
+
+def test_req11_a_deleted_specification_link_re_enumerates_its_work_item(clean_db):
+    client = admin_client('stamp-spec-admin')
+    item = make_work_item(project=PROJECT)
+    store.record_specification_link(item.id, make_artifact().id, 'REQ-2')
+    cursor = settled_cursor()
+    assert changed_ids(cursor) == set()
+
+    client.post(f'/django-admin/workitems/workitemspecificationlink/{item.id}/delete/', {'post': 'yes'})
+
+    assert changed_ids(cursor) == {str(item.id)}
+
+
+def test_req11_a_deleted_artifact_link_re_enumerates_its_work_item(clean_db):
+    client = admin_client('stamp-artifact-link-admin')
+    item = make_work_item(project=PROJECT)
+    store.add_artifact_link(item.id, make_artifact().id)
+    link = WorkItemArtifactLink.objects.get()
+    cursor = settled_cursor()
+    assert changed_ids(cursor) == set()
+
+    client.post(f'/django-admin/workitems/workitemartifactlink/{link.id}/delete/', {'post': 'yes'})
+
+    assert changed_ids(cursor) == {str(item.id)}
+
+
+def test_req11_a_bulk_admin_delete_re_enumerates_the_owning_work_item(clean_db):
+    client = admin_client('stamp-bulk-admin')
+    item, untouched = make_work_item(project=PROJECT), make_work_item(project=PROJECT)
+    comments = [store.append_comment(item.id, 'tester', f'c{n}') for n in range(2)]
+    cursor = settled_cursor()
+    assert changed_ids(cursor) == set()
+
+    resp = client.post('/django-admin/workitems/workitemcomment/', {
+        'action': 'delete_selected', 'post': 'yes', '_selected_action': [c['id'] for c in comments],
+    })
+    assert resp.status_code == 302
+
+    assert changed_ids(cursor) == {str(item.id)}
+
+
+def test_req11_the_stamp_changes_no_column_a_consumer_reads_and_writes_no_history(clean_db):
+    from workitems.models import WorkItemHistory
+    client = admin_client('stamp-columns-admin')
+    item = make_work_item(project=PROJECT)
+    comment = store.append_comment(item.id, 'tester', 'x')
+    before = WorkItem.objects.filter(id=item.id).values().get()
+    history_before = WorkItemHistory.objects.filter(work_item_id=item.id).count()
+
+    client.post(f"/django-admin/workitems/workitemcomment/{comment['id']}/delete/", {'post': 'yes'})
+
+    after = WorkItem.objects.filter(id=item.id).values().get()
+    assert after.pop('change_xid') != before.pop('change_xid')
+    assert after == before
+    assert WorkItemHistory.objects.filter(work_item_id=item.id).count() == history_before
+
+
+def test_req11_the_stamp_rolls_back_with_a_delete_that_fails(clean_db):
+    """The delete fails (a trigger refuses it) AFTER `record_deletion` stamped
+    the work item inside the admin's `transaction.atomic`; the stamp rolls
+    back, so the work item is not re-enumerated."""
+    client = admin_client('stamp-rollback-admin')
+    client.raise_request_exception = False
+    item = make_work_item(project=PROJECT)
+    comment = store.append_comment(item.id, 'tester', 'cannot go')
+    cursor = settled_cursor()
+    xid_before = WorkItem.objects.get(id=item.id).change_xid
+    with connection.cursor() as db:
+        db.execute("""
+            CREATE FUNCTION refuse_comment_delete() RETURNS trigger AS $$
+            BEGIN RAISE EXCEPTION 'refused'; END; $$ LANGUAGE plpgsql;
+            CREATE TRIGGER refuse_comment_delete BEFORE DELETE ON work_item_comment
+                FOR EACH ROW EXECUTE FUNCTION refuse_comment_delete();""")
+        try:
+            resp = client.post(f"/django-admin/workitems/workitemcomment/{comment['id']}/delete/", {'post': 'yes'})
+        finally:
+            db.execute('DROP TRIGGER refuse_comment_delete ON work_item_comment; DROP FUNCTION refuse_comment_delete();')
+
+    assert resp.status_code == 500
+    assert WorkItemComment.objects.filter(id=comment['id']).exists()
+    assert WorkItem.objects.get(id=item.id).change_xid == xid_before
+    assert changed_ids(cursor) == set()
