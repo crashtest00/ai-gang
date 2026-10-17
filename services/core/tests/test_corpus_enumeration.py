@@ -20,7 +20,10 @@ from django.test import Client
 
 from artifacts.models import Artifact, ArtifactAccessLog
 from workitems import store
-from workitems.models import AccessLog, OutboxEvent, WorkItem, WorkItemArtifact, WorkItemComment
+from workitems.models import (
+    AccessLog, OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemLink,
+    WorkItemSpecificationLink,
+)
 
 from tests.artifacts_support import admin_client
 from tests.test_work_item_references_store import make_artifact, make_work_item
@@ -240,7 +243,7 @@ def deletion_rows():
     return list(OutboxEvent.objects.filter(event_type=store.RECORD_DELETED_EVENT_TYPE).order_by('created_at'))
 
 
-def test_req07_admin_delete_of_a_comment_writes_an_outbox_row_in_the_same_transaction(clean_db):
+def test_req07_admin_delete_of_a_comment_writes_an_outbox_row_and_deletes_the_comment(clean_db):
     client = admin_client('delete-comment-admin')
     item = make_work_item(project=PROJECT)
     comment = store.append_comment(item.id, 'tester', 'to be deleted')
@@ -292,6 +295,79 @@ def test_req07_admin_delete_of_a_work_item_writes_an_outbox_row_naming_it(clean_
     (row,) = deletion_rows()
     assert row.payload['recordClass'] == 'work_item'
     assert row.payload['id'] == str(item.id)
+
+
+def test_req07_the_outbox_row_and_the_delete_commit_or_roll_back_together(clean_db):
+    """The same-transaction claim, through the real admin path: a work item
+    that has history cannot be deleted (`work_item_history.work_item_id` is a
+    foreign key with no cascade, so the DELETE raises `IntegrityError`), the
+    failure comes AFTER `record_deletion` wrote its row inside the admin's
+    `transaction.atomic`, and the row rolls back with the delete."""
+    client = admin_client('rollback-delete-admin')
+    client.raise_request_exception = False
+    item = make_work_item(project=PROJECT)
+    OutboxEvent.objects.all().delete()
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item.id}/delete/', {'post': 'yes'})
+    assert resp.status_code == 500, 'the admin surfaces the database refusal as an unhandled error, not a message'
+    assert WorkItem.objects.filter(id=item.id).exists()
+    assert deletion_rows() == []
+    assert not OutboxEvent.objects.filter(event_type=store.RECORD_DELETED_EVENT_TYPE).exists()
+
+
+def test_req07_admin_delete_of_a_work_item_link_names_both_ends(clean_db):
+    client = admin_client('delete-link-admin')
+    source = make_work_item(project=PROJECT)
+    target = make_work_item(project=PROJECT)
+    link = store.create_link(source.id, target.id, 'blocks')
+    link_id = link['id']
+    OutboxEvent.objects.all().delete()
+
+    resp = client.post(f'/django-admin/workitems/workitemlink/{link_id}/delete/', {'post': 'yes'})
+    assert resp.status_code == 302
+    assert not WorkItemLink.objects.exists()
+
+    (row,) = deletion_rows()
+    assert row.project == PROJECT
+    assert str(row.work_item_id) == str(source.id)
+    assert row.payload == {
+        'recordClass': 'work_item_link', 'id': link_id, 'workItemId': str(source.id),
+        'toWorkItemId': str(target.id), 'deletedBy': 'delete-link-admin'}
+
+
+def test_req07_admin_delete_of_a_specification_link_writes_an_outbox_row(clean_db):
+    client = admin_client('delete-spec-link-admin')
+    item = make_work_item(project=PROJECT)
+    store.record_specification_link(item.id, make_artifact().id, 'REQ-9')
+    OutboxEvent.objects.all().delete()
+
+    resp = client.post(f'/django-admin/workitems/workitemspecificationlink/{item.id}/delete/', {'post': 'yes'})
+    assert resp.status_code == 302
+    assert not WorkItemSpecificationLink.objects.exists()
+
+    (row,) = deletion_rows()
+    assert (row.project, str(row.work_item_id)) == (PROJECT, str(item.id))
+    assert row.payload == {
+        'recordClass': 'specification_link', 'id': str(item.id), 'workItemId': str(item.id),
+        'deletedBy': 'delete-spec-link-admin'}
+
+
+def test_req07_admin_delete_of_an_artifact_link_writes_an_outbox_row(clean_db):
+    client = admin_client('delete-artifact-link-admin')
+    item = make_work_item(project=PROJECT)
+    store.add_artifact_link(item.id, make_artifact().id)
+    link = WorkItemArtifactLink.objects.get()
+    OutboxEvent.objects.all().delete()
+
+    resp = client.post(f'/django-admin/workitems/workitemartifactlink/{link.id}/delete/', {'post': 'yes'})
+    assert resp.status_code == 302
+    assert not WorkItemArtifactLink.objects.exists()
+
+    (row,) = deletion_rows()
+    assert (row.project, str(row.work_item_id)) == (PROJECT, str(item.id))
+    assert row.payload == {
+        'recordClass': 'artifact_link', 'id': str(link.id), 'workItemId': str(item.id),
+        'deletedBy': 'delete-artifact-link-admin'}
 
 
 def test_req07_a_bulk_admin_delete_writes_one_row_per_deleted_record(clean_db):
