@@ -42,7 +42,7 @@ from datetime import timedelta
 from typing import Optional
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -61,6 +61,44 @@ STAMP_TRIES = 5
 # How long a job waits after the extractor did not pick a file up, or after
 # Core could not be read.
 RELEASE_BACKOFF_SECONDS = 15
+
+
+FORMAT_MAX_LENGTH = 255
+REASON_MAX_LENGTH = 2000
+_RESULT_OUTCOMES = (OUTCOME_EXTRACTED, OUTCOME_FAILED, 'lost')
+
+
+def database_safe(text: str) -> str:
+    """Text PostgreSQL will store: no NUL, and no character UTF-8 cannot
+    encode (a lone surrogate, which a crafted PDF's CMap can yield)."""
+    return text.replace('\x00', '').encode('utf-8', 'replace').decode('utf-8')
+
+
+def _malformed(result) -> Optional[str]:
+    """Why an extractor result cannot be used, or None if it is well formed
+    (REQ-05, REQ-06). The result is untrusted: it is derived from a file an
+    attacker may have crafted."""
+    if not isinstance(result, dict):
+        return f'the result is a {type(result).__name__}, not an object'
+    outcome = result.get('outcome')
+    if outcome not in _RESULT_OUTCOMES:
+        return 'the result has no valid outcome'
+    fmt = result.get('format')
+    if fmt is not None and not (isinstance(fmt, str) and len(fmt) <= FORMAT_MAX_LENGTH):
+        return 'the result has an invalid format'
+    if outcome == OUTCOME_EXTRACTED:
+        if not isinstance(result.get('text'), str):
+            return 'a successful result has no text'
+        if fmt is None:
+            return 'a successful result has no format'
+    elif not isinstance(result.get('reason', ''), str):
+        return 'the result has a non-text reason'
+    return None
+
+
+def _record_malformed(job, record, sha, why: str) -> str:
+    return _complete(job, record, sha, outcome=OUTCOME_FAILED, fmt=None,
+                     reason=f'the extractor returned a malformed result: {why}')
 
 
 def worker_id() -> str:
@@ -240,21 +278,36 @@ def run(job: ExtractionJob, spool: Spool) -> str:
 
         time_limit = settings.MEMORY_EXTRACTION_TIME_LIMIT_SECONDS
         spool.submit(attempt_name, original_filename=record.original_filename, time_limit=time_limit)
-        result = spool.await_result(attempt_name, time_limit=time_limit, grace=settings.MEMORY_EXTRACTION_GRACE_SECONDS)
+        try:
+            result = spool.await_result(attempt_name, time_limit=time_limit,
+                                        grace=settings.MEMORY_EXTRACTION_GRACE_SECONDS)
+        except ValueError as err:  # a result file that is not JSON
+            return _record_malformed(job, record, sha, f'unreadable result ({err})')
 
         if result == UNCLAIMED:
             job.attempts -= 1  # never reached the extractor
             _release(job, 'the extractor did not pick the file up', RELEASE_BACKOFF_SECONDS)
             return job.state
-        if result == NO_RESULT or result.get('outcome') == 'lost':
-            why = 'no result from the extractor' if result == NO_RESULT else result.get('reason', 'lost')
-            _release(job, f'attempt {job.attempts} ended without a result: {why}')
+        if result == NO_RESULT:
+            _release(job, f'attempt {job.attempts} ended without a result: no result from the extractor')
             return job.state
-        if result.get('outcome') == OUTCOME_EXTRACTED:
-            return _complete(job, record, sha, outcome=OUTCOME_EXTRACTED, fmt=result.get('format'),
-                             text=result.get('text', ''))
+        why_malformed = _malformed(result)
+        if why_malformed:
+            return _record_malformed(job, record, sha, why_malformed)
+        if result['outcome'] == 'lost':
+            _release(job, f"attempt {job.attempts} ended without a result: {result.get('reason') or 'lost'}"
+                     [:REASON_MAX_LENGTH])
+            return job.state
+        if result['outcome'] == OUTCOME_EXTRACTED:
+            try:
+                return _complete(job, record, sha, outcome=OUTCOME_EXTRACTED, fmt=result['format'],
+                                 text=database_safe(result['text']))
+            except DatabaseError as err:  # the database refused this file's text: a failure, not a crash
+                log.warning('extraction job %s: the database refused the extracted text: %s', job.id, err)
+                return _record_malformed(job, record, sha, f'the database refused the text ({type(err).__name__})')
+        reason = database_safe(result.get('reason') or 'extraction failed with no reason given')
         return _complete(job, record, sha, outcome=OUTCOME_FAILED, fmt=result.get('format'),
-                         reason=result.get('reason') or 'extraction failed with no reason given')
+                         reason=reason[:REASON_MAX_LENGTH])
     except core_client.CoreUnavailable as err:
         _release(job, f'Core unavailable: {err}', RELEASE_BACKOFF_SECONDS)
         return job.state

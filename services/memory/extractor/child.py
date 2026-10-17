@@ -33,8 +33,11 @@ def run(work: Path) -> dict:
                 'reason': f'extraction failed: {type(exc).__name__}: {exc}'[:2000]}
     if isinstance(result, Unsupported):
         return {'outcome': 'failed', 'format': result.format, 'reason': result.reason}
-    # PostgreSQL text cannot hold NUL, and no reader wants one.
-    return {'outcome': 'extracted', 'format': result.format, 'text': result.text.replace('\x00', '')}
+    # PostgreSQL text cannot hold NUL, and no reader wants one; a lone
+    # surrogate (pypdf decodes CMaps with surrogatepass) cannot be encoded
+    # as UTF-8 at all, so it becomes "?".
+    text = result.text.replace('\x00', '').encode('utf-8', 'replace').decode('utf-8')
+    return {'outcome': 'extracted', 'format': result.format, 'text': text}
 
 
 def main(argv: list[str]) -> int:
