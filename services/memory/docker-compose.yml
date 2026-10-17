@@ -9,7 +9,11 @@
 #                       into the archive: file-change events plus the
 #                       reconciling pass (REQ-03); session status (REQ-06)
 #   - memory-api      — the manifest, file, notes and counts reads and the
-#                       changed-since listing (REQ-08, REQ-09)
+#                       changed-since listing (REQ-08, REQ-09), and knowledge
+#                       retrieval: POST/GET /retrieve and
+#                       GET /retrieve/queries/<id>
+#                       (strategy/v6.0/v6.1/features/knowledge-retrieval.md);
+#                       it reads Core and Redis on ai-gang at query time
 #   - memory-extraction — artifact text extraction's dispatcher
 #                       (strategy/v6.0/v6.1/features/artifact-text-extraction.md):
 #                       consumes artifact.uploaded events, runs the

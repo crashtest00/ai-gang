@@ -124,8 +124,8 @@ def answer(request: dict, *, core: Optional[sources.CoreReads] = None) -> dict:
         'incomplete': incomplete,
         'incompleteReasons': lag['reasons'],
         # REQ-07: an empty result means "nothing relevant" only when the
-        # index was not behind.
-        'nothingRelevant': not passages and not incomplete,
+        # index was not behind and no passage was withheld as not current.
+        'nothingRelevant': not passages and not incomplete and not withheld,
         'statusUnavailable': any((p['sourceStatus'] or {}).get('state') == 'unavailable' for p in passages),
         'notice': NOTICE,
     }
