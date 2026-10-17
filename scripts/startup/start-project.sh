@@ -15,7 +15,8 @@
 #
 #   - the core service does the same from the same file — its
 #     consumers process creates each project's command and webhook
-#     consumer groups as it starts, and its API process caches the
+#     consumer groups, and one `core-a2a-archive` consumer per gateway
+#     and agent-channel stream, as it starts, and its API process caches the
 #     project list the first time it is asked for it, which step 3's own
 #     health check already did.
 #

@@ -276,7 +276,9 @@ REQ-04): a verdict at each exit of `handleA2ASubmission` (`applied`, or
 outcome (or a `refused`/`dead_lettered` verdict when the message had none)
 from the gateway's dead-letter hook, and a `superseded` outcome from
 `dispatchTask` when a reopen supersedes an earlier dispatch. A failed
-publication is logged, not retried into a dead letter. The spec's table of
+publication of any verdict but `applied` is logged, not retried into a dead
+letter. A failed `applied` publication raises, so the entry stays pending and
+is redelivered, and is dead-lettered once its retries run out. The spec's table of
 verdicts and outcomes is authoritative.
 
 Nothing here writes to Jira. Each operation below resolves to a canonical
