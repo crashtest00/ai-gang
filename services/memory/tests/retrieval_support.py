@@ -156,17 +156,56 @@ def follow(body, path):
 # The rendering a Core passage may carry around its fields' values, written out
 # here rather than taken from index.render: the check is that nothing outside the
 # named fields is record text, so it must not come from the code that wrote it.
-RENDERING_WORDS = sorted({
-    'Work item', 'Type', 'Status', 'Priority', 'External key', 'Assignee', 'Description', 'Behavior',
-    'Acceptance criteria', 'Constraints', 'Edge cases', 'Out of scope', 'Value hypothesis', 'Test measurement',
-    'Release notes', 'Candidate commit', 'Build', 'Preview', 'Comment by', 'File', 'Function',
-    'Delivery artifact', 'Artifact', 'A2A', 'message', 'from', 'to', '(none)'}, key=len, reverse=True)
+#
+# Each is matched where the rendering puts it, never as a bare word: a field's
+# label only at the start of a line and only with its ": ", a history entry's
+# "from"/"to" only with the spaces around them, "(none)" only after them, and
+# "message" only after "A2A ". Text outside every span must be a sequence of
+# these pieces, so a stray record word ("to", "Status") is caught.
+_LABELS = ('Work item', 'Type', 'Status', 'Priority', 'External key', 'Assignee', 'Description', 'Behavior',
+           'Acceptance criteria', 'Constraints', 'Edge cases', 'Out of scope', 'Value hypothesis',
+           'Test measurement', 'Release notes', 'Candidate commit', 'Build', 'Preview', 'Comment by', 'File',
+           'Function')
+# (piece, only at the start of a line)
+RENDERING_PIECES = (
+    [(f'{label}: ', True) for label in _LABELS]
+    + [('Delivery artifact (', True), ('A2A message', True), ('A2A ', True), ('Artifact ', True)]
+    + [(' from (none)', False), (' to (none)', False), (' from ', False), (' to ', False),
+       ('):\n', False), ('): ', False), (' (', False), (':\n', False), (': ', False), ('\n', False), (' ', False)])
+
+
+def _is_rendering(text, start, end) -> bool:
+    """Whether ``text[start:end]``, a run outside every span, is a sequence of
+    ``RENDERING_PIECES`` each at a place the rendering puts it. A run at the
+    passage's start may begin inside a piece, and one at its end may stop
+    inside one, because a unit boundary can fall there."""
+    def line_start(at):
+        return at == 0 or text[at - 1] == '\n'
+
+    reachable = {start}
+    if start == 0:  # the passage begins inside a piece: the rest of that piece
+        reachable |= {k for piece, _ in RENDERING_PIECES for k in range(1, min(len(piece), end + 1))
+                      if text[:k] == piece[len(piece) - k:]}
+    for at in range(start, end + 1):
+        if at not in reachable:
+            continue
+        if at == end:
+            return True
+        for piece, at_line_start in RENDERING_PIECES:
+            if at_line_start and not line_start(at):
+                continue
+            if text.startswith(piece, at) and at + len(piece) <= end:
+                reachable.add(at + len(piece))
+            elif end == len(text) and piece.startswith(text[at:end]):
+                return True
+    return False
 
 
 def unexplained(text, fields, body) -> list:
     """What in a passage its named fields do not account for: a span whose
     text is not the named value's text at ``valueOffset``, or text outside
-    every span that is more than the rendering's labels and punctuation."""
+    every span that is more than the rendering's labels and punctuation, at
+    the places the rendering puts them."""
     problems, covered = [], [False] * len(text)
     for entry in fields:
         value = follow(body, entry['path'])
@@ -177,11 +216,15 @@ def unexplained(text, fields, body) -> list:
             problems.append(('span', entry['path'], piece))
         for i in range(start, min(end, len(text))):
             covered[i] = True
-    outside = ''.join('\0' if c else ch for c, ch in zip(covered, text))
-    for segment in outside.split('\0'):
-        rest = segment
-        for word in RENDERING_WORDS:
-            rest = rest.replace(word, ' ')
-        if rest.strip(' \n:()'):
-            problems.append(('outside', segment))
+    at = 0
+    while at < len(text):
+        if covered[at]:
+            at += 1
+            continue
+        stop = at
+        while stop < len(text) and not covered[stop]:
+            stop += 1
+        if not _is_rendering(text, at, stop):
+            problems.append(('outside', text[at:stop]))
+        at = stop
     return problems

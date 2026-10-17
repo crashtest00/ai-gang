@@ -27,13 +27,21 @@ holds any of, in passage order (``Rendering.fields``)::
   object key (a string), an array index (an integer), or a one-key object
   ``{"<key>": "<value>"}`` meaning "the element of this array whose ``<key>``
   is ``<value>``" (``{"id": ...}`` for a history entry, comment or delivery
-  artifact; ``{"messageId": ...}`` for an A2A message; ``{"artifactId": ...}``
-  for a message's artifact). Message parts carry no id and are indexed.
+  artifact; ``{"messageId": ...}`` for an A2A message). A selected key is
+  unique in its array. A message's artifacts are indexed, not selected by
+  ``artifactId``: Core keeps the same ``artifactId`` more than once in one
+  message (``A2AArtifact``). Its read returns a message's artifacts ordered
+  by ``position``, which is unique per message (``uq_a2a_artifact_position``),
+  so an index names one artifact; it is the artifact's place in that array,
+  not its ``position`` (an artifact Core did not store leaves a gap in
+  ``position``). Message parts carry no id and are indexed too.
 - ``passage[start:end] == value_text[n:n + (end - start)]``, where
   ``value_text`` is the value at ``path``: a string as it is, any other
-  value as ``json.dumps(value, sort_keys=True, ensure_ascii=False)``. A
-  value is written whole, so a span is shorter than its value only where a
-  unit boundary cuts the value.
+  value as ``json.dumps(value, sort_keys=True, ensure_ascii=False)``.
+  ``start``, ``end`` and ``n`` count Unicode code points (Python string
+  indices), not UTF-16 units or bytes. A value is written whole, so a span
+  is shorter than its value only where a unit boundary cuts the value, and
+  ``n`` is above 0 only in a unit that starts inside the value.
 - **Every character of the passage outside the spans is rendering, not
   record text:** a field's label and ``": "`` (``Description: …``, the
   labels below), the punctuation around an A2A message's role and direction
@@ -233,7 +241,7 @@ def a2a_message(message: dict) -> Rendering:
     has_artifact = False
     for index, artifact in enumerate(message.get('artifacts') or []):
         inner = artifact.get('artifact') if isinstance(artifact.get('artifact'), dict) else {}
-        artifact_at = at + ('artifacts', _select('artifactId', artifact, index), 'artifact')
+        artifact_at = at + ('artifacts', index, 'artifact')
         rendered = _parts(inner.get('parts'), artifact_at + ('parts',))
         if rendered.length:
             out.label('\nArtifact ')
