@@ -156,11 +156,13 @@ def decide_format(data: bytes, original_filename: Optional[str]) -> tuple[str, O
     """Return ``(format, unsupported_reason)``. The reason is None for a
     declared format and names what was recognised otherwise."""
     head = data[:1024]
-    # PDF allows junk before its header within the first 1,024 bytes; a
-    # text file that merely mentions "%PDF-" on a later line is not a PDF.
+    # PDF readers accept binary junk before the header within the first
+    # 1,024 bytes; a text file that merely mentions "%PDF-" is not a PDF.
     marker = head.find(b'%PDF-')
-    if marker >= 0 and b'\n' not in head[:marker]:
-        return PDF, None
+    if marker >= 0:
+        prefix = head[:marker]
+        if not prefix.strip() or any(b < 9 or 13 < b < 32 for b in prefix):
+            return PDF, None
     image = _image_format(head)
     if image is not None:
         return image, f'unsupported format: {image} (image content is not extracted, REQ-06)'

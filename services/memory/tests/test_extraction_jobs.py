@@ -62,7 +62,7 @@ def test_an_event_for_an_artifact_whose_job_is_running_queues_another_job(core, 
     assert jobs.claim('test-worker').id == first.id
     second = jobs.enqueue(artifact_id, 'replaced')  # running: it may hold the old content
     assert second is not None and second.state == 'pending'
-    assert jobs.claim('test-worker') is None  # not while the first is running
+    assert jobs.claim('other-worker') is None  # not while the first is running
 
 
 def test_a_result_older_than_the_record_never_displaces_it(core, spool_dir, extractor):
