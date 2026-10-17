@@ -158,3 +158,61 @@ def test_req04_freshness_measured_for_every_class(ready, core, roots, copier, ca
         print('\nfreshness, seconds from commit (or archive copy, or extraction record) to indexed:',
               {k: round(v, 2) for k, v in measured.items()})
     assert all(seconds < 15 for seconds in measured.values()), measured
+
+
+# --- Upload events read out of order (REQ-04) -------------------------------------------
+
+def test_req04_an_earlier_uploads_event_read_late_leaves_the_current_text_current(ready):
+    """The second upload's extraction is indexed before the first upload's
+    event is read: that event is older than what the units were built
+    from, so they stay current and retrievable."""
+    from retrieval import ranking
+    redis_client = ready
+    artifact_id, first = extraction(text='Rates: the kestrel rate is four percent.\n')
+    second = first + timedelta(minutes=5)
+    extraction(artifact_id, text='Rates: the merlin rate is nine percent.\n', updated_at=second)
+    redis_client.xadd(ARTIFACTS, upload_event(artifact_id, second, action='replaced'))
+    index_once()
+    assert [u.current for u in search('merlin rate')] == [True]
+
+    redis_client.xadd(ARTIFACTS, upload_event(artifact_id, first))      # the first upload's event, late
+    index_once()
+    assert [u.current for u in search('merlin rate')] == [True]
+    assert [c.source_key for c in ranking.rank('merlin rate')] == [f'artifact:{artifact_id}']
+    assert not PendingArtifact.objects.exists() and not index_status()['incomplete']
+
+
+def test_req04_an_extraction_indexed_after_a_newer_upload_is_announced_is_not_current(ready):
+    """The second upload's event is read before the first upload's
+    extraction is indexed: that extraction is no longer current, so its
+    units are written as not current until the second's is recorded."""
+    from retrieval import ranking
+    redis_client = ready
+    artifact_id, first = extraction(text='Rates: the kestrel rate is four percent.\n')
+    second = first + timedelta(minutes=5)
+    redis_client.xadd(ARTIFACTS, upload_event(artifact_id, second, action='replaced'))
+    index_once()
+    old = search('kestrel rate')
+    assert old and not any(u.current for u in old)
+    assert ranking.rank('kestrel rate') == []
+    assert 'library: 1 uploaded file(s) awaiting extraction' in index_status()['reasons']
+
+    extraction(artifact_id, text='Rates: the merlin rate is nine percent.\n', updated_at=second)
+    index_once()
+    assert search('kestrel rate') == [] and [u.current for u in search('merlin rate')] == [True]
+    assert not index_status()['incomplete']
+
+
+def test_req04_a_rebuild_while_a_newer_upload_is_pending_does_not_make_the_old_text_current(ready):
+    from django.core.management import call_command
+    redis_client = ready
+    artifact_id, first = extraction(text='Rates: the kestrel rate is four percent.\n')
+    redis_client.xadd(ARTIFACTS, upload_event(artifact_id, first))
+    index_once()
+    assert [u.current for u in search('kestrel rate')] == [True]
+    redis_client.xadd(ARTIFACTS, upload_event(artifact_id, first + timedelta(minutes=5), action='replaced'))
+    index_once()
+    call_command('rebuild_index')
+    old = search('kestrel rate')
+    assert old and not any(u.current for u in old)
+
