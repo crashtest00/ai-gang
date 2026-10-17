@@ -13,7 +13,6 @@ text is rendered. Ids and links stay in the reference, not the text.
 from __future__ import annotations
 
 import json
-import re
 
 WORK_ITEM_FIELDS = 'fields'
 WORK_ITEM_HISTORY = 'history'
@@ -65,11 +64,11 @@ def comment(record: dict) -> str:
 
 def delivery_artifact(record: dict) -> str:
     """A delivery artifact: a commit, PR, CI build or deployment (class 4)."""
-    reference = _text(record.get('reference'))
-    # PostgreSQL's english parser keeps a URL as one lexeme, so the words inside it
-    # are also written out on their own line: a plain question can then match them.
-    words = ' '.join(re.findall(r'[A-Za-z0-9]+', reference))
-    return f"Delivery artifact ({_text(record.get('artifact_type'))}): {reference}\n{words}\n"
+    # PostgreSQL's english parser keeps a URL as one lexeme. The words inside it
+    # are made searchable by the index's ``search`` column (index.models
+    # ``SEARCH``), never by adding them to this text: a passage holds only what
+    # the record holds (Corpus Indexing REQ-02, Knowledge Retrieval REQ-04).
+    return f"Delivery artifact ({_text(record.get('artifact_type'))}): {_text(record.get('reference'))}\n"
 
 
 def _parts(parts) -> str:

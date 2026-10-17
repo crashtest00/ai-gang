@@ -395,6 +395,7 @@ def follow_platform(*, force: bool = False) -> int:
         if commit == state.platform_commit and not force:
             return 0
         documents = platform.documents(root, commit)
+        written = _platform_written_times(root, commit)
     except platform.PlatformUnavailable as err:
         store.record_failure(key, CLASS_PLATFORM, str(err), {'read': PLATFORM})
         return 0
@@ -404,12 +405,35 @@ def follow_platform(*, force: bool = False) -> int:
         IndexSource.objects.filter(source_class=CLASS_PLATFORM).delete()
         for path, text in documents:
             count += store.replace_units(f'platform:{path}', CLASS_PLATFORM, {'commit': commit},
-                                         _cuts_with_lines(text, {'commit': commit, 'path': path}))
+                                         _cuts_with_lines(text, {'commit': commit, 'path': path},
+                                                          written.get(path, written[None])))
         IndexState.objects.filter(pk=1).update(platform_commit=commit)
         IndexFailure.objects.filter(source_key=key).delete()
         IndexCursor.objects.get_or_create(name=PLATFORM)
         IndexCursor.objects.filter(name=PLATFORM).update(caught_up=True, last_round_at=timezone.now())
     return count
+
+
+def _platform_written_times(root: str, commit: str) -> dict:
+    """When each platform document was written (Knowledge Retrieval REQ-05):
+    the committer time of the last commit at or before ``commit`` that
+    touched its path, read from the checkout's own repository as
+    ``platform.documents`` reads it. Key ``None`` holds ``commit``'s own
+    committer time, for a path the history does not name (a shallow clone's
+    boundary, say)."""
+    from datetime import datetime  # local, so this section's edits stay inside it
+    head = platform._git(root, 'show', '-s', '--format=%cI', commit).decode().strip()
+    times = {None: datetime.fromisoformat(head)}
+    # One pass over the history, newest first: a path's first appearance is its last change.
+    # Each commit is "\x01<time>\0" then its paths, each ending in "\0".
+    log = platform._git(root, 'log', '-z', '--format=%x01%cI', '--name-only', commit, '--', *platform.ROOTS)
+    for entry in log.decode('utf-8', 'replace').split('\x01')[1:]:
+        when, _, paths = entry.partition('\0')
+        at = datetime.fromisoformat(when.strip())
+        for path in paths.lstrip('\n').split('\0'):
+            if path and path not in times:
+                times[path] = at
+    return times
 
 
 # --- REQ-09: retry --------------------------------------------------------------

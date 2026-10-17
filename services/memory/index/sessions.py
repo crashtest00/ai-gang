@@ -207,7 +207,9 @@ def turn_units(data: bytes, *, upto_line: int | None) -> list[TurnUnit]:
         if upto_line is not None and max(lines) > upto_line:
             continue
         text, spans = render(turn)
-        written_at = harness.record_timestamp(turn.records[0][1]) if turn.records else None
+        # When the turn was written: its first record's time, or the first of its
+        # records that states one (Knowledge Retrieval REQ-05).
+        written_at = next((ts for ts in (harness.record_timestamp(r) for _, r in turn.records) if ts), None)
         for piece in cut(text, TURN_UNIT_MAX_CHARS):
             used = sorted({ln for ln, s, e in spans if s < piece.end and e > piece.offset})
             if not used:

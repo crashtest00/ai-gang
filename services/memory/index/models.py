@@ -9,7 +9,7 @@ the keys each class's reference must hold, ``index_unit_scope_matches_class``
 ties the scope to the class (REQ-08: `platform` only on the platform
 corpus, `project` on every one of the seven classes), and
 ``index_unit_text_not_empty`` refuses an empty passage. ``search`` is a
-generated ``tsvector`` over the text, with a GIN index: the index structure
+generated ``tsvector`` over the text (``SEARCH``), with a GIN index: the index structure
 is PostgreSQL full-text search (see ``index/__init__.py``).
 
 **Everything else is bookkeeping about the index itself**, never a copy of
@@ -27,7 +27,7 @@ restores the index (REQ-03).
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVector, SearchVectorField
 from django.db import models
-from django.db.models import Q
+from django.db.models import Case, F, Func, Q, Value, When
 
 # --- Source classes (REQ-01) and the platform corpus (REQ-08) ---------------
 
@@ -56,6 +56,20 @@ _LOCATED = ('offset', 'end')
 _LINES = ('lineStart', 'lineEnd')
 
 
+# What a unit is searched by: its text and, for a delivery artifact, its text
+# again with every run of non-alphanumerics read as a space. PostgreSQL's
+# english parser keeps a URL or a path as one lexeme, so without the second
+# reading no plain question could match the words inside a delivery artifact's
+# URL. The second reading is search-only: it is not in ``text``, so a returned
+# passage holds only what its record holds (REQ-02).
+SEARCH_WORDS = Case(
+    When(source_class=CLASS_DELIVERY,
+         then=Func(F('text'), Value('[^[:alnum:]]+'), Value(' '), Value('g'), function='regexp_replace',
+                   output_field=models.TextField())),
+    default=Value(''), output_field=models.TextField())
+SEARCH = SearchVector('text', SEARCH_WORDS, config='english')
+
+
 class IndexUnit(models.Model):
     source_class = models.CharField(max_length=32)
     scope = models.CharField(max_length=16)
@@ -75,8 +89,7 @@ class IndexUnit(models.Model):
     # When the source record was written, as the source states it.
     written_at = models.DateTimeField(null=True, blank=True)
     indexed_at = models.DateTimeField()
-    search = models.GeneratedField(expression=SearchVector('text', config='english'),
-                                   output_field=SearchVectorField(), db_persist=True)
+    search = models.GeneratedField(expression=SEARCH, output_field=SearchVectorField(), db_persist=True)
 
     class Meta:
         db_table = 'index_unit'
@@ -105,7 +118,7 @@ class IndexUnit(models.Model):
                 check=(~Q(source_class=CLASS_SESSION)
                        | (_keys('sessionId', 'file', 'turn', 'lines', *_LINES, *_LOCATED)
                           & (~Q(reference__has_key='parentSessionId') | Q(reference__has_key='toolUseId')))
-                       | _keys('project', 'path', 'digest', *_LINES, *_LOCATED)),
+                       | _keys('project', 'path', 'archivePath', 'digest', *_LINES, *_LOCATED)),
                 name='index_unit_reference_session'),
             models.CheckConstraint(check=~Q(source_class=CLASS_WORK_ITEM) | _keys('workItemId', 'section', *_LOCATED),
                                    name='index_unit_reference_work_item'),

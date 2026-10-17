@@ -4,7 +4,9 @@ and `setup/` in the deployment's own Source checkout, every unit stamped
 reference carries the checkout's commit, so a `git pull` does not orphan
 its passages."""
 
+import os
 import subprocess
+from datetime import datetime, timezone as dt_timezone
 
 import pytest
 from django.core.management import call_command
@@ -52,6 +54,25 @@ def test_i23_a_pull_does_not_orphan_a_platform_passage_and_the_next_start_follow
     assert fresh.reference['commit'] == new_commit
     assert _show(ready, new_commit, fresh.reference['path'])[fresh.reference['offset']:fresh.reference['end']] \
         == fresh.text
+
+
+def _committed_at(root, *args):
+    return datetime.fromisoformat(git(root, 'log', '-1', '--format=%cI', *args))
+
+
+def test_kr_req05_each_platform_unit_is_dated_by_the_last_commit_to_touch_its_document(ready):
+    # The engine README is left at the first commit; the user guide changes in a later one.
+    first = git(ready, 'rev-parse', 'HEAD')
+    (ready / 'docs' / 'UserGuide.md').write_text('# User guide\n\nThe aurora valve is reset twice.\n')
+    subprocess.run(['git', '-C', str(ready), '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'two'],
+                   check=True, env={**os.environ, 'GIT_COMMITTER_DATE': '2030-01-02T03:04:05+00:00'})
+    index_once()
+    by_path = {}
+    for unit in units(source_class='platform_document'):
+        assert unit.written_at is not None, unit.reference['path']
+        by_path.setdefault(unit.reference['path'], set()).add(unit.written_at)
+    assert by_path['docs/UserGuide.md'] == {datetime(2030, 1, 2, 3, 4, 5, tzinfo=dt_timezone.utc)}
+    assert by_path['setup/graphs/engine/README.md'] == {_committed_at(ready, first)}
 
 
 def test_req08_an_uncommitted_edit_in_the_checkout_is_not_indexed(ready):

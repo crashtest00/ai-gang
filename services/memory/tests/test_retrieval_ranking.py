@@ -85,6 +85,33 @@ def test_req10_a_cap_bounds_the_session_passages_in_a_result(client, evaluated):
     assert len(_sessions(passages(client, question, sessionWeight=3, limit=8))) > 2
 
 
+def test_req10_more_session_units_than_the_candidate_window_do_not_cut_the_specification(client, redis_client,
+                                                                                         closed_core):
+    # More session turns than the ranker takes candidates, each matching more of
+    # the question's words than the specification does: unweighted, every one of
+    # them outranks it, so a window taken before the weight would drop it.
+    question, wanted, _ = CROWDED
+    crowd = [ev.Passage(f'crowd{n}', ev.SESSION,
+                        f'Run {n}: how many times did the gateway retry the failed delivery before giving up? '
+                        'It retried three times.')
+             for n in range(ranking.CANDIDATES + 50)]
+    ev.seed(ev.CORPUS + crowd)
+    by_unit = {u.id: u.source_key.split(':', 1)[1] for u in IndexUnit.objects.all()}
+    assert sum(1 for k in by_unit.values() if k.startswith('crowd')) > ranking.CANDIDATES
+    found = passages(client, question)
+    assert wanted in [by_unit[p['unitId']] for p in found[:3]]
+    # The crowd does outrank it when sessions are not weighted down.
+    unweighted = passages(client, question, sessionWeight=1, limit=3)
+    assert all(by_unit[p['unitId']].startswith('crowd') for p in unweighted)
+
+
+def test_req05_a_passage_whose_source_states_no_written_time_says_so(client, evaluated):
+    # The evaluation corpus is seeded without written times.
+    found = passages(client, CROWDED[0])
+    assert found
+    assert all(p['writtenAt'] is None and p['ageSeconds'] is None and p['writtenAtKnown'] is False for p in found)
+
+
 def test_req01_a_question_need_not_match_every_word(client, evaluated):
     found = passages(client, 'Please tell me, if you know it, why the shipment emails were sent twice to customers')
     assert found and evaluated[found[0]['unitId']] == 'w1'
