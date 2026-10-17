@@ -5,7 +5,9 @@ Memory's PostgreSQL.
 the source it came from, its scope, and a reference that resolves to the
 source record and the location in it (REQ-02). The database refuses a unit
 that cannot carry one: ``index_unit_reference_*`` CHECK constraints name
-the keys each class's reference must hold, ``index_unit_scope_matches_class``
+the keys each class's reference must hold (for Core's four classes, a
+non-empty ``fields`` naming the fields of Core's read its text came from,
+``index.render``), ``index_unit_scope_matches_class``
 ties the scope to the class (REQ-08: `platform` only on the platform
 corpus, `project` on every one of the seven classes), and
 ``index_unit_text_not_empty`` refuses an empty passage. ``search`` is a
@@ -54,6 +56,12 @@ def _keys(*keys):
 
 _LOCATED = ('offset', 'end')
 _LINES = ('lineStart', 'lineEnd')
+# A Core record's unit names the fields of Core's read its text came from
+# (index.render, Knowledge Retrieval REQ-04): ``fields`` is a list whose first
+# entry has a ``path``. ``IS NOT NULL`` rather than ``?``, so an empty list or
+# an object reads false, never NULL (a NULL CHECK passes).
+# ``retrieval.sources.resolvable`` checks every entry.
+_NAMES_FIELDS = _keys('fields') & Q(reference__fields__0__path__isnull=False)
 
 
 # What a unit is searched by: its text and, for a delivery artifact, its text
@@ -120,15 +128,19 @@ class IndexUnit(models.Model):
                           & (~Q(reference__has_key='parentSessionId') | Q(reference__has_key='toolUseId')))
                        | _keys('project', 'path', 'archivePath', 'digest', *_LINES, *_LOCATED)),
                 name='index_unit_reference_session'),
-            models.CheckConstraint(check=~Q(source_class=CLASS_WORK_ITEM) | _keys('workItemId', 'section', *_LOCATED),
-                                   name='index_unit_reference_work_item'),
-            models.CheckConstraint(check=~Q(source_class=CLASS_COMMENT) | _keys('commentId', 'workItemId', *_LOCATED),
-                                   name='index_unit_reference_comment'),
             models.CheckConstraint(
-                check=~Q(source_class=CLASS_DELIVERY) | _keys('deliveryArtifactId', 'workItemId', *_LOCATED),
+                check=~Q(source_class=CLASS_WORK_ITEM) | (_keys('workItemId', 'section', *_LOCATED) & _NAMES_FIELDS),
+                name='index_unit_reference_work_item'),
+            models.CheckConstraint(
+                check=~Q(source_class=CLASS_COMMENT) | (_keys('commentId', 'workItemId', *_LOCATED) & _NAMES_FIELDS),
+                name='index_unit_reference_comment'),
+            models.CheckConstraint(
+                check=(~Q(source_class=CLASS_DELIVERY)
+                       | (_keys('deliveryArtifactId', 'workItemId', *_LOCATED) & _NAMES_FIELDS)),
                 name='index_unit_reference_delivery'),
-            models.CheckConstraint(check=~Q(source_class=CLASS_A2A) | _keys('taskId', 'messageId', *_LOCATED),
-                                   name='index_unit_reference_a2a'),
+            models.CheckConstraint(
+                check=~Q(source_class=CLASS_A2A) | (_keys('taskId', 'messageId', *_LOCATED) & _NAMES_FIELDS),
+                name='index_unit_reference_a2a'),
             models.CheckConstraint(
                 check=~Q(source_class=CLASS_PLATFORM) | _keys('commit', 'path', *_LINES, *_LOCATED),
                 name='index_unit_reference_platform'),

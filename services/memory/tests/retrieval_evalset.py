@@ -235,14 +235,20 @@ def _reference(passage: Passage, text: str) -> dict:
                 **lines, **span}
     if cls == SESSION:
         return {'sessionId': ident, 'file': f'sessions/{ident}.jsonl', 'turn': 1, 'lines': [1], **lines, **span}
+    # A Core record's passage names the field of Core's read it came from
+    # (index.render); here each passage is one field's whole value.
+    def fields(*path):
+        return {'fields': [{'path': list(path), 'span': [0, len(text)], 'valueOffset': 0}]}
     if cls == WORK_ITEM:
-        return {'workItemId': ident, 'section': 'fields', **span}
+        return {'workItemId': ident, 'section': 'fields', **span, **fields('description')}
     if cls == COMMENT:
-        return {'commentId': ident, 'workItemId': ident, **span}
+        return {'commentId': ident, 'workItemId': ident, **span, **fields('comments', {'id': ident}, 'body')}
     if cls == DELIVERY:
-        return {'deliveryArtifactId': ident, 'workItemId': ident, **span}
+        return {'deliveryArtifactId': ident, 'workItemId': ident, **span,
+                **fields('artifacts', {'id': ident}, 'reference')}
     if cls == A2A:
-        return {'taskId': ident, 'messageId': ident, **span}
+        return {'taskId': ident, 'messageId': ident, **span,
+                **fields('messages', {'messageId': ident}, 'parts', 0, 'text')}
     return {'commit': 'c' * 40, 'path': f'docs/{passage.id}.md', **lines, **span}
 
 

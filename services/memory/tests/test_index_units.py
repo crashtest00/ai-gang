@@ -55,15 +55,15 @@ def test_req02_every_units_reference_resolves_to_its_source_and_matches_it(seede
     for unit in units():
         ref = unit.reference
         if unit.source_class == 'work_item':
-            sections = dict(render.work_item(records['work_items'][ref['workItemId']]))
+            sections = {name: r.text for name, r in render.work_item(records['work_items'][ref['workItemId']])}
             source = sections[ref['section']]
         elif unit.source_class == 'work_item_comment':
-            source = render.comment(records['comments'][ref['commentId']])
+            source = render.comment(records['comments'][ref['commentId']]).text
         elif unit.source_class == 'delivery_artifact':
-            source = render.delivery_artifact(records['delivery'][ref['deliveryArtifactId']])
+            source = render.delivery_artifact(records['delivery'][ref['deliveryArtifactId']]).text
         elif unit.source_class == 'a2a_message':
             message = next(m for m in records['a2a'][ref['taskId']]['messages'] if m['messageId'] == ref['messageId'])
-            source = render.a2a_message(message)
+            source = render.a2a_message(message).text
         elif unit.source_class in ('specification', 'library_file'):
             record = ExtractionRecord.objects.get(artifact_id=ref['artifactId'])
             # REQ-02: the extraction's stamp, the currency key of its REQ-03.
@@ -141,7 +141,9 @@ def test_kr_req05_a_turn_whose_first_record_has_no_time_is_dated_by_its_first_re
 
 def _unit(**overrides):
     fields = {'source_class': 'work_item', 'scope': 'project', 'source_key': 'work_item:x',
-              'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4}, 'text': 'text',
+              'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4,
+                            'fields': [{'path': ['description'], 'span': [0, 4], 'valueOffset': 0}]},
+              'text': 'text',
               'indexed_at': timezone.now()}
     fields.update(overrides)
     with transaction.atomic():
@@ -156,6 +158,14 @@ def _unit(**overrides):
     {'source_class': 'decision_record'},                                # not a class
     {'text': ''},
     {'reference': {'workItemId': 'x'}},                                 # no location
+    # REQ-04: a Core record's unit that names no field of Core's read
+    {'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4}},
+    {'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4, 'fields': []}},
+    {'source_class': 'work_item_comment', 'reference': {'commentId': 'c', 'workItemId': 'x', 'offset': 0, 'end': 4}},
+    {'source_class': 'delivery_artifact',
+     'reference': {'deliveryArtifactId': 'd', 'workItemId': 'x', 'offset': 0, 'end': 4, 'fields': [{}]}},
+    {'source_class': 'a2a_message', 'reference': {'taskId': 't', 'messageId': 'm', 'offset': 0, 'end': 4,
+                                                   'fields': {'path': ['messages']}}},
     {'source_class': 'library_file', 'reference': {'artifactId': 'a', 'stamp': {'updatedAt': 't'},
                                                     'lineStart': 1, 'lineEnd': 1, 'offset': 0, 'end': 4}},
     {'source_class': 'session', 'reference': {'sessionId': 's', 'file': 'f', 'turn': 't', 'lines': [1],
@@ -174,3 +184,30 @@ def test_the_valid_form_of_that_unit_is_accepted():
     _unit()
     assert IndexUnit.objects.count() == 1
     assert set(PROJECT_CLASSES) | {'platform_document'} == set(CLASSES)
+
+
+def test_req04_migration_0003_removes_core_units_indexed_before_they_named_their_fields():
+    """A unit indexed before Core passages named their fields cannot satisfy
+    the tightened CHECK, so migration 0003 removes it, with its source row,
+    and drops the Core cursors so the indexer reads those classes again."""
+    from django.core.management import call_command
+
+    from index.models import IndexCursor, IndexSource
+    call_command('migrate', 'index', '0002', verbosity=0)
+    try:
+        now = timezone.now()
+        old = {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4}
+        IndexUnit.objects.create(source_class='work_item', scope='project', source_key='work_item:x',
+                                 reference=old, text='text', indexed_at=now)
+        IndexUnit.objects.create(source_class='platform_document', scope='platform', source_key='platform:p',
+                                 reference={'commit': 'c', 'path': 'p', 'lineStart': 1, 'lineEnd': 1,
+                                            'offset': 0, 'end': 4}, text='text', indexed_at=now)
+        IndexSource.objects.create(source_key='work_item:x', source_class='work_item', stamp={}, indexed_at=now)
+        IndexCursor.objects.create(name='core:work_items', cursor='42', caught_up=True)
+        IndexCursor.objects.create(name='platform', caught_up=True)
+    finally:
+        call_command('migrate', 'index', verbosity=0)
+    assert list(IndexUnit.objects.values_list('source_key', flat=True)) == ['platform:p']
+    assert not IndexSource.objects.filter(source_key='work_item:x').exists()
+    assert list(IndexCursor.objects.values_list('name', flat=True)) == ['platform']
+    assert 'core:work_items: not indexed yet' in index_status()['reasons']

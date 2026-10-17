@@ -46,10 +46,18 @@ def _digest(value) -> str:
     return 'sha256:' + hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _cuts(text: str, reference: dict, written_at=None, **extra) -> list[dict]:
-    return [{'text': text[c.offset:c.end], 'written_at': written_at,
-             'reference': {**reference, 'offset': c.offset, 'end': c.end, **extra}}
-            for c in cut(text)]
+def _core_cuts(rendering: render.Rendering, reference: dict, written_at=None) -> list[dict]:
+    """A Core record's units. Each reference names the fields of Core's read
+    its text came from (``render.Rendering.fields``, Knowledge Retrieval
+    REQ-04); a slice holding none of the record's text, only rendering, is
+    no unit."""
+    units = []
+    for c in cut(rendering.text):
+        fields = rendering.fields(c.offset, c.end)
+        if fields:
+            units.append({'text': rendering.text[c.offset:c.end], 'written_at': written_at,
+                          'reference': {**reference, 'offset': c.offset, 'end': c.end, 'fields': fields}})
+    return units
 
 
 def _cuts_with_lines(text: str, reference: dict, written_at=None) -> list[dict]:
@@ -78,36 +86,36 @@ def index_work_item(record: dict) -> None:
     sections = render.work_item(record)
     store.set_specification_link(work_item_id, (record.get('specification_link') or {}).get('artifact_id'))
     key = f'work_item:{work_item_id}'
-    stamp = {'digest': _digest(sections)}
+    stamp = {'digest': _digest([(section, r.text, r.spans) for section, r in sections])}
     if store.stamp_of(key) == stamp:
         return
     written_at = record.get('updated_at') or record.get('created_at')
     units = []
-    for section, text in sections:
-        units += _cuts(text, {'workItemId': work_item_id, 'project': record.get('project'), 'section': section},
-                       written_at)
+    for section, rendering in sections:
+        units += _core_cuts(rendering, {'workItemId': work_item_id, 'project': record.get('project'),
+                                        'section': section}, written_at)
     store.replace_units(key, CLASS_WORK_ITEM, stamp, units, work_item_id=work_item_id)
 
 
 def index_comment(record: dict) -> None:
     key = f"comment:{record['id']}"
-    text = render.comment(record)
-    stamp = {'digest': _digest(text)}
+    rendering = render.comment(record)
+    stamp = {'digest': _digest([rendering.text, rendering.spans])}
     if store.stamp_of(key) == stamp:
         return
-    units = _cuts(text, {'commentId': record['id'], 'workItemId': record['work_item_id'],
-                         'project': record.get('project')}, record.get('created_at'))
+    units = _core_cuts(rendering, {'commentId': record['id'], 'workItemId': record['work_item_id'],
+                                   'project': record.get('project')}, record.get('created_at'))
     store.replace_units(key, CLASS_COMMENT, stamp, units, work_item_id=record['work_item_id'])
 
 
 def index_delivery_artifact(record: dict) -> None:
     key = f"delivery:{record['id']}"
-    text = render.delivery_artifact(record)
-    stamp = {'digest': _digest(text)}
+    rendering = render.delivery_artifact(record)
+    stamp = {'digest': _digest([rendering.text, rendering.spans])}
     if store.stamp_of(key) == stamp:
         return
-    units = _cuts(text, {'deliveryArtifactId': record['id'], 'workItemId': record['work_item_id'],
-                         'project': record.get('project')}, record.get('created_at'))
+    units = _core_cuts(rendering, {'deliveryArtifactId': record['id'], 'workItemId': record['work_item_id'],
+                                   'project': record.get('project')}, record.get('created_at'))
     store.replace_units(key, CLASS_DELIVERY, stamp, units, work_item_id=record['work_item_id'])
 
 
@@ -118,13 +126,14 @@ def index_a2a_task(record: dict) -> None:
     key = f'a2a:{task_id}'
     messages = [(m['messageId'], render.a2a_message(m), m.get('timestamp') or m.get('recordedAt'))
                 for m in record.get('messages') or []]
-    stamp = {'digest': _digest([(m, t) for m, t, _ in messages])}
+    stamp = {'digest': _digest([(m, r.text, r.spans) for m, r, _ in messages])}
     if store.stamp_of(key) == stamp:
         return
     units = []
-    for message_id, text, written_at in messages:
-        units += _cuts(text, {'taskId': task_id, 'messageId': message_id, 'project': record.get('project'),
-                              'workItemId': record.get('workItemId')}, written_at)
+    for message_id, rendering, written_at in messages:
+        units += _core_cuts(rendering, {'taskId': task_id, 'messageId': message_id,
+                                        'project': record.get('project'), 'workItemId': record.get('workItemId')},
+                            written_at)
     store.replace_units(key, CLASS_A2A, stamp, units)
 
 

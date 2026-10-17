@@ -9,7 +9,8 @@
     events.py     the consumer of Core's event streams (REQ-04, REQ-07)
     follow.py     indexing each class, catch-up, rebuild and retry (REQ-01,
                   REQ-03, REQ-04, REQ-07, REQ-09)
-    render.py     Core's records rendered to text (REQ-02)
+    render.py     Core's records rendered to text, each value named by its
+                  field in Core's read (REQ-02; Knowledge Retrieval REQ-04)
     sessions.py   a transcript cut into turns (REQ-10)
     chunking.py   a text cut into located units (§4)
     platform.py   the platform corpus, read at the checkout's commit (REQ-08)

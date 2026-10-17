@@ -7,6 +7,17 @@ Retrieval REQ-04, REQ-05).
 files, memory-api for sessions and notes, the Source checkout's commit for the
 platform corpus.
 
+Its ``location`` is where in that read the passage lies. For a library file,
+a session, a note or a platform document it is the passage's place in the
+text the read returns (``offset``/``end``, and lines). Core's reads of a work
+item, comment, delivery artifact or A2A message return JSON, so for those
+classes it is the reference's ``fields`` instead: the JSON path of each field
+value the passage holds, where in the passage it sits, and from which
+character of the value (``index.render``'s docstring), so a consumer checks
+the passage against the JSON field by field. The reference's own
+``section``/``offset``/``end`` are its place in Memory's rendering of the
+record and are not repeated there.
+
 ``source_status`` is read from Core when the query runs, never from the
 index (REQ-05): a work item's current status, an A2A message's ScrumMaster
 verdict and reason (or that it has none yet), a library file's currency
@@ -39,10 +50,10 @@ ACTOR = 'memory-retrieval'
 # ``resolvable`` is the same rule on the query path, so a unit that somehow
 # lacked one is not returned.
 _REQUIRED = {
-    CLASS_WORK_ITEM: ('workItemId',),
-    CLASS_COMMENT: ('workItemId', 'commentId'),
-    CLASS_DELIVERY: ('workItemId', 'deliveryArtifactId'),
-    CLASS_A2A: ('taskId', 'messageId'),
+    CLASS_WORK_ITEM: ('workItemId', 'fields'),
+    CLASS_COMMENT: ('workItemId', 'commentId', 'fields'),
+    CLASS_DELIVERY: ('workItemId', 'deliveryArtifactId', 'fields'),
+    CLASS_A2A: ('taskId', 'messageId', 'fields'),
     CLASS_LIBRARY: ('artifactId', 'stamp'),
     CLASS_SPECIFICATION: ('artifactId', 'stamp'),
     CLASS_PLATFORM: ('commit', 'path'),
@@ -57,14 +68,42 @@ def resolvable(source_class: str, reference: dict) -> bool:
             reference.get('project') and reference.get('path') and reference.get('archivePath')
             and reference.get('digest'))
     required = _REQUIRED.get(source_class)
-    return required is not None and all(reference.get(key) for key in required)
+    if required is None or not all(reference.get(key) for key in required):
+        return False
+    return source_class not in _CORE_CLASSES or _names_its_fields(reference['fields'])
+
+
+_CORE_CLASSES = (CLASS_WORK_ITEM, CLASS_COMMENT, CLASS_DELIVERY, CLASS_A2A)
+
+
+def _names_its_fields(fields) -> bool:
+    """A Core-class reference's ``fields`` is a list of
+    ``{"path": [step, ...], "span": [start, end], "valueOffset": n}``
+    (``index.render``). A unit indexed before Core passages named their
+    fields has none, and is withheld; migration 0003 removed every such unit
+    and had the indexer read Core's classes again."""
+    def step(s):
+        return isinstance(s, (str, int)) and not isinstance(s, bool) or (
+            isinstance(s, dict) and len(s) == 1 and all(isinstance(v, str) and v for v in s.values()))
+
+    def whole(n):
+        return isinstance(n, int) and not isinstance(n, bool) and n >= 0
+
+    return isinstance(fields, list) and bool(fields) and all(
+        isinstance(f, dict) and isinstance(f.get('path'), list) and f['path'] and all(map(step, f['path']))
+        and isinstance(f.get('span'), list) and len(f['span']) == 2 and all(map(whole, f['span']))
+        and f['span'][0] < f['span'][1] and whole(f.get('valueOffset'))
+        for f in fields)
 
 
 def address(source_class: str, reference: dict) -> dict:
     """Where the passage's source is read in full, and where in it the
     passage lies."""
-    location = {key: reference[key] for key in ('section', 'offset', 'end', 'lineStart', 'lineEnd', 'turn',
-                                                'lines') if key in reference}
+    if source_class in _CORE_CLASSES:
+        location = {'fields': reference['fields']}
+    else:
+        location = {key: reference[key] for key in ('offset', 'end', 'lineStart', 'lineEnd', 'turn', 'lines')
+                    if key in reference}
     if source_class == CLASS_WORK_ITEM:
         return {'owner': 'core', 'read': f"/work-items/{reference['workItemId']}?full=true", 'location': location}
     if source_class in (CLASS_COMMENT, CLASS_DELIVERY):
