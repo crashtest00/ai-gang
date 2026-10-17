@@ -18,7 +18,7 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-memory-dev-key
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes')
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',') if h.strip()]
 
-INSTALLED_APPS = ['archive', 'extraction']
+INSTALLED_APPS = ['archive', 'extraction', 'index']
 MIDDLEWARE = ['django.middleware.common.CommonMiddleware']
 ROOT_URLCONF = 'memory.urls'
 WSGI_APPLICATION = 'memory.wsgi.application'
@@ -111,6 +111,28 @@ MEMORY_EXTRACTION_SWEEP_SECONDS = _seconds('MEMORY_EXTRACTION_SWEEP_SECONDS', 30
 # container's hostname, which survives a restart of the same container, so a
 # restarted worker resumes its own unfinished job at once (REQ-07).
 MEMORY_EXTRACTION_WORKER_ID = os.environ.get('MEMORY_EXTRACTION_WORKER_ID', '')
+
+# --- Corpus indexing (corpus-indexing.md) ------------------------------------
+# memory-indexer reads Core's enumerations (MEMORY_CORE_URL), Core's event
+# streams (MEMORY_REDIS_URL), Memory's archive through memory-api's reads
+# (never the harness volume, REQ-01), the extraction record in this
+# database, and the platform corpus from the deployment's Source checkout,
+# mounted read-only (REQ-08).
+MEMORY_API_URL = os.environ.get('MEMORY_API_URL', 'http://memory-api:9200').rstrip('/')
+MEMORY_PLATFORM_CORPUS_ROOT = os.environ.get('MEMORY_PLATFORM_CORPUS_ROOT', '/platform-source')
+# How often the archive's session listing and notes read are followed
+# (REQ-04's exception: sessions are Memory's own archive, announced by no
+# event), and how often the extraction record is compared with the index.
+MEMORY_INDEX_ARCHIVE_FOLLOW_SECONDS = _seconds('MEMORY_INDEX_ARCHIVE_FOLLOW_SECONDS', 5)
+MEMORY_INDEX_LIBRARY_FOLLOW_SECONDS = _seconds('MEMORY_INDEX_LIBRARY_FOLLOW_SECONDS', 5)
+# How often a new project's work-item event stream is looked for.
+MEMORY_INDEX_STREAM_DISCOVERY_SECONDS = _seconds('MEMORY_INDEX_STREAM_DISCOVERY_SECONDS', 30)
+# REQ-09: how often recorded failures are retried without a rebuild.
+MEMORY_INDEX_RETRY_SECONDS = _seconds('MEMORY_INDEX_RETRY_SECONDS', 300)
+# Names the indexer's Redis consumer. Unset: the container's hostname, which
+# survives a restart, so a restarted indexer finishes its own unacknowledged
+# entries first (REQ-04).
+MEMORY_INDEX_CONSUMER = os.environ.get('MEMORY_INDEX_CONSUMER', '')
 
 # --- Logging -------------------------------------------------------------
 # REQ-08: every read is logged, to stderr, which the container log collects.
