@@ -1,8 +1,10 @@
 """
 The read path for artifacts — artifact-ingress.md REQ-03, following
 ``workitems/readstore.py``'s pattern for internal-work-item-service.md
-REQ-04: a direct synchronous read with no state-changing effect, recorded
-in the service's own access log rather than on Streams.
+REQ-04: a direct synchronous read with no state-changing effect. A read of
+one artifact (``get_artifact``) is recorded in the service's own access log
+rather than on Streams; the listing (``GET /artifacts``, ``list_artifacts``)
+writes no access-log row.
 """
 
 from __future__ import annotations
