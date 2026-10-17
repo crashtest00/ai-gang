@@ -54,7 +54,7 @@ import uuid
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from artifacts.models import Artifact
@@ -1878,7 +1878,8 @@ def list_a2a_tasks(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
 #   list_delivery_artifacts_changed  delivery artifacts, each with its work
 #                                    item's project and specification link.
 #   record_deletion                  the outbox row `GatedAdminMixin` writes in a
-#                                    delete's transaction.
+#                                    delete's transaction, and the stamp of the
+#                                    surviving work item(s) there.
 #
 # The three reads follow `list_a2a_tasks`: the same `pg_snapshot_xmin` cursor
 # over `change_xid` (stamped by the database, migration 0010), so a row whose
@@ -1955,8 +1956,9 @@ def list_work_items_changed(cursor: Optional[str] = None, *, limit: int = 50) ->
 
     A work item has changed when its own row, its detail, or any row hanging
     off it was written at or above the cursor's transaction id. A deletion
-    leaves no row to compare: the delete writes an outbox row instead
-    (``record_deletion``). Returns ``{'workItems': [...], 'nextCursor': str,
+    leaves no row of its own to compare, so ``record_deletion`` stamps the
+    surviving work item(s) in the delete's transaction (and writes an outbox
+    row): the deletion is a change to them. Returns ``{'workItems': [...], 'nextCursor': str,
     'hasMore': bool}``; as ``list_a2a_tasks``, a work item can appear in two
     rounds and no change is missed."""
     from django.db.models import Exists, OuterRef, Q
@@ -2068,7 +2070,17 @@ def record_deletion(obj, *, actor: str) -> None:
     event type: ScrumMaster's ``dispatchConsumer``, Core's Jira writer, and
     Memory's indexer (``services/memory/index/events.py``,
     ``RECORD_DELETED``). Only the indexer consumes this type; the other two
-    ignore it."""
+    ignore it.
+
+    REQ-11: the same call stamps the surviving work item(s), so a changed-since
+    enumeration re-returns them (a deleted row leaves nothing to stamp): both
+    ends of a deleted ``WorkItemLink``, the owning work item of any other
+    record; a deleted work item has no survivor. The stamp is a no-op UPDATE
+    (``change_xid = change_xid``) that fires ``work_item_set_change_xid``
+    (migration 0010), which overwrites ``change_xid`` with this transaction's
+    id; no other column (``updated_at`` included) changes, and no history row
+    is written (history is written by store functions, not by a trigger on
+    ``work_item``)."""
     record_class = _ENUMERATION_RECORD_CLASSES.get(type(obj))
     if record_class is None:
         raise TypeError(f'record_deletion: {type(obj).__name__} is not a work-item record')
@@ -2081,6 +2093,14 @@ def record_deletion(obj, *, actor: str) -> None:
     data = {'recordClass': record_class, 'id': str(obj.pk), 'workItemId': str(work_item_id), 'deletedBy': actor}
     if isinstance(obj, WorkItemLink):
         data['toWorkItemId'] = str(obj.to_work_item_id)
+    if isinstance(obj, WorkItemLink):
+        survivors = [obj.from_work_item_id, obj.to_work_item_id]
+    elif isinstance(obj, WorkItem):
+        survivors = []
+    else:
+        survivors = [obj.work_item_id]
+    if survivors:
+        WorkItem.objects.filter(id__in=survivors).update(change_xid=models.F('change_xid'))
     _write_outbox_event(
         project=project, event_type=RECORD_DELETED_EVENT_TYPE, work_item_id=work_item_id, payload=data,
     )
