@@ -519,8 +519,10 @@ The volume must exist before any project is initialised: `init-project.sh`
 Memory runs seven containers: `memory-postgres` (its own database),
 `migrate` (one-shot), `memory-copier` (copies sessions, as root, because the
 harness writes transcripts readable only by its own user), `memory-api`
-(reads sessions, notes and counts on port 9200 inside the `ai-gang`
-network), `memory-extraction` (extracts the text of artifact-library files:
+(reads sessions, notes and counts, and answers questions against the corpus
+index with `/retrieve`, on port 9200 inside the `ai-gang` network; it reads
+the core service and Redis at query time and sends nothing outside the
+deployment), `memory-extraction` (extracts the text of artifact-library files:
 it reads each upload event and, every 30 minutes, the whole library from the
 core service, and keeps the extracted text in Memory's database),
 `memory-extractor` (parses those files for it, from its own image, with no

@@ -18,7 +18,7 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-memory-dev-key
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes')
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',') if h.strip()]
 
-INSTALLED_APPS = ['archive', 'extraction', 'index']
+INSTALLED_APPS = ['archive', 'extraction', 'index', 'retrieval']
 MIDDLEWARE = ['django.middleware.common.CommonMiddleware']
 ROOT_URLCONF = 'memory.urls'
 WSGI_APPLICATION = 'memory.wsgi.application'
@@ -133,6 +133,15 @@ MEMORY_INDEX_RETRY_SECONDS = _seconds('MEMORY_INDEX_RETRY_SECONDS', 300)
 # survives a restart, so a restarted indexer finishes its own unacknowledged
 # entries first (REQ-04).
 MEMORY_INDEX_CONSUMER = os.environ.get('MEMORY_INDEX_CONSUMER', '')
+
+# --- Knowledge retrieval (knowledge-retrieval.md) -----------------------------
+# memory-api answers a question from the index in Memory's own database. At
+# query time it reads each result's current source status from Core
+# (MEMORY_CORE_URL, above) and the index's lag signal from Redis
+# (MEMORY_REDIS_URL, above). It sends nothing outside the deployment (REQ-08).
+# How long one status read of Core may take before the result says the status
+# is unavailable (REQ-05).
+MEMORY_RETRIEVAL_STATUS_TIMEOUT_SECONDS = _seconds('MEMORY_RETRIEVAL_STATUS_TIMEOUT_SECONDS', 10)
 
 # --- Logging -------------------------------------------------------------
 # REQ-08: every read is logged, to stderr, which the container log collects.

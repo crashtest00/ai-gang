@@ -1,6 +1,7 @@
 from django.urls import path
 
 from archive import views
+from retrieval import views as retrieval
 
 urlpatterns = [
     path('health', views.health),
@@ -11,4 +12,6 @@ urlpatterns = [
     path('notes/file', views.note_file),
     path('notes/changes', views.note_changes),
     path('counts', views.counts),
+    path('retrieve', retrieval.retrieve),
+    path('retrieve/queries/<int:query_id>', retrieval.query_entry),
 ]
