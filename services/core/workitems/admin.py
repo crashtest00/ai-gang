@@ -149,13 +149,20 @@ class GatedAdminMixin:
         """corpus-indexing.md REQ-07: the delete writes an outbox row naming
         the deleted record, in the delete's own transaction, so the index
         learns of it (the row must be written while the object still has its
-        key)."""
+        key). `store.record_deletion` also stamps the surviving work item(s)
+        (both ends of a link, the owning work item of any other record; none
+        for a deleted work item) so `/work-items/changes` re-returns them
+        (REQ-11); the stamp and the delete share the one transaction."""
         self._refuse_if_not_recorded(obj, 'deleting this row')
         with transaction.atomic():
             store.record_deletion(obj, actor=_actor(request))
             super().delete_model(request, obj)
 
     def delete_queryset(self, request, queryset):
+        """The bulk form of `delete_model`: one `store.record_deletion` per
+        row (an outbox row and a stamp of the surviving work item(s) each),
+        all in one transaction with the delete; one refused row refuses the
+        whole selection."""
         rows = list(queryset)
         for obj in rows:
             self._refuse_if_not_recorded(obj, 'deleting the selected rows (the whole selection is refused)')

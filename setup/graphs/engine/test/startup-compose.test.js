@@ -158,7 +158,8 @@ test('the image carries a git identity, without which the first project commit f
 // in its environment, and Compose interpolates the calling environment before
 // any .env file. memory-postgres must therefore carry no ${...} reference for
 // its credential, or its database is initialised with Core's password while
-// migrate/memory-api/memory-copier use Memory's own (REQ-01, REQ-02).
+// migrate/memory-copier/memory-api/memory-extraction/memory-indexer use
+// Memory's own (REQ-01, REQ-02).
 
 const MEMORY_COMPOSE_PATH = path.join(REPO_ROOT, 'services', 'memory', 'docker-compose.yml');
 

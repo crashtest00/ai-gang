@@ -564,3 +564,66 @@ def test_req11_the_stamp_rolls_back_with_a_delete_that_fails(clean_db):
     assert WorkItemComment.objects.filter(id=comment['id']).exists()
     assert WorkItem.objects.get(id=item.id).change_xid == xid_before
     assert changed_ids(cursor) == set()
+
+
+def test_req11_a_refused_delete_leaves_the_work_item_unstamped_and_not_re_enumerated(clean_db):
+    """The refusal (a Jira-mode project, REQ-09) comes before the stamp: the
+    surviving work item's `change_xid` is unchanged and it is not returned by
+    `/work-items/changes`."""
+    from workitems import project_config
+    client = admin_client('refused-stamp-admin')
+    item = make_work_item(project='jira-stamp-project')
+    comment = store.append_comment(item.id, 'tester', 'stays')
+    project_config.set_mode('jira-stamp-project', project_config.JIRA, jira_project_key='JSP')
+    cursor = settled_cursor()
+    xid_before = WorkItem.objects.get(id=item.id).change_xid
+
+    client.post(f"/django-admin/workitems/workitemcomment/{comment['id']}/delete/", {'post': 'yes'})
+
+    assert WorkItemComment.objects.filter(id=comment['id']).exists()
+    assert WorkItem.objects.get(id=item.id).change_xid == xid_before
+    assert changed_ids(cursor) == set()
+
+
+def test_req11_a_deleted_work_item_stamps_no_other_work_item(clean_db):
+    """A deleted work item has no survivor (`survivors = []`): another work
+    item's `change_xid` is untouched and it is not re-enumerated."""
+    from workitems.models import WorkItemHistory
+    client = admin_client('stamp-none-admin')
+    item, other = make_work_item(project=PROJECT), make_work_item(project=PROJECT)
+    with connection.cursor() as db:
+        db.execute('ALTER TABLE work_item_history DISABLE TRIGGER work_item_history_append_only')
+        try:
+            WorkItemHistory.objects.filter(work_item_id=item.id).delete()
+        finally:
+            db.execute('ALTER TABLE work_item_history ENABLE TRIGGER work_item_history_append_only')
+    cursor = settled_cursor()
+    xid_before = WorkItem.objects.get(id=other.id).change_xid
+
+    resp = client.post(f'/django-admin/workitems/workitem/{item.id}/delete/', {'post': 'yes'})
+    assert resp.status_code == 302
+    assert not WorkItem.objects.filter(id=item.id).exists()
+
+    assert WorkItem.objects.get(id=other.id).change_xid == xid_before
+    assert changed_ids(cursor) == set()
+
+
+def test_req11_a_refused_bulk_delete_leaves_the_work_item_unstamped_and_not_re_enumerated(clean_db):
+    """The bulk action runs outside any transaction of Django's own (unlike
+    the single delete view, which wraps its work in one), so this is the form
+    where a stamp written before the refusal would persist."""
+    from workitems import project_config
+    client = admin_client('refused-bulk-stamp-admin')
+    item = make_work_item(project='jira-bulk-stamp-project')
+    comments = [store.append_comment(item.id, 'tester', f'c{n}') for n in range(2)]
+    project_config.set_mode('jira-bulk-stamp-project', project_config.JIRA, jira_project_key='JBS')
+    cursor = settled_cursor()
+    xid_before = WorkItem.objects.get(id=item.id).change_xid
+
+    client.post('/django-admin/workitems/workitemcomment/', {
+        'action': 'delete_selected', 'post': 'yes', '_selected_action': [c['id'] for c in comments],
+    })
+
+    assert WorkItemComment.objects.filter(work_item_id=item.id).count() == 2
+    assert WorkItem.objects.get(id=item.id).change_xid == xid_before
+    assert changed_ids(cursor) == set()
