@@ -16,7 +16,7 @@ from index.models import IndexState, PendingArtifact
 from index.status import index_status
 from tests.index_support import (  # noqa: F401 - fixtures
     Background, archive_api, asst, chained, checkout, core, extraction, index_once, prompt, redis_client, search,
-    stream, text_block, units, upload_event, wait_until, work_item_event,
+    stream, text_block, upload_event, wait_until, work_item_event,
 )
 from tests.support import Session as Src, cost_state, enqueue
 
