@@ -87,13 +87,32 @@ def remove_work_item(work_item_id) -> None:
         IndexUnit.objects.filter(source_key__in=keys).delete()
         IndexSource.objects.filter(source_key__in=keys).delete()
         IndexFailure.objects.filter(source_key__in=keys).delete()
+        # A failed comment or delivery artifact has no unit or source row to
+        # name its work item; its failure does, so a retry cannot bring it back.
+        IndexFailure.objects.filter(source_class__in=_WORK_ITEM_CLASSES,
+                                    payload__workItemId=str(work_item_id)).delete()
         set_specification_link(work_item_id, None)
+
+
+def _work_item_of(source_class: str, payload: dict) -> Optional[str]:
+    """The work item a failed record of classes 2-4 belongs to, from the
+    record its failure keeps for the retry."""
+    record = payload.get('record') if isinstance(payload, dict) else None
+    if source_class not in _WORK_ITEM_CLASSES or not isinstance(record, dict):
+        return None
+    work_item_id = record.get('id') if source_class == CLASS_WORK_ITEM else record.get('work_item_id')
+    return str(work_item_id) if work_item_id else None
 
 
 def record_failure(source_key: str, source_class: str, reason: str, payload: dict) -> None:
     """REQ-09: the record is named, with why, and removed from the index
-    until a retry succeeds; it counts toward REQ-05's signal meanwhile."""
+    until a retry succeeds; it counts toward REQ-05's signal meanwhile. A
+    record of a work item's classes keeps that work item's id in its
+    payload, so deleting the work item removes the failure (REQ-07)."""
     now = timezone.now()
+    work_item_id = _work_item_of(source_class, payload)
+    if work_item_id is not None:
+        payload = {**payload, 'workItemId': work_item_id}
     with transaction.atomic():
         IndexUnit.objects.filter(source_key=source_key).delete()
         IndexSource.objects.filter(pk=source_key).delete()

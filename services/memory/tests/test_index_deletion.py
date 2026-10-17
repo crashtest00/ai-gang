@@ -81,3 +81,37 @@ def test_req07_a_later_catch_up_does_not_bring_a_deleted_record_back(indexed, co
     index_once()
     index_once()
     assert search('gharial tank leaked') == []
+
+
+def test_req07_a_failed_comment_does_not_come_back_after_its_work_item_is_deleted(core, redis_client, archive_api,
+                                                                                    checkout, monkeypatch):
+    """A comment that failed to index has no unit or source row naming its
+    work item, only its failure. Deleting the work item removes that
+    failure too, so no retry indexes the comment again from it."""
+    from django.core.management import call_command
+
+    from index import render
+    from index.models import IndexFailure
+    real = render.comment
+
+    def comment(record):
+        if 'dingo' in record['body']:
+            raise ValueError('cannot render this comment')
+        return real(record)
+
+    monkeypatch.setattr(render, 'comment', comment)
+    item = core.work_item('Fence the dingo yard')
+    bad = core.comment(item['id'], 'The dingo burrowed under the wire.')
+    index_once()
+    failure = IndexFailure.objects.get(source_key=f"comment:{bad['id']}")
+    assert failure.payload['workItemId'] == item['id']
+
+    core.delete('comments', bad['id'])
+    core.delete('work_items', item['id'])
+    redis_client.xadd(stream(), _deleted('work_item', item['id'], item['id']))
+    monkeypatch.setattr(render, 'comment', real)    # a retry would now succeed, if one were attempted
+    index_once()                                    # the deletion, then memory-indexer's own retry pass
+    call_command('index_retry')
+    assert not IndexFailure.objects.exists()
+    assert not units(source_key=f"comment:{bad['id']}")
+    assert search('dingo burrowed') == []
