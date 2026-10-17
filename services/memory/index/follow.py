@@ -38,6 +38,7 @@ SESSIONS = 'memory:sessions'
 NOTES = 'memory:notes'
 LIBRARY = 'library'
 PLATFORM = 'platform'
+EVENTS = 'events'  # an event-stream entry the indexer could not act on (REQ-09)
 FOLLOWED_READS = tuple(reads.CORE_ENUMERATIONS) + (SESSIONS, NOTES, LIBRARY, PLATFORM)
 
 
@@ -436,6 +437,12 @@ def retry_failures(source_key: Optional[str] = None) -> int:
         elif read == PLATFORM:
             follow_platform(force=True)
             ok = not IndexFailure.objects.filter(source_key=failure.source_key).exists()
+        elif read == EVENTS:
+            from . import events
+            ok = _guarded(failure.source_key, failure.source_class, payload,
+                          lambda: events.apply(payload['stream'], payload['fields']))
+            if ok:
+                IndexFailure.objects.filter(source_key=failure.source_key).delete()
         else:
             continue
         fixed += 1 if ok and not IndexFailure.objects.filter(source_key=failure.source_key).exists() else 0
