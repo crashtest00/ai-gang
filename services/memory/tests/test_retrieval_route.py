@@ -65,6 +65,14 @@ def test_ac05_each_of_the_seven_classes_fact_is_retrieved_from_its_own_class(cli
     assert top(client, 'What does the heron deploy need?')['reference'].get('path')
 
 
+def test_ac05_a_delivery_artifact_with_a_url_reference_is_found_by_words_inside_the_url(client, indexed, core):
+    core.delivery(indexed['item']['id'], 'commit', 'https://git.example.com/org/zebrafish-api/commit/4242')
+    index_once()
+    found = top(client, 'Which zebrafish api org change landed?')
+    assert found['class'] == 'delivery_artifact'
+    assert 'zebrafish' in found['text'].lower()
+
+
 # --- REQ-01: one interface for a person and a test harness -----------------------
 
 def test_req01_a_person_and_a_test_harness_get_results_of_the_same_shape_from_the_same_edge(client, indexed):
