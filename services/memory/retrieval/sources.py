@@ -51,8 +51,11 @@ _REQUIRED = {
 
 def resolvable(source_class: str, reference: dict) -> bool:
     if source_class == CLASS_SESSION:
+        # A note resolves through memory-api's read of its archived copy, so
+        # it needs that copy's path (``address``), not only the note's own.
         return bool(reference.get('sessionId') and reference.get('file')) or bool(
-            reference.get('project') and reference.get('path') and reference.get('digest'))
+            reference.get('project') and reference.get('path') and reference.get('archivePath')
+            and reference.get('digest'))
     required = _REQUIRED.get(source_class)
     return required is not None and all(reference.get(key) for key in required)
 
@@ -78,8 +81,7 @@ def address(source_class: str, reference: dict) -> dict:
             return {'owner': 'memory-api',
                     'read': f"/sessions/{reference['sessionId']}/file?path={urllib.parse.quote(reference['file'])}",
                     'location': location}
-        archived = reference.get('archivePath') or ''
-        return {'owner': 'memory-api', 'read': f"/notes/file?path={urllib.parse.quote(archived)}",
+        return {'owner': 'memory-api', 'read': f"/notes/file?path={urllib.parse.quote(reference['archivePath'])}",
                 'path': reference['path'], 'digest': reference['digest'], 'location': location}
     return {'owner': 'source-checkout', 'read': f"git show {reference['commit']}:{reference['path']}",
             'location': location}
