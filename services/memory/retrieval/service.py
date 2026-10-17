@@ -81,6 +81,8 @@ def _passage(rank_number: int, candidate: ranking.Candidate, status: Optional[di
         'source': sources.address(candidate.source_class, candidate.reference),
         'writtenAt': written.isoformat() if written else None,
         'ageSeconds': int((now - written).total_seconds()) if written else None,
+        # REQ-05: said outright, so a missing time is never read as "just written".
+        'writtenAtKnown': written is not None,
         'derived': True,
         'authoritative': False,
         'sourceStatus': status,
