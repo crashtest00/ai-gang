@@ -15,6 +15,7 @@ example `setup/graphs/engine/node_modules/`) is never platform corpus.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 ROOTS = ('docs', 'setup')
 SUFFIX = '.md'
@@ -40,6 +41,10 @@ def _git(root: str, *args: str) -> bytes:
 
 
 def head_commit(root: str) -> str:
+    # git looks upward for a repository; the corpus is this checkout's only.
+    top = _git(root, 'rev-parse', '--show-toplevel').decode().strip()
+    if Path(top).resolve() != Path(root).resolve():
+        raise PlatformUnavailable(f'{root} is not the top of a git checkout (git found {top})')
     return _git(root, 'rev-parse', '--verify', 'HEAD^{commit}').decode().strip()
 
 
