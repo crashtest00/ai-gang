@@ -121,15 +121,16 @@ class FakeCore:
     def _list(self, handler, query):
         if not self.listing_enabled:
             return handler._json(404, {'error': 'no route'})
-        limit = int(query.get('limit', ['50'])[0])
-        start = int(query.get('cursor', ['0'])[0] or 0)
+        # Core's shape (services/core/artifacts/views.py list_artifacts):
+        # keyset-paged in id order, the cursor being the last id served.
+        limit = int(query.get('limit', ['1000'])[0])
+        after = query.get('cursor', [''])[0]
         with self.lock:
-            ids = sorted(self.artifacts)
-            page = ids[start:start + limit]
+            ids = [i for i in sorted(self.artifacts) if not after or i > after]
+            page = ids[:limit]
             items = [{'id': i, 'updatedAt': self.artifacts[i]['updatedAt'].isoformat()} for i in page]
-        more = start + limit < len(ids)
-        return handler._json(200, {'artifacts': items, 'nextCursor': str(start + limit) if more else None,
-                                   'hasMore': more})
+        return handler._json(200, {'artifacts': items, 'nextCursor': page[-1] if page else (after or None),
+                                   'hasMore': len(ids) > limit})
 
     # --- What Core's admin and the volume do ------------------------------
 

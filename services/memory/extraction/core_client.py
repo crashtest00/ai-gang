@@ -7,10 +7,11 @@ Memory never connects to Core's database; it reads what any client reads:
     GET /artifacts?cursor=&limit=     the read-only listing of id and
                                       ``updatedAt`` (REQ-04, Decision 2)
 
-The listing is track 1's half of REQ-04 (``feat/v6.1-core-enumeration``).
-``list_artifacts`` is the one function that knows its shape, which follows
-Core's existing paged enumeration (``GET /a2a/tasks``: ``nextCursor``,
-``hasMore``) until that route is merged.
+The listing is Core's half of REQ-04 (``services/core/artifacts/views.py``
+``list_artifacts``): keyset-paged in id order, ``cursor`` the previous
+page's ``nextCursor`` (the last id it held), ``hasMore`` whether another
+page follows, and no access-log row. ``list_artifacts`` here is the one
+function that knows that shape.
 
 Every request names this reader in ``X-Actor``, so Core's access log shows
 whose reads they were.

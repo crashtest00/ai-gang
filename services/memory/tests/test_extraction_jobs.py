@@ -149,7 +149,7 @@ def test_i26_a_file_the_extractor_dies_on_at_every_attempt_is_recorded_as_a_fail
             extractor = start_extractor(spool_dir)
             # The extractor dies while this file is in its hands, as an OOM
             # kill of the whole container would.
-            assert wait_for(new_attempt_in_hand, 30)
+            assert wait_for(new_attempt_in_hand, 30), (worker_log(worker), sorted(p.name for p in spool_dir.rglob('*')))
             seen.update(new_attempt_in_hand())
             _kill_extractor(extractor, spool_dir)
         extractor = start_extractor(spool_dir)  # reports the third attempt lost

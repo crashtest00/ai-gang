@@ -67,7 +67,8 @@ class EventConsumer:
         self._ensure_group()
         start = '0' if self._backlog else '>'
         response = self.client.xreadgroup(self.group, self.consumer, {self.stream: start}, count=100,
-                                          block=None if self._backlog else block_ms)
+                                          # BLOCK 0 would wait forever: no block at all instead.
+                                          block=None if self._backlog or block_ms <= 0 else block_ms)
         entries = response[0][1] if response else []
         if self._backlog and not entries:
             self._backlog = False
