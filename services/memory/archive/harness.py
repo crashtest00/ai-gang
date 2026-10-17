@@ -21,7 +21,7 @@ if the harness changes, it is here that Memory goes wrong.
       sidecar: `subagents/agent-*.jsonl` and their `.meta.json` /
       `.prefix.json`, and `tool-results/` (binding, "Files").
   H3  Notes are files directly in `memory/` beside the transcripts whose
-      name is `MEMORY.md` or ends in `.md`; anything else there (the agent
+      name is `MEMORY.md` or ends in `.md` (a leading dot does not matter); anything else there (the agent
       tools' temporary files, e.g. `MEMORY.mdhfCMLl`,
       `x.md.tmp.448.1e0a4313e325`) is not a note (binding, "Notes").
   H4  Records are one JSON object per line in `.jsonl` files (binding,
@@ -94,7 +94,7 @@ def classify_path(parts):
 
 
 def is_note_name(name):
-    return name.endswith(NOTE_SUFFIX) and not name.startswith('.')
+    return name.endswith(NOTE_SUFFIX)
 
 
 def is_line_file(parts):
