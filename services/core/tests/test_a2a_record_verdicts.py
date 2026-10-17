@@ -23,12 +23,12 @@ import pytest
 from django.db import DatabaseError, connection, transaction
 
 from workitems import registry
-from workitems.stream_topology import command_stream_name
+from workitems.stream_topology import COMMAND_GROUP, command_stream_name
 from workitems.streams import dead_letter_stream_name
 
 from tests.a2a_support import (  # noqa: F401 - a2a_db and core are pytest fixtures, used by name
     BACKEND_STREAM, GATEWAY_STREAM, PROJECT, A2AVerdict, CoreConsumers, a2a_db, agent_message, core,
-    gateway_envelope, gateway_publish, last_entry, message_view, new_work_item, outbox_rows, publish_verdict,
+    gateway_envelope, gateway_publish, group_drained, last_entry, message_view, new_work_item, outbox_rows, publish_verdict,
     record, scrummaster, stored, submit_tool, submitted, verdict_rows, wait_archive_drained, wait_for,
     wait_reading, wait_stored, wait_verdict_rows, xadd,
 )
@@ -201,10 +201,7 @@ def test_req04_an_invalid_submission_with_no_message_id_gets_no_verdict(a2a_db, 
         xadd(redis_client, GATEWAY_STREAM, gateway_envelope(work_item_id, {'state': 'working', 'message': no_id},
                                                             context_id=work_item_id))
 
-        def scrummaster_acknowledged():
-            group = {g['name']: g for g in redis_client.xinfo_groups(GATEWAY_STREAM)}['scrummaster']
-            return group['pending'] == 0 and (group.get('lag') or 0) == 0
-        wait_for(scrummaster_acknowledged, expected='the gateway to drop the invalid submission')
+        wait_for(lambda: group_drained(redis_client, GATEWAY_STREAM, 'scrummaster'), expected='the gateway to drop the invalid submission')
 
     commands = [json.loads(f['data'])['payload'] for _id, f in redis_client.xrange(command_stream_name(PROJECT))]
     assert redis_client.xlen(command_stream_name(PROJECT)) == before
@@ -244,9 +241,11 @@ def test_req04_a_redelivered_command_is_stored_once_with_one_outbox_row_in_its_t
     envelope = publish_verdict(redis_client, {'taskId': task_id, 'messageId': message_id, 'verdict': 'applied'})
     # The same command envelope, XADDed again: one envelope messageId.
     redis_client.xadd(command_stream_name(PROJECT), {'data': json.dumps(envelope)})
-    wait_for(lambda: redis_client.xinfo_groups(command_stream_name(PROJECT))[0]['pending'] == 0
-             and (redis_client.xinfo_groups(command_stream_name(PROJECT))[0].get('lag') or 0) == 0,
-             expected='both deliveries acknowledged')
+    # The stored verdict is the outcome under test; the `core` group (by name,
+    # one XINFO snapshot) then confirms both deliveries are acknowledged.
+    wait_verdict_rows(message_id, 1)
+    wait_for(lambda: group_drained(redis_client, command_stream_name(PROJECT), COMMAND_GROUP),
+             expected='both deliveries acknowledged by the core group')
 
     [row] = verdict_rows(message_id)
     assert row.command_message_id == envelope['messageId']
