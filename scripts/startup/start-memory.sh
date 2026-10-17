@@ -34,7 +34,7 @@ compose_in services/memory up -d --build || die "Memory did not start"
 
 for _ in $(seq 1 60); do
   if memory_running && docker exec memory-api curl -fsS http://localhost:9200/health >/dev/null 2>&1; then
-    log "Memory is answering /health and its copier is running"
+    log "Memory is answering /health and its five long-running containers are running"
     status service memory healthy
     end_step start-memory
     exit 0
@@ -43,4 +43,4 @@ for _ in $(seq 1 60); do
 done
 
 status service memory unhealthy
-die "Memory did not come up within 120s (memory-api answering /health, memory-copier running)"
+die "Memory did not come up within 120s (memory-api answering /health, all five long-running containers running)"

@@ -529,9 +529,12 @@ core service, and keeps the extracted text in Memory's database),
 network at all) and `memory-indexer` (keeps the corpus index in Memory's
 database: it follows the core service's events and reads, the archive
 through `memory-api`, the extracted text, and the Markdown under `docs/` and
-`setup/` at this checkout's current commit, from the checkout's `.git`
-directory mounted read-only). Memory is healthy when `memory-copier` and `memory-api` are both
-running — the `memory` line of `scripts/startup/confirm-health.sh`.
+`setup/` at this checkout's HEAD, from the checkout's `.git` directory
+mounted read-only; it reads HEAD when `memory-indexer` starts and on a
+rebuild or platform retry, not on every new commit). Memory is healthy when
+all five long-running containers (`memory-copier`, `memory-api`,
+`memory-extraction`, `memory-extractor` and `memory-indexer`) are running —
+the `memory` line of `scripts/startup/confirm-health.sh`.
 
 **Size the host's inotify watch limit.** The copier watches every directory
 on the harness volume — one per project, plus one or more per session the

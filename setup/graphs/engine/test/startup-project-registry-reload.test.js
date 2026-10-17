@@ -29,6 +29,7 @@ const { spawnSync } = require('node:child_process');
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const STARTUP_DIR = path.join(REPO_ROOT, 'scripts', 'startup');
 const PROJECT = 'acceptance-project';
+const MEMORY_CONTAINERS = ['memory-copier', 'memory-api', 'memory-extraction', 'memory-extractor', 'memory-indexer'];
 const COMMAND_STREAM = `aigang:workitems:${PROJECT}`;
 
 const CONFIG = {
@@ -70,13 +71,13 @@ function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds =
     '  fi',
     '  exit 0',
     'fi',
-    // Memory's two containers (confirm-health.sh's `memory` check, through
+    // Memory's five containers (confirm-health.sh's `memory` check, through
     // lib.sh's memory_running) report running unless named as stopped;
     // any other inspect answers true, as before.
     'if [[ "$1" == "inspect" ]]; then',
     ...stoppedContainers.map((name) => `  if [[ "$*" == *" ${name}"* ]]; then printf "false\\n"; exit 0; fi`),
     '  case "$*" in',
-    '    *" memory-copier"*|*" memory-api"*) printf "true\\n"; exit 0 ;;',
+    '    *" memory-copier"*|*" memory-api"*|*" memory-extraction"*|*" memory-extractor"*|*" memory-indexer"*) printf "true\\n"; exit 0 ;;',
     '  esac',
     '  printf "true\\n"; exit 0',
     'fi',
@@ -288,7 +289,7 @@ test('health fails, naming the project, when the consumers are not serving it', 
 
 // ---- Memory's check (Durable Agent Session Record REQ-01) ----
 
-test('health checks Memory, and passes when its copier and API are both running', () => {
+test('health checks Memory, and passes when all five long-running containers are running', () => {
   const root = makeRoot();
   const env = environment(root);
   fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
@@ -297,13 +298,13 @@ test('health checks Memory, and passes when its copier and API are both running'
   const result = runStep('confirm-health.sh', env);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(record(env).services.memory, 'healthy');
-  for (const name of ['memory-copier', 'memory-api']) {
+  for (const name of MEMORY_CONTAINERS) {
     assert.ok(calls(env).some((c) => c.command.startsWith('inspect') && c.command.includes(name)),
       `the memory check must ask whether ${name} is running`);
   }
 });
 
-for (const stopped of ['memory-api', 'memory-copier']) {
+for (const stopped of MEMORY_CONTAINERS) {
   test(`health fails, naming memory, when ${stopped} is stopped`, () => {
     const root = makeRoot();
     const env = environment(root, { stoppedContainers: [stopped] });
