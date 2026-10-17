@@ -5,10 +5,11 @@ REQ-01 … REQ-07 and the Acceptance steps track 3 handed to this track
 
 import hashlib
 import json
+import re
 import subprocess
 import urllib.parse
 import urllib.request
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,6 @@ from django.core.management import call_command
 
 from archive.models import Note, Session, SessionFile
 from extraction.models import ExtractionRecord
-from index import render
 from index.models import IndexSource, IndexUnit
 from retrieval.models import QueryLog
 from tests.index_support import (  # noqa: F401 - fixtures
@@ -183,17 +183,90 @@ def test_req02_retrieval_changes_no_authoritative_record_and_its_log_is_not_retu
 
 # --- REQ-04 / AC-07: every passage resolves to its source -----------------------------
 
-def _source_text(ref, source_class, core, archive_api, checkout):
-    records = core.snapshot()
+CORE_CLASSES = ('work_item', 'work_item_comment', 'delivery_artifact', 'a2a_message')
+
+# The labels a Core record's passage may carry around its fields' values. They
+# are written out here, not taken from index.render: the check is that a passage
+# holds nothing its record does not, so it must not be derived from the code
+# that wrote the passage.
+LABELS = {'Work item', 'Type', 'Status', 'Priority', 'External key', 'Assignee', 'Description', 'Behavior',
+          'Acceptance criteria', 'Constraints', 'Edge cases', 'Out of scope', 'Value hypothesis',
+          'Test measurement', 'Release notes', 'Candidate commit', 'Build', 'Preview', 'Comment by', 'File',
+          'Function', 'Delivery artifact', 'Artifact', 'A2A'}
+_LABELLED = re.compile(r'^(?P<label>[^:()]+)(?: \((?P<qualifier>[^)]*)\))?:(?: (?P<rest>.*))?$')
+_HISTORY = re.compile(r'^(?P<at>\S*) (?P<actor>\S*): (?P<field>\S+) from (?P<old>.*) to (?P<new>.*)$')
+
+
+def _record(ref, source_class, records):
     if source_class == 'work_item':
-        return dict(render.work_item(records['work_items'][ref['workItemId']]))[ref['section']]
+        return records['work_items'][ref['workItemId']]
     if source_class == 'work_item_comment':
-        return render.comment(records['comments'][ref['commentId']])
+        return records['comments'][ref['commentId']]
     if source_class == 'delivery_artifact':
-        return render.delivery_artifact(records['delivery'][ref['deliveryArtifactId']])
-    if source_class == 'a2a_message':
-        message = next(m for m in records['a2a'][ref['taskId']]['messages'] if m['messageId'] == ref['messageId'])
-        return render.a2a_message(message)
+        return records['delivery'][ref['deliveryArtifactId']]
+    return next(m for m in records['a2a'][ref['taskId']]['messages'] if m['messageId'] == ref['messageId'])
+
+
+def _values(value) -> list:
+    """Every value the record holds, as text: each scalar, and each object or
+    list whole as JSON (a field whose value is structured is written whole)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (dict, list)):
+        out = [json.dumps(value, sort_keys=True, ensure_ascii=False)]
+        for item in (value.values() if isinstance(value, dict) else value):
+            out += _values(item)
+        return out
+    return [json.dumps(value)]
+
+
+def _unexplained_lines(text, record) -> list:
+    """The lines of ``text`` that are not a label around values of
+    ``record``'s own fields."""
+    values = _values(record)
+
+    def held(piece):
+        return piece == '' or any(piece in v for v in values)
+
+    def is_value(piece):
+        return piece in values
+
+    out = []
+    for line in text.split('\n'):
+        if held(line):
+            continue
+        history = _HISTORY.match(line)
+        if history and all(is_value(history[k]) for k in ('at', 'actor', 'field')) and all(
+                history[k] == '(none)' or is_value(history[k]) for k in ('old', 'new')):
+            continue
+        labelled = _LABELLED.match(line)
+        if labelled:
+            label, named = labelled['label'], None
+            for prefix in ('A2A ', 'Artifact '):
+                # An A2A message's label names its role ("message" when it has none);
+                # an artifact's, the artifact's name.
+                if label.startswith(prefix):
+                    label, named = prefix.strip(), label[len(prefix):]
+            if label in LABELS and held(labelled['rest'] or '') and (
+                    not named or named == 'message' or is_value(named)) and (
+                    labelled['qualifier'] is None or is_value(labelled['qualifier'])):
+                continue
+        out.append(line)
+    return out
+
+
+def test_ac07_the_record_check_catches_text_its_record_does_not_hold():
+    record = {'artifact_type': 'commit', 'reference': 'https://git.example.com/org/zebrafish-api/commit/4242'}
+    good = 'Delivery artifact (commit): https://git.example.com/org/zebrafish-api/commit/4242\n'
+    assert _unexplained_lines(good, record) == []
+    added = good + 'https git example com org zebrafish api commit 4242\n'
+    assert _unexplained_lines(added, record) == ['https git example com org zebrafish api commit 4242']
+    assert _unexplained_lines('Delivery artifact (build): x\n', record) == ['Delivery artifact (build): x']
+
+
+def _source_text(ref, source_class, core, archive_api, checkout):
     if source_class in ('specification', 'library_file'):
         return ExtractionRecord.objects.get(artifact_id=ref['artifactId']).text
     if source_class == 'session' and 'turn' in ref:
@@ -211,10 +284,21 @@ def _source_text(ref, source_class, core, archive_api, checkout):
 
 def test_ac07_every_passage_in_a_result_set_resolves_to_its_source_and_matches_it(client, indexed, core,
                                                                                    archive_api, checkout):
+    # A delivery artifact whose reference is a URL: its passage must hold the URL, not words added to it.
+    core.delivery(indexed['item']['id'], 'commit', 'https://git.example.com/org/zebrafish-api/commit/4242')
+    index_once()
+    questions = [q for q, _ in FACT_QUESTIONS] + ['Which zebrafish api org change landed?']
     resolved = set()
-    for question, _ in FACT_QUESTIONS:
+    for question in questions:
         for passage in passages(client, question, limit=5):
             ref = passage['reference']
+            if passage['class'] in CORE_CLASSES:
+                # Core's records: every line of the passage is the record's own field values.
+                record = _record(ref, passage['class'], core.snapshot())
+                assert _unexplained_lines(passage['text'], record) == [], (question, passage['class'])
+                assert passage['source']['owner'] == 'core' and passage['source']['location']
+                resolved.add(passage['class'])
+                continue
             source = _source_text(ref, passage['class'], core, archive_api, checkout)
             if passage['class'] == 'session' and 'turn' in ref:
                 assert source == passage['text']
@@ -242,14 +326,50 @@ def test_req04_a_passage_whose_reference_cannot_resolve_is_not_returned(client, 
     assert body['withheld'][0]['reason'] == 'its reference does not resolve to a source'
 
 
+def test_req04_a_note_passage_without_its_archived_copy_is_not_returned(client, indexed, monkeypatch):
+    from retrieval import ranking
+    real = ranking.rank
+    stripped = []
+
+    def without_archive_path(*args, **kwargs):
+        found = real(*args, **kwargs)
+        for candidate in found:
+            if candidate.source_class == 'session' and 'archivePath' in candidate.reference:
+                candidate.reference = {k: v for k, v in candidate.reference.items() if k != 'archivePath'}
+                stripped.append(candidate.unit_id)
+        return found
+
+    monkeypatch.setattr(ranking, 'rank', without_archive_path)
+    status, body = ask(client, 'What does the heron deploy need?')
+    assert stripped
+    assert {w['unitId'] for w in body['withheld']} >= set(stripped)
+    assert not {p['unitId'] for p in body['passages']} & set(stripped)
+    assert all(w['reason'] == 'its reference does not resolve to a source' for w in body['withheld'])
+
+
 # --- REQ-05: derived, aged, and carrying the source's current status --------------------
 
 def test_req05_every_passage_is_derived_dated_and_says_the_authoritative_record_governs(client, indexed):
     status, body = ask(client, 'What caused the flamingo outage?')
     assert 'source record governs' in body['notice']
-    first = body['passages'][0]
-    assert first['derived'] is True and first['authoritative'] is False
-    assert first['writtenAt'] and isinstance(first['ageSeconds'], int)
+    seen = set()
+    for question, _ in FACT_QUESTIONS:
+        for passage in passages(client, question, limit=5):
+            assert passage['derived'] is True and passage['authoritative'] is False
+            assert passage['writtenAt'], (question, passage['class'])
+            assert isinstance(passage['ageSeconds'], int) and passage['writtenAtKnown'] is True
+            seen.add(passage['class'])
+    assert seen >= {'specification', 'library_file', 'work_item', 'work_item_comment', 'delivery_artifact',
+                    'a2a_message', 'session', 'platform_document'}
+
+
+def test_req05_a_platform_passage_is_dated_by_the_last_commit_to_touch_its_document(client, indexed, checkout):
+    found = top(client, 'How is the aurora valve reset?')
+    assert found['class'] == 'platform_document'
+    committed = subprocess.run(['git', '-C', str(checkout), 'log', '-1', '--format=%cI', found['reference']['commit'],
+                                '--', found['reference']['path']], check=True, capture_output=True,
+                               text=True).stdout.strip()
+    assert datetime.fromisoformat(found['writtenAt']) == datetime.fromisoformat(committed)
 
 
 def test_req05_a_work_item_whose_status_changed_reports_its_current_status(client, indexed, core):

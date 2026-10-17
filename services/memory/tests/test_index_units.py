@@ -111,6 +111,34 @@ def test_req08_every_unit_carries_exactly_one_scope_set_by_where_it_came_from(se
     assert search('narwhal sensor', scope='platform') == []
 
 
+def test_req02_a_delivery_artifacts_url_words_are_searchable_but_not_in_its_text(seeded, core):
+    url = 'https://git.example.com/org/zebrafish-api/commit/4242'
+    core.delivery(seeded['item']['id'], 'commit', url)
+    index_once()
+    found = search('zebrafish api org')
+    assert [u.source_class for u in found] == ['delivery_artifact']
+    # The unit's text is the record's fields and labels only: no line of words added to it.
+    assert found[0].text == f'Delivery artifact (commit): {url}\n'
+    # The second, search-only reading is a delivery artifact's alone.
+    core.comment(seeded['item']['id'], f'See {url.replace("zebrafish", "manatee")}')
+    index_once()
+    assert search('manatee') == []
+
+
+def test_kr_req05_a_turn_whose_first_record_has_no_time_is_dated_by_its_first_record_that_has_one():
+    import json
+
+    from index import sessions
+    from tests.index_support import asst, chained, prompt, text_block
+    first = prompt('Investigate the gannet outage.')
+    del first['timestamp']
+    reply = asst('m1', text_block('The gannet outage came from a full disk.'))
+    reply['timestamp'] = '2026-10-12T12:05:00Z'
+    data = ''.join(json.dumps(r) + '\n' for r in chained(first, reply)).encode()
+    turn_units = sessions.turn_units(data, upto_line=None)
+    assert turn_units and {u.written_at for u in turn_units} == {'2026-10-12T12:05:00Z'}
+
+
 def _unit(**overrides):
     fields = {'source_class': 'work_item', 'scope': 'project', 'source_key': 'work_item:x',
               'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4}, 'text': 'text',
@@ -133,6 +161,9 @@ def _unit(**overrides):
     {'source_class': 'session', 'reference': {'sessionId': 's', 'file': 'f', 'turn': 't', 'lines': [1],
                                                'lineStart': 1, 'lineEnd': 1, 'offset': 0, 'end': 4,
                                                'parentSessionId': 's'}},  # subagent without its tool call
+    {'source_class': 'session', 'reference': {'project': 'p', 'path': 'memory/MEMORY.md', 'digest': 'sha256:d',
+                                               'lineStart': 1, 'lineEnd': 1, 'offset': 0, 'end': 4}},
+    # a note without the archived copy its passage resolves through
 ])
 def test_req02_req08_the_database_refuses_a_unit_without_a_resolvable_reference_or_a_valid_scope(overrides):
     with pytest.raises(IntegrityError):
