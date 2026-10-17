@@ -220,12 +220,15 @@ load_decisions() {
 # scripts/init-project.sh refuses to generate a project without it.
 AIGANG_HARNESS_VOLUME=aigang-harness
 
-# Memory is up when both of its long-running containers are running: the
-# copier, which keeps the archive, and the API, which serves it. Used by
+# Memory is up when all five of its long-running containers are running:
+# the copier, which keeps the archive; the API, which serves it and answers
+# retrieval; the extraction dispatcher; the extractor, which parses files for
+# it; and the indexer, which keeps the corpus index. (`migrate` is one-shot
+# and `memory-postgres` is the database; neither is checked here.) Used by
 # start-memory.sh and confirm-health.sh's `memory` check alike.
 memory_running() {
   local name
-  for name in memory-copier memory-api; do
+  for name in memory-copier memory-api memory-extraction memory-extractor memory-indexer; do
     [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] || return 1
   done
 }

@@ -1,9 +1,11 @@
-# AI Gang Memory — the archive half of V6's Memory (Durable Agent Session
-# Record, §4). Its own image, its own PostgreSQL and its own named archive
+# AI Gang Memory — V6's Memory: the session archive (Durable Agent Session
+# Record, §4), artifact text extraction, the corpus index and knowledge
+# retrieval. Its own images, its own PostgreSQL and its own named archive
 # volume, on the shared `ai-gang` network. It never connects to Core's
 # database, and nothing on the dispatch path waits for it (REQ-02).
 #
-#   - memory-postgres — Memory's database: the manifest
+#   - memory-postgres — Memory's database: the manifest, extraction records and jobs,
+#                       the corpus index and the retrieval query log
 #   - migrate         — one-shot `manage.py migrate`; the others wait on it
 #   - memory-copier   — copies every session from the shared harness volume
 #                       into the archive: file-change events plus the

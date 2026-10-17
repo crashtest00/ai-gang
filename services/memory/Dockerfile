@@ -1,5 +1,6 @@
-# AI Gang Memory — one image for memory-api, memory-copier and the one-shot
-# migrate (Durable Agent Session Record §4), selected by the command each
+# AI Gang Memory — one image (aigang-memory) for memory-api, memory-copier,
+# memory-extraction, memory-indexer and the one-shot migrate (Durable Agent
+# Session Record §4), selected by the command each
 # docker-compose.yml service passes. Packaged the way services/core/ is.
 #
 # git: memory-indexer reads the platform corpus from the Source checkout's

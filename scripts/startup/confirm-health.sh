@@ -50,9 +50,11 @@ scrummaster_ok() {
   docker exec scrummaster node -e \
     "fetch('http://localhost:9000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 }
-# Memory is healthy when both its copier and its API are running
-# (lib.sh's memory_running): a stopped copier leaves sessions uncopied, a
-# stopped API leaves the archive unreadable.
+# Memory is healthy when all five of its long-running containers are
+# running (lib.sh's memory_running): a stopped copier leaves sessions
+# uncopied, a stopped API leaves the archive unreadable, a stopped
+# memory-extraction or memory-extractor leaves artifact text unextracted,
+# and a stopped memory-indexer leaves the corpus index stale.
 memory_ok() { memory_running; }
 # The project container is healthy when its Redis subscriber is up: that
 # is the process that turns a dispatched story into an agent run, and a

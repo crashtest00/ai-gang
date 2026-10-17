@@ -25,6 +25,8 @@ build brief's I-26), provisional until measured live:
     time limit          120 seconds per file
                         (MEMORY_EXTRACTION_TIME_LIMIT_SECONDS)
     attempt limit       3 attempts on the same content that end without a
-                        result (MEMORY_EXTRACTION_ATTEMPT_LIMIT) The parsing half is ``services/memory/extractor/``, a separate
+                        result (MEMORY_EXTRACTION_ATTEMPT_LIMIT)
+
+The parsing half is ``services/memory/extractor/``, a separate
 process in its own image with no network (REQ-05).
 """
