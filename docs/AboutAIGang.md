@@ -10,12 +10,13 @@ AI Gang is a self-hosted platform for running Claude Code agents as a software d
 
 Each project gets its own cloud VM. On that VM, every code repository runs inside an isolated Docker container with Claude Code installed. Agents work inside these containers the same way a developer would: they read files, write code, run tests, commit, and open pull requests.
 
-Four shared services coordinate the work:
+Four shared services coordinate the work, and a fifth keeps the session record:
 
 - **Django/`core`** — the canonical record of all work, and the platform's only Jira client. Where a project is connected to Jira, `core` is what receives Jira's webhooks; nothing else in the platform talks to Jira.
 - **ScrumMaster** — reads canonical work-item events from `core` and routes work to the right agent container via durable Redis Streams, then publishes back to `core` the commands agents' output implies. It is not a Jira client and makes no Jira call; agents never talk to Jira either.
 - **Redis** — the message broker between `core`, ScrumMaster and agent containers.
 - **Jenkins** — the CI/CD pipeline. It runs tests when agents open pull requests, auto-merges to `dev` on green, and promotes `dev` to `beta` when a work item is accepted.
+- **Memory** — the durable agent session archive. It copies each agent session's record off the project containers and serves it back; it does not coordinate work.
 
 ---
 

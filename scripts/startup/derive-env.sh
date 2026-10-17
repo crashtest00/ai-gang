@@ -49,8 +49,9 @@
 #     searches for BLOCKED markers nor the agent definitions it validates
 #     paths against.
 #
-# Every derived file carries secrets copied from .env, and both are ignored
-# by git (the repository's .gitignore ignores .env at every level). They
+# Every derived file carries secrets copied from .env, and all three
+# (services/core/.env, services/memory/.env, services/scrummaster/.env) are
+# ignored by git (the repository's .gitignore ignores .env at every level). They
 # are written 0600.
 
 set -euo pipefail

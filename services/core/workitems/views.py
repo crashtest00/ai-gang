@@ -52,8 +52,9 @@ def health(request):
     health (the Jira ingestion path, now that this service
     owns it — see jira_webhook below) and the outbox relay's
     health, mirroring the depth services/scrummaster/src/server.js's own /health
-    already provides for its streams. Previously a bare {"status": "ok"}
-    stub."""
+    already provides for its streams. It also returns ``a2aRecord``, the row
+    count and size of the five A2A message-record tables. Previously a bare
+    {"status": "ok"} stub."""
     from .webhook_consumer import WEBHOOK_GROUP
 
     client = registry_redis_client()

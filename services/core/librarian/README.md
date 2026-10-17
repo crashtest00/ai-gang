@@ -31,8 +31,9 @@ Defined in `librarian/stream_topology.py`; nothing else names them.
 
 Three naming decisions, each load-bearing:
 
-- **Not `aigang:gateway:{project}`.** ScrumMaster is that stream's
-  consumer group and dead-letters kinds it does not know, so a delivery
+- **Not `aigang:gateway:{project}`.** That stream has two consumer groups,
+  ScrumMaster's `scrummaster` and Core's `core-a2a-archive`; ScrumMaster
+  dead-letters kinds it does not know, so a delivery
   request published there would be destroyed rather than delivered.
 - **Not under `aigang:workitems:`.** Delivery is not a work-item command,
   and that service's command consumer would reject it the same way. The
@@ -136,7 +137,10 @@ that sequence, and the librarian tests use nothing else to talk to it.
 acknowledged** — including when the answer is a failure (REQ-06: "no
 request completes without a response"). A failed delivery is reported to
 the requester rather than retried into a dead-letter the requester would
-never see; the requester decides whether to ask again. An entry that is
+never see; the requester decides whether to ask again. The one exception
+is a database that cannot take even the failure answer: the handler then
+raises and the request is retried and finally dead-lettered unanswered (see
+"The one unanswered case" below). An entry that is
 not a librarian request envelope at all carries no correlation id and no
 requester, so there is nobody to answer: it goes to
 `aigang:librarian:requests:dead` through the same machinery

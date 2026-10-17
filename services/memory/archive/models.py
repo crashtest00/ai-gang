@@ -90,7 +90,8 @@ class SessionFile(models.Model):
     # the copy is frozen as it was (REQ-03, spike decision 6).
     frozen = models.BooleanField(default=False)
     # How far REQ-05/REQ-07 have read this file's archive copy, and the
-    # state they carry between reads (see copier.LineState).
+    # state they carry between reads (see `Copier._parse` in copier.py, which advances `parsed_to` and
+    # stores its carried state in `parse_state`).
     parsed_to = models.BigIntegerField(default=0)
     parse_state = models.JSONField(default=dict)
 
