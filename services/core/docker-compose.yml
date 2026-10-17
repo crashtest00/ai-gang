@@ -13,7 +13,9 @@
 #                     (http://core:9100)
 #   - relay         — outbox relay, its own container so it can be
 #                     killed/restarted independently of api/consumers
-#   - consumers     — Streams command + webhook consumers
+#   - consumers     — Streams command + webhook consumers, plus the
+#                     A2A archive consumers (`core-a2a-archive`, one per
+#                     gateway/agent-channel stream)
 #   - librarian     — artifact-delivery subscriber, its own container
 #                     because it is the only one that mounts the project
 #                     repositories (strategy/v4.0/features/librarian.md §4)
