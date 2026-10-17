@@ -4,7 +4,7 @@ useless one low. Nothing here ranks."""
 
 import pytest
 
-from retrieval import evalset as ev
+from tests import retrieval_evalset as ev
 
 
 def test_covers_all_seven_classes_and_both_scopes():

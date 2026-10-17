@@ -1,12 +1,13 @@
 """Knowledge Retrieval REQ-09 and REQ-10: the ranker is measured against
-the fixed evaluation set (retrieval/evalset.py), through the real route, and
+the fixed evaluation set (tests/retrieval_evalset.py), through the real route, and
 the evaluation fails when the ranker is deliberately degraded. The
 `session` class is weighted so it cannot crowd out authored sources."""
 
 import pytest
 
 from index.models import IndexUnit
-from retrieval import evalset as ev, ranking, service
+from tests import retrieval_evalset as ev
+from retrieval import ranking, service
 from tests.index_support import redis_client  # noqa: F401 - fixture
 from tests.retrieval_support import ask, closed_core, passages  # noqa: F401 - fixture
 

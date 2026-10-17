@@ -36,7 +36,7 @@ from django.db import connection
 
 from index.models import CLASS_SESSION
 
-# Declared defaults, measured against retrieval/evalset.py (REQ-09, REQ-10).
+# Declared defaults, measured against tests/retrieval_evalset.py (REQ-09, REQ-10).
 # Per-query overrides exist for the session weight and cap; the rest are the
 # ranker's own.
 SESSION_WEIGHT = 0.6
