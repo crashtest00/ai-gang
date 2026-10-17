@@ -18,7 +18,7 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-memory-dev-key
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes')
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',') if h.strip()]
 
-INSTALLED_APPS = ['archive']
+INSTALLED_APPS = ['archive', 'extraction']
 MIDDLEWARE = ['django.middleware.common.CommonMiddleware']
 ROOT_URLCONF = 'memory.urls'
 WSGI_APPLICATION = 'memory.wsgi.application'
@@ -84,6 +84,33 @@ MEMORY_EVENT_SETTLE_SECONDS = _seconds('MEMORY_EVENT_SETTLE_SECONDS', 0.5)
 MEMORY_WATCHER_ENABLED = os.environ.get('MEMORY_WATCHER_ENABLED', 'true').lower() not in ('0', 'false', 'no')
 # Caps the watches memory-copier adds (unset: as many as the kernel allows).
 MEMORY_MAX_WATCHES = int(os.environ['MEMORY_MAX_WATCHES']) if os.environ.get('MEMORY_MAX_WATCHES') else None
+
+# --- Artifact text extraction (artifact-text-extraction.md) ------------------
+# memory-extraction reads artifacts from Core's HTTP read surface, never from
+# Core's database (REQ-01; Durable Agent Session Record REQ-02), and upload
+# events from Redis. Both defaults are the deployment's addresses on the
+# `ai-gang` network.
+MEMORY_CORE_URL = os.environ.get('MEMORY_CORE_URL', 'http://core:9100').rstrip('/')
+MEMORY_REDIS_URL = os.environ.get('MEMORY_REDIS_URL', 'redis://ai-gang-redis:6379')
+# The spool shared with the extractor process, its only interface (REQ-05).
+MEMORY_EXTRACTION_SPOOL = os.environ.get('MEMORY_EXTRACTION_SPOOL', '/var/lib/aigang/memory/extraction-spool')
+# REQ-06's declared time limit for one file's extraction (Open Question 2).
+# The extractor enforces it on each file's child process.
+MEMORY_EXTRACTION_TIME_LIMIT_SECONDS = _seconds('MEMORY_EXTRACTION_TIME_LIMIT_SECONDS', 120)
+# Brief I-26: how many attempts on the same content may end without a result
+# (the extractor or the worker stopped mid-file, REQ-07) before the file is
+# recorded as a failure (REQ-06) instead of being tried again.
+MEMORY_EXTRACTION_ATTEMPT_LIMIT = int(_seconds('MEMORY_EXTRACTION_ATTEMPT_LIMIT', 3))
+# How long beyond the time limit memory-extraction waits for the extractor:
+# for it to claim a file, and for its result once claimed.
+MEMORY_EXTRACTION_GRACE_SECONDS = _seconds('MEMORY_EXTRACTION_GRACE_SECONDS', 30)
+# REQ-04's reconciliation sweep interval: the detection bound for in-place
+# edits, lost events and files uploaded before extraction existed.
+MEMORY_EXTRACTION_SWEEP_SECONDS = _seconds('MEMORY_EXTRACTION_SWEEP_SECONDS', 30 * 60)
+# Names this worker's claims on jobs and its Redis consumer. Unset: the
+# container's hostname, which survives a restart of the same container, so a
+# restarted worker resumes its own unfinished job at once (REQ-07).
+MEMORY_EXTRACTION_WORKER_ID = os.environ.get('MEMORY_EXTRACTION_WORKER_ID', '')
 
 # --- Logging -------------------------------------------------------------
 # REQ-08: every read is logged, to stderr, which the container log collects.

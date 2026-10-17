@@ -1,0 +1,6 @@
+# The extractor's own image (Dockerfile here). Only the PDF parser is a
+# package; Word (.docx), HTML, CSV/TSV, Markdown and plain text use the
+# standard library. pypdf is pure Python and ships every table it needs
+# inside the wheel, so nothing is fetched at run time (brief I-08).
+# services/memory/requirements.txt pins the same version for the suite.
+pypdf>=6.0,<7.0
