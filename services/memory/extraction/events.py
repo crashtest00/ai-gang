@@ -37,11 +37,19 @@ class EventConsumer:
         self.client = redis.Redis.from_url(url, decode_responses=True)
         self.stream, self.group, self.consumer = stream, group, consumer
         self._backlog = True  # first drain this consumer's own unacknowledged entries
+        self._group_ready = False
+
+    def _ensure_group(self) -> None:
+        # Here rather than at construction, so a worker started while Redis
+        # is down still runs jobs and the sweep, and joins once Redis is up.
+        if self._group_ready:
+            return
         try:
-            self.client.xgroup_create(stream, group, id='0', mkstream=True)
+            self.client.xgroup_create(self.stream, self.group, id='0', mkstream=True)
         except redis.ResponseError as err:
             if 'BUSYGROUP' not in str(err):
                 raise
+        self._group_ready = True
 
     def _artifact_id(self, fields: dict):
         try:
@@ -56,6 +64,7 @@ class EventConsumer:
     def poll(self, block_ms: int = 1000) -> int:
         """Read once (blocking up to ``block_ms``), queue a job per upload
         event, and acknowledge. Returns how many entries were handled."""
+        self._ensure_group()
         start = '0' if self._backlog else '>'
         response = self.client.xreadgroup(self.group, self.consumer, {self.stream: start}, count=100,
                                           block=None if self._backlog else block_ms)

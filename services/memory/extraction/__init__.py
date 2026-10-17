@@ -13,6 +13,18 @@ The dispatching half, in Memory (the specification's Open Question 1):
     sweep.py        the reconciliation sweep (REQ-04)
 
 ``manage.py run_extraction`` (the ``memory-extraction`` container) runs all
-of it. The parsing half is ``services/memory/extractor/``, a separate
+of it.
+
+Declared values (REQ-04, REQ-06; the specification's Open Question 2 and the
+build brief's I-26), provisional until measured live:
+
+    extraction bound    5 minutes from an upload's commit to its text, for a
+                        file within the time limit and no backlog
+    sweep interval      30 minutes (MEMORY_EXTRACTION_SWEEP_SECONDS), the
+                        detection bound for in-place edits and lost events
+    time limit          120 seconds per file
+                        (MEMORY_EXTRACTION_TIME_LIMIT_SECONDS)
+    attempt limit       3 attempts on the same content that end without a
+                        result (MEMORY_EXTRACTION_ATTEMPT_LIMIT) The parsing half is ``services/memory/extractor/``, a separate
 process in its own image with no network (REQ-05).
 """

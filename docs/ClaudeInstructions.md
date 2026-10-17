@@ -516,11 +516,15 @@ The volume must exist before any project is initialised: `init-project.sh`
 (3.1) refuses without it. Memory's compose file and every project's name it
 `external`, so no `docker compose down -v` deletes it.
 
-Memory runs four containers: `memory-postgres` (its own database),
+Memory runs six containers: `memory-postgres` (its own database),
 `migrate` (one-shot), `memory-copier` (copies sessions, as root, because the
-harness writes transcripts readable only by its own user) and `memory-api`
+harness writes transcripts readable only by its own user), `memory-api`
 (reads sessions, notes and counts on port 9200 inside the `ai-gang`
-network). Memory is healthy when `memory-copier` and `memory-api` are both
+network), `memory-extraction` (extracts the text of artifact-library files:
+it reads each upload event and, every 30 minutes, the whole library from the
+core service, and keeps the extracted text in Memory's database) and
+`memory-extractor` (parses those files for it, from its own image, with no
+network at all). Memory is healthy when `memory-copier` and `memory-api` are both
 running — the `memory` line of `scripts/startup/confirm-health.sh`.
 
 **Size the host's inotify watch limit.** The copier watches every directory

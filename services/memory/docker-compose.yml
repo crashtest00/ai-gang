@@ -10,6 +10,14 @@
 #                       reconciling pass (REQ-03); session status (REQ-06)
 #   - memory-api      — the manifest, file, notes and counts reads and the
 #                       changed-since listing (REQ-08, REQ-09)
+#   - memory-extraction — artifact text extraction's dispatcher
+#                       (strategy/v6.0/v6.1/features/artifact-text-extraction.md):
+#                       consumes artifact.uploaded events, runs the
+#                       reconciliation sweep, keeps the extraction record and
+#                       job store in memory-postgres, and hands each file to
+#                       memory-extractor through the spool volume
+#   - memory-extractor — parses those files (REQ-05): its own image
+#                       (extractor/), no database, no Redis, no network
 #
 # scripts/startup/start-memory.sh creates the shared harness volume
 # (`docker volume create aigang-harness`) and then brings this stack up.
@@ -87,6 +95,40 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  memory-extraction:
+    build: .
+    image: aigang-memory
+    container_name: memory-extraction
+    env_file: .env
+    command: python manage.py run_extraction
+    environment:
+      - MEMORY_EXTRACTION_SPOOL=/var/lib/aigang/memory/extraction-spool
+    volumes:
+      - memory-extraction-spool:/var/lib/aigang/memory/extraction-spool
+    # Reads Core's artifact surface (http://core:9100) and Redis on ai-gang.
+    # It never parses a file: that is memory-extractor's, below (REQ-05).
+    networks:
+      - ai-gang
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  memory-extractor:
+    build: ./extractor
+    image: aigang-memory-extractor
+    container_name: memory-extractor
+    command: python -m extractor --spool /spool
+    # REQ-05: parses untrusted files, so it is reachable from no network and
+    # can reach none (brief I-17's reading of "client network": it has no
+    # interface on ai-gang or any other network, no listening socket and no
+    # published port). No env file: it holds no credential of any kind. Its
+    # one interface is the spool volume it shares with memory-extraction.
+    network_mode: none
+    volumes:
+      - memory-extraction-spool:/spool
+    restart: unless-stopped
+
 networks:
   ai-gang:
     external: true
@@ -96,6 +138,10 @@ volumes:
   # The archive: the only copy of a session once the harness has deleted it
   # from the source volume, so never treated as disposable (§4).
   memory-archive:
+  # Files in flight between memory-extraction and memory-extractor, and their
+  # results. Disposable: a lost spool costs a retry of the jobs in flight,
+  # which the job store in memory-postgres still holds (REQ-07).
+  memory-extraction-spool:
   # The shared harness volume. External, as in every project's compose file,
   # so no `docker compose down -v` here or in a project deletes it.
   aigang-harness:
