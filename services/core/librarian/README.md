@@ -127,8 +127,10 @@ look for before it publishes.
 2. `XADD aigang:librarian:requests * data '<the request envelope JSON>'`.
 3. `XREAD BLOCK <ms> STREAMS aigang:librarian:responses <the recorded id>`
    in a loop, advancing the id past every entry read, until one arrives
-   whose `correlationId` equals your `messageId`. That is your answer, and
-   there is exactly one of it.
+   whose `correlationId` equals your `messageId`. That is your answer; it
+   is the only one, and in the two cases named under "Every request that
+   can be decoded" below none arrives, so bound the wait and ask again
+   under a new `messageId` on a timeout.
 
 `tests/librarian_support.py`'s `publish_request` / `await_response` are
 that sequence, and the librarian tests use nothing else to talk to it.
@@ -140,7 +142,7 @@ the requester rather than retried into a dead-letter the requester would
 never see; the requester decides whether to ask again. There are two exceptions.
 One is a database that cannot take even the failure answer: the handler then
 raises and the request is retried and finally dead-lettered unanswered (see
-"The one unanswered case" below). The other is the relay's inherited
+"The unanswered cases" below). The other is the relay's inherited
 claim-before-publish window (V6 `durable-artifact-event-history.md` REQ-05),
 where a committed answer can be marked published with no stream entry; the
 requester then times out and asks again under a new `messageId`. An entry that is
@@ -173,10 +175,13 @@ and the acknowledgement (V6 `durable-artifact-event-history.md` REQ-04):
   is treated as already answered. If it refuses `deliver`'s insert after a
   copy, the record rolls back and the copied file stays, which the next
   request finds by content.
-- **The one unanswered case.** When the database cannot take even the
+- **The unanswered cases.** First, when the database cannot take even the
   failure answer, the handler raises, the request stays unacknowledged, and
   `workitems/streams.py` retries it and finally dead-letters it with no
   answer: an answer the database never recorded cannot be the durable one.
+  Second, the relay's claim-before-publish window (above): an answer the
+  database did record can be marked published with no stream entry, so the
+  requester sees none and asks again under a new `messageId`.
 - **Latency.** An answer reaches the stream on the relay's next pass. An
   idle relay sleeps `RELAY_POLL_INTERVAL_MS` (default 1000 ms) between empty
   passes, so it adds at most that, plus the time to publish any rows written
@@ -407,7 +412,8 @@ librarian starts (`durable-artifact-event-history.md` §4, "Deployment"):
 
 Requests published while no librarian runs are unread rather than pending,
 and the new librarian reads them normally. From the switch on, every request
-gets exactly one answer.
+gets one answer, outside the two exceptions named under "Every request that
+can be decoded" above.
 
 ## Tests
 

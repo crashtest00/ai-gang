@@ -274,8 +274,8 @@ holds ScrumMaster's verdict on each submission (Durable A2A Message Record
 REQ-04): a verdict at each exit of `handleA2ASubmission` (`applied`, or
 `refused` with a reason), an outcome after the projection, a `failed`
 outcome (or a `refused`/`dead_lettered` verdict when the message had none)
-from the gateway's dead-letter hook, and a `superseded` outcome from
-`dispatchTask` when a reopen supersedes an earlier dispatch. A failed
+from the gateway's dead-letter hook, and a `superseded` outcome, once for each message whose `failed`
+outcome a controlled reopen turns `superseded`. A failed
 publication of any verdict but `applied` is logged, not retried into a dead
 letter. A failed `applied` publication raises, so the entry stays pending and
 is redelivered, and is dead-lettered once its retries run out. The spec's table of
