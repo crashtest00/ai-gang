@@ -228,3 +228,20 @@ def test_an_unchanged_source_still_corrects_a_manifest_offset_to_the_archive_len
     assert rec.bytes_read == arch.stat().st_size
     assert rec.digest == digest_of(arch)
     assert arch.read_bytes() == s.transcript.read_bytes()
+
+
+def test_note_names_follow_the_binding_a_dot_name_is_a_note_and_the_named_temporaries_are_not(roots, copier):
+    harness, archive = roots
+    s = Src(harness)
+    s.append(completed_run())
+    notes = s.notes_dir()
+    for name in ('.x.md', 'test-command.md.tmp.448.1e0a4313e325', 'MEMORY.mdhfCMLl'):
+        (notes / name).write_bytes(b'content\n')
+        copier.sync_path(s.parts(notes / name))
+    copier.reconcile()
+
+    assert [n.path.rsplit('/', 1)[1] for n in Note.objects.all()] == ['.x.md']
+    note = Note.objects.get(path__endswith='.x.md')
+    assert (Path(archive) / note.archive_path).read_bytes() == b'content\n'
+    assert not (Path(archive) / PROJECT / CWD / 'memory' / 'MEMORY.mdhfCMLl').exists()
+    assert not (Path(archive) / PROJECT / CWD / 'memory' / 'test-command.md.tmp.448.1e0a4313e325').exists()
