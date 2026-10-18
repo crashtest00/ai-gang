@@ -14,6 +14,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from extraction.models import ExtractionRecord
+from index.embedding import MODEL
 from index.models import CLASSES, PROJECT_CLASSES, IndexUnit
 from index.status import index_status
 from tests.index_support import (  # noqa: F401 - fixtures
@@ -143,6 +144,8 @@ def _unit(**overrides):
               'reference': {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4,
                             'fields': [{'path': ['description'], 'span': [0, 4], 'valueOffset': 0}]},
               'text': 'text',
+              # A whole vector, so each refusal below is the reference's or the scope's.
+              'embedding': bytes(4 * MODEL.dim),
               'indexed_at': timezone.now()}
     fields.update(overrides)
     with transaction.atomic():
@@ -185,6 +188,14 @@ def test_the_valid_form_of_that_unit_is_accepted():
     assert set(PROJECT_CLASSES) | {'platform_document'} == set(CLASSES)
 
 
+def _historical(app_label, migration, model):
+    """A model as it stood at ``migration``, for writing rows a later
+    migration must deal with."""
+    from django.db import connection
+    from django.db.migrations.loader import MigrationLoader
+    return MigrationLoader(connection).project_state((app_label, migration)).apps.get_model(app_label, model)
+
+
 def test_req04_migration_0003_removes_core_units_indexed_before_they_named_their_fields():
     """A unit indexed before Core passages named their fields cannot satisfy
     the tightened CHECK, so migration 0003 removes it, with its source row,
@@ -194,19 +205,47 @@ def test_req04_migration_0003_removes_core_units_indexed_before_they_named_their
     from index.models import IndexCursor, IndexSource
     call_command('migrate', 'index', '0002', verbosity=0)
     try:
+        Unit = _historical('index', '0002_search_words_and_note_archive_path', 'IndexUnit')
         now = timezone.now()
         old = {'workItemId': 'x', 'section': 'fields', 'offset': 0, 'end': 4}
-        IndexUnit.objects.create(source_class='work_item', scope='project', source_key='work_item:x',
-                                 reference=old, text='text', indexed_at=now)
-        IndexUnit.objects.create(source_class='platform_document', scope='platform', source_key='platform:p',
-                                 reference={'commit': 'c', 'path': 'p', 'lineStart': 1, 'lineEnd': 1,
-                                            'offset': 0, 'end': 4}, text='text', indexed_at=now)
+        Unit.objects.create(source_class='work_item', scope='project', source_key='work_item:x',
+                            reference=old, text='text', indexed_at=now)
+        Unit.objects.create(source_class='platform_document', scope='platform', source_key='platform:p',
+                            reference={'commit': 'c', 'path': 'p', 'lineStart': 1, 'lineEnd': 1,
+                                       'offset': 0, 'end': 4}, text='text', indexed_at=now)
         IndexSource.objects.create(source_key='work_item:x', source_class='work_item', stamp={}, indexed_at=now)
         IndexCursor.objects.create(name='core:work_items', cursor='42', caught_up=True)
         IndexCursor.objects.create(name='platform', caught_up=True)
+        call_command('migrate', 'index', '0003', verbosity=0)
+        assert list(IndexUnit.objects.values_list('source_key', flat=True)) == ['platform:p']
+        assert not IndexSource.objects.filter(source_key='work_item:x').exists()
+        assert list(IndexCursor.objects.values_list('name', flat=True)) == ['platform']
+        assert 'core:work_items: not indexed yet' in index_status()['reasons']
     finally:
         call_command('migrate', 'index', verbosity=0)
-    assert list(IndexUnit.objects.values_list('source_key', flat=True)) == ['platform:p']
-    assert not IndexSource.objects.filter(source_key='work_item:x').exists()
-    assert list(IndexCursor.objects.values_list('name', flat=True)) == ['platform']
-    assert 'core:work_items: not indexed yet' in index_status()['reasons']
+
+
+def test_migration_0004_empties_the_index_so_every_unit_is_written_again_with_its_embedding():
+    """Track 5: a unit indexed before embeddings has none, and the CHECK
+    refuses one without, so migration 0004 empties the index as a rebuild
+    does (Corpus Indexing REQ-03), and every class reads "not indexed yet"
+    until the indexer has read it again."""
+    from django.core.management import call_command
+
+    from index.models import IndexCursor, IndexSource, IndexState
+    call_command('migrate', 'index', '0003', verbosity=0)
+    try:
+        Unit = _historical('index', '0003_core_passages_name_their_fields', 'IndexUnit')
+        now = timezone.now()
+        Unit.objects.create(source_class='platform_document', scope='platform', source_key='platform:p',
+                            reference={'commit': 'c', 'path': 'p', 'lineStart': 1, 'lineEnd': 1,
+                                       'offset': 0, 'end': 4}, text='text', indexed_at=now)
+        IndexSource.objects.create(source_key='platform:p', source_class='platform_document', stamp={},
+                                   indexed_at=now)
+        IndexCursor.objects.create(name='platform', caught_up=True)
+        IndexState.objects.create(pk=1, platform_commit='c')
+    finally:
+        call_command('migrate', 'index', verbosity=0)
+    assert not IndexUnit.objects.exists() and not IndexSource.objects.exists()
+    assert not IndexCursor.objects.exists() and not IndexState.objects.exists()
+    assert 'platform: not indexed yet' in index_status()['reasons']
