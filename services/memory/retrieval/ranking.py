@@ -22,12 +22,18 @@ keeps a unit only if its coverage reaches ``MIN_COVERAGE``, it holds
 (``index.embedding``; nothing leaves the deployment, REQ-08). The question
 is embedded by the same model, and a unit's similarity is the cosine of its
 best window, computed in process over the units in scope (``_similar``).
-Each unit's vector is read from the database once per process and kept
-(``_VectorCache``), since a unit's embedding never changes.
+A unit's vector is read from the database when first needed and kept
+(``_VectorCache``), since a unit's embedding never changes; once the cache
+holds more than twice the vectors a question needs (at least 1,000) it
+drops those the question does not (units gone from the index, or outside
+its scope), so a dropped vector is read again when next needed.
 
-**Fusion.** The two rankings, each cut to its best ``FUSION_DEPTH`` units
-(more if the caller asks for more), are fused by reciprocal rank fusion:
-a unit scores ``sum 1 / (RRF_K + rank)`` over the rankings it is in. The
+**Fusion.** Each ranking is cut, within each class (session, and every
+other class together), to its best ``depth = max(FUSION_DEPTH, limit)``
+units. The route asks for twice the response limit, so at the default
+limit of 10 that is 20 per class. The two rankings are fused by
+reciprocal rank fusion: a unit scores ``sum 1 / (RRF_K + rank)`` over the
+rankings it is in. The
 lexical ranking used here has its floor off, so it contributes recall; the
 floor decides abstention instead. A question is answered with nothing
 ("nothing relevant exists", REQ-09) only when full-text search with its
@@ -131,7 +137,6 @@ class Candidate:
     score: float
     coverage: float
     terms: int
-    similarity: Optional[float] = None
 
 
 def _quote(lexeme: str) -> str:
@@ -365,7 +370,6 @@ def rank(question: str, *, scope: Optional[str] = None, limit: int = 10,
         for unit_id, session in ranking:
             places[session] += 1
             fused[unit_id] = fused.get(unit_id, 0.0) + 1.0 / (RRF_K + places[session])
-    similarity = {unit_id: sim for unit_id, sim, _ in similar}
     by_id = {c.unit_id: c for c in lexical}
     missing = [unit_id for unit_id in fused if unit_id not in by_id]
     for unit_id, row in _units(missing, scope).items():
@@ -376,7 +380,6 @@ def rank(question: str, *, scope: Optional[str] = None, limit: int = 10,
         candidate = by_id.get(unit_id)
         if candidate is None:  # removed between the two reads
             continue
-        candidate.similarity = similarity.get(unit_id)
         candidate.score = score * _weight(candidate, params)
         candidates.append(candidate)
     embedding_place = {unit_id: place for place, (unit_id, _, _) in enumerate(similar)}
