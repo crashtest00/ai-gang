@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Validates the platform .env before any service container exists. Every
 # variable scripts/startup/env-contract.sh marks REQUIRED must be present
-# and filled in; one that is missing, empty, or still holding the value
-# .env.template ships stops the run here and is named.
+# and filled in, and so must every REQUIRED_IN_METHOD variable whose method
+# is the configured `authMethod`; one that is missing, empty, or still
+# holding the value .env.template ships stops the run here and is named.
+# A variable required only in another method is not read.
 #
 # Nothing is printed but diagnostics: a secret's value never reaches
 # stdout, the log, or the status record.
@@ -15,11 +17,22 @@ source "$STARTUP_DIR/lib.sh"
 
 [[ -f "$AIGANG_ENV_FILE" ]] || die "no environment file at $AIGANG_ENV_FILE — copy .env.template to .env and fill it in"
 
+# The configured authentication method, read through the same validator that
+# gated the run (the entrypoint ran validate-config.sh before this step).
+load_decisions
+
 missing=()
 placeholder=()
 
-while read -r kind name default; do
-  [[ "$kind" == "REQUIRED" ]] || continue
+while read -r kind first second; do
+  case "$kind" in
+    REQUIRED) name="$first" ;;
+    REQUIRED_IN_METHOD)
+      [[ "$first" == "$AUTH_METHOD" ]] || continue
+      name="$second"
+      ;;
+    *) continue ;;
+  esac
   value=""
   if ! value="$(env_file_get "$AIGANG_ENV_FILE" "$name")"; then
     missing+=("$name")

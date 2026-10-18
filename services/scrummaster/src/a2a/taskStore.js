@@ -53,12 +53,14 @@ class A2ACausalDependencyFailedError extends Error {
 const tasksById = new Map(); // taskId -> TaskRecord
 const messageOutcomesByTask = new Map(); // taskId -> Map(messageId -> pending/succeeded/failed)
 
-// A Task's own id is the Jira issue key itself (one Task per ticket for its
-// whole lifecycle), and its context groups it with the rest of the
-// coordinated body of work: a subtask shares its parent story's context, and
-// a top-level story starts its own — both deterministic from the issue, not
-// randomly generated, so identity survives a ScrumMaster restart even though
-// in-memory message history does not (see the module comment above).
+// A Task's own id is the work item's own canonical id, in both modes (one
+// Task per work item for its whole lifecycle; V5.1 REQ-06) — a Jira key MAY
+// ride along in `metadata.externalKey` for display only. Its context groups
+// it with the rest of the coordinated body of work: a subtask shares its
+// parent story's context, and a top-level story starts its own — both
+// deterministic from the issue, not randomly generated, so identity
+// survives a ScrumMaster restart even though in-memory message history does
+// not (see the module comment above).
 function contextFor(issue) {
   return issue.parent || issue.key;
 }
@@ -146,13 +148,11 @@ function register(task) {
   const existing = tasksById.get(task.id);
   if (existing) return existing;
 
-  const jiraIssueKey = task.metadata && task.metadata.jiraIssueKey;
   const initialMessage = task.status.message || null;
 
   const record = {
     id: task.id,
     contextId: task.contextId,
-    jiraIssueKey: jiraIssueKey || null,
     metadata: task.metadata || {},
     state: task.status.state,
     messages: [],

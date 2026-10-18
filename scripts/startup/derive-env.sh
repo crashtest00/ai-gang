@@ -2,9 +2,9 @@
 # Builds each service's own environment file from the platform .env, so
 # the operator edits one file and nothing else.
 #
-# Two files are produced:
+# Three files are produced:
 #
-#   services/work-item-service/.env — generated in full, every run. Its
+#   services/core/.env — generated in full, every run. Its
 #     PostgreSQL, Redis and Django settings all come from the platform
 #     .env or from scripts/startup/env-contract.sh's defaults. Docker
 #     Compose reads this same file twice: as the services' env_file, and
@@ -14,15 +14,32 @@
 #     It also carries every configured JIRA_*_FIELD_ID (workitems/
 #     jira_interpret.py and workitems/webhook_consumer.py both read these
 #     via os.environ — Story schema fields, the five-field Release schema
-#     BUGFIXES.md BF-01 added, and the Agent/Blocked fields). These are
-#     genuinely optional — a local-mode-only deployment never sets them —
-#     so each is copied from the platform .env only when set there; an
-#     unset one is left out of the generated file entirely rather than
-#     written empty, same as an unset one is absent from .env itself.
+#     BUGFIXES.md BF-01 added, and the Agent/Blocked fields) and
+#     WEBHOOK_SECRET (workitems/views.py's jira_webhook view, also read via
+#     os.environ). These are genuinely optional — a local-mode-only
+#     deployment never sets them — so each is copied from the platform
+#     .env only when set there; an unset one is left out of the generated
+#     file entirely rather than written empty, same as an unset one is
+#     absent from .env itself.
 #
-#   services/scrummaster/.env — updated in place, never rewritten, since
-#     scripts/create-jira-fields.sh and scripts/init-project.sh both write
-#     their own values there. Only the keys this flow owns are set.
+#   services/memory/.env — generated in full, every run, like the core
+#     service's. Memory's database credential and Django secret key are its
+#     own (Durable Agent Session Record REQ-02): the platform .env's
+#     MEMORY_PGPASSWORD and MEMORY_DJANGO_SECRET_KEY. Its role, database and
+#     host are fixed, Memory's own, and name nothing of the core service's.
+#     The same three values are also written as POSTGRES_USER/POSTGRES_PASSWORD/
+#     POSTGRES_DB, which memory-postgres reads through its env_file: its
+#     compose file interpolates nothing from the caller's environment, which
+#     at platform startup holds the core service's PGPASSWORD.
+#
+#   services/scrummaster/.env — updated in place, never rewritten, so a
+#     value already set directly in that file by hand, or by its own
+#     .env.example default, survives a re-run. Only the keys this flow
+#     owns are set. (From v5.2: scripts/create-jira-fields.sh and
+#     scripts/create-release-fields.sh write their field ids into the
+#     platform .env instead, which this script carries into
+#     services/core/.env above, not into this file —
+#     canonical-delivery-state.md REQ-10.)
 #
 #     AI_GANG_HOME is the one that matters most: ScrumMaster's compose file
 #     resolves /projects and /agent-docs from ${AI_GANG_HOME:-$HOME/ai-gang},
@@ -32,8 +49,9 @@
 #     searches for BLOCKED markers nor the agent definitions it validates
 #     paths against.
 #
-# Both derived files carry secrets copied from .env, and both are ignored
-# by git (the repository's .gitignore ignores .env at every level). They
+# Every derived file carries secrets copied from .env, and all three
+# (services/core/.env, services/memory/.env, services/scrummaster/.env) are
+# ignored by git (the repository's .gitignore ignores .env at every level). They
 # are written 0600.
 
 set -euo pipefail
@@ -42,15 +60,24 @@ STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$STARTUP_DIR/lib.sh"
 
-WIS_DIR="$AIGANG_ROOT/services/work-item-service"
+WIS_DIR="$AIGANG_ROOT/services/core"
 SM_DIR="$AIGANG_ROOT/services/scrummaster"
+MEMORY_DIR="$AIGANG_ROOT/services/memory"
 
 # Every JIRA_*_FIELD_ID workitems/jira_interpret.py and
 # workitems/webhook_consumer.py read via os.environ (grepped from both —
-# see this file's header comment). Reuses the SAME env var names
-# services/scrummaster/src/jira.js already reads, per jira_interpret.py's
-# own module docstring, so one .env can configure both services'
-# custom-field ids identically.
+# see this file's header comment). `core` is their only reader (V5.1
+# REQ-01, REQ-06); one platform .env configures them under its own names.
+# The three Jira credentials workitems/jira_client.py reads via os.environ
+# (V5.1 REQ-01, REQ-06). An array literal, on JIRA_FIELD_ID_VARS' pattern
+# below, so setup/graphs/engine's copied-through check can read the set out of
+# this file instead of being told it.
+JIRA_CREDENTIAL_VARS=(
+  JIRA_URL
+  JIRA_EMAIL
+  JIRA_TOKEN
+)
+
 JIRA_FIELD_ID_VARS=(
   JIRA_AGENT_FIELD_ID
   JIRA_BLOCKED_FIELD_ID
@@ -86,8 +113,8 @@ set_env_var() {
   fi
 }
 
-# --- work-item service ------------------------------------------------
-[[ -d "$WIS_DIR" ]] || die "work-item service directory missing at $WIS_DIR"
+# --- core service -----------------------------------------------------
+[[ -d "$WIS_DIR" ]] || die "core service directory missing at $WIS_DIR"
 
 WIS_ENV="$WIS_DIR/.env"
 WIS_TMP="$(mktemp)"
@@ -103,6 +130,14 @@ WIS_TMP="$(mktemp)"
   echo "REDIS_HOST=ai-gang-redis"
   echo "REDIS_PORT=6379"
   echo "PORT=9100"
+  if webhook_secret="$(env_file_get "$AIGANG_ENV_FILE" WEBHOOK_SECRET)" && [[ -n "$webhook_secret" ]]; then
+    printf '%s=%s\n' WEBHOOK_SECRET "$webhook_secret"
+  fi
+  for jira_credential_var in "${JIRA_CREDENTIAL_VARS[@]}"; do
+    if jira_credential_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_credential_var")" && [[ -n "$jira_credential_value" ]]; then
+      printf '%s=%s\n' "$jira_credential_var" "$jira_credential_value"
+    fi
+  done
   for jira_var in "${JIRA_FIELD_ID_VARS[@]}"; do
     if jira_value="$(env_file_get "$AIGANG_ENV_FILE" "$jira_var")" && [[ -n "$jira_value" ]]; then
       printf '%s=%s\n' "$jira_var" "$jira_value"
@@ -113,6 +148,29 @@ chmod 600 "$WIS_TMP"
 mv "$WIS_TMP" "$WIS_ENV"
 chmod 600 "$WIS_ENV"
 log "wrote $WIS_ENV"
+
+# --- Memory -----------------------------------------------------------
+[[ -d "$MEMORY_DIR" ]] || die "Memory directory missing at $MEMORY_DIR"
+
+MEMORY_ENV="$MEMORY_DIR/.env"
+MEMORY_TMP="$(mktemp)"
+{
+  echo "# Generated by scripts/startup/derive-env.sh from the platform .env."
+  echo "# Edit ../../.env and re-run platform startup; edits here are overwritten."
+  echo "PGHOST=memory-postgres"
+  echo "PGPORT=5432"
+  echo "PGUSER=memory"
+  echo "PGPASSWORD=$(env_value MEMORY_PGPASSWORD)"
+  echo "PGDATABASE=memory"
+  echo "POSTGRES_USER=memory"
+  echo "POSTGRES_PASSWORD=$(env_value MEMORY_PGPASSWORD)"
+  echo "POSTGRES_DB=memory"
+  echo "DJANGO_SECRET_KEY=$(env_value MEMORY_DJANGO_SECRET_KEY)"
+} > "$MEMORY_TMP"
+chmod 600 "$MEMORY_TMP"
+mv "$MEMORY_TMP" "$MEMORY_ENV"
+chmod 600 "$MEMORY_ENV"
+log "wrote $MEMORY_ENV"
 
 # --- ScrumMaster -------------------------------------------------------
 [[ -d "$SM_DIR" ]] || die "ScrumMaster directory missing at $SM_DIR"

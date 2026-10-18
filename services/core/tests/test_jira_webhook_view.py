@@ -1,0 +1,546 @@
+"""
+Amended 2026-09-09 — the Jira webhook
+ingestion endpoint moved here from services/scrummaster/src/server.js's deleted
+`POST /webhook/jira` route. Mirrors that route's own behavior exactly
+(secret check, envelope/dedupe-key shape) via Django's test Client against
+the real URL routing / view / streams.publish stack and the real test
+Redis container — the same rigor test_views_http_api.py already uses for
+the HTTP surface.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import signal
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+from django.test import Client
+from django.db import connection
+
+from workitems import project_config, registry
+from workitems.models import WorkItem
+from workitems.webhook_consumer import handle_webhook_envelope
+
+from tests.jira_fixture import jira_instance, permissive_jira  # noqa: F401 - pytest fixtures, used by name
+from tests.wait_support import wait_for
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MANAGE_PY = REPO_ROOT / 'manage.py'
+PROJECT = 'test-project'
+
+
+def jira_payload(issue_key, *, event='jira:issue_created', issuetype='Task', extra_fields=None, changelog=None, timestamp=1000):
+    fields = {'project': {'name': PROJECT, 'key': 'TP'}, 'summary': 'A ticket', 'issuetype': {'name': issuetype}}
+    if extra_fields:
+        fields.update(extra_fields)
+    body = {'webhookEvent': event, 'issue': {'key': issue_key, 'fields': fields}, 'timestamp': timestamp}
+    if changelog is not None:
+        body['changelog'] = changelog
+    return body
+
+
+def test_jira_webhook_requires_the_shared_secret(clean_db, monkeypatch, redis_client):
+    monkeypatch.setenv('WEBHOOK_SECRET', 's3cr3t')
+    client = Client()
+    resp = client.post('/webhooks/jira', data=json.dumps(jira_payload('TP-1')), content_type='application/json')
+    assert resp.status_code == 401
+
+    resp = client.post('/webhooks/jira?secret=s3cr3t', data=json.dumps(jira_payload('TP-1')), content_type='application/json')
+    assert resp.status_code == 200
+
+
+def test_jira_webhook_durably_enqueues_onto_the_shared_webhook_stream(clean_db, monkeypatch, redis_client):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    client = Client()
+    resp = client.post('/webhooks/jira', data=json.dumps(jira_payload('TP-2')), content_type='application/json')
+    assert resp.status_code == 200
+    assert resp.json() == {'received': True, 'deduped': False}
+
+    stream = registry.webhook_stream_name(PROJECT)
+    entries = redis_client.xrange(stream, '-', '+')
+    assert len(entries) == 1
+    envelope = json.loads(entries[0][1]['data'])
+    assert envelope['kind'] == 'webhook_event'
+    assert envelope['project'] == registry.normalize_project_name(PROJECT)
+    assert envelope['payload']['issue']['key'] == 'TP-2'
+
+
+def test_jira_webhook_dedupes_a_redelivered_event(clean_db, monkeypatch, redis_client):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    client = Client()
+    payload = jira_payload('TP-3', event='jira:issue_updated',
+                            changelog={'id': 'cl-1', 'items': [{'field': 'status', 'toString': 'Done'}]})
+    body = json.dumps(payload)
+
+    first = client.post('/webhooks/jira', data=body, content_type='application/json')
+    second = client.post('/webhooks/jira', data=body, content_type='application/json')
+    assert first.json()['deduped'] is False
+    assert second.json()['deduped'] is True
+
+    stream = registry.webhook_stream_name(PROJECT)
+    entries = redis_client.xrange(stream, '-', '+')
+    assert len(entries) == 1, 'a redelivered webhook (same event/issue/timestamp/changelog id) must not double-enqueue'
+
+
+def test_jira_webhook_rejects_a_payload_missing_issue(clean_db, monkeypatch):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    client = Client()
+    resp = client.post('/webhooks/jira', data=json.dumps({'webhookEvent': 'jira:issue_created'}), content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_jira_webhook_rejects_a_payload_missing_project(clean_db, monkeypatch):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    client = Client()
+    payload = {'webhookEvent': 'jira:issue_created', 'issue': {'key': 'TP-9', 'fields': {}}}
+    resp = client.post('/webhooks/jira', data=json.dumps(payload), content_type='application/json')
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# BF-01 (v2.1/BUGFIXES.md) — REQ-01's acceptance criterion end to end: a
+# Jira Release ticket's create webhook, then an update webhook with changed
+# fields, both posted to the real view and consumed through the real
+# webhook_consumer.handle_webhook_envelope (the exact function
+# create_webhook_consumer's Streams handler wraps with zero difference —
+# the durability/consumer-group mechanics around it are already covered by
+# the kill-mid-batch test below and REQ-09), then read back through the
+# real GET /work-items/<id>?full=true the same internal API local-mode
+# releases use.
+# ---------------------------------------------------------------------------
+
+RELEASE_FIELD_IDS = {
+    'JIRA_TARGET_PROJECT_FIELD_ID': 'customfield_target_project',
+    'JIRA_RELEASE_NOTES_FIELD_ID': 'customfield_release_notes',
+    'JIRA_CANDIDATE_SHA_FIELD_ID': 'customfield_candidate_sha',
+    'JIRA_BUILD_IDENTIFIER_FIELD_ID': 'customfield_build_id',
+    'JIRA_PREVIEW_URL_FIELD_ID': 'customfield_preview_url',
+}
+
+
+def _latest_envelope(redis_client, stream):
+    entries = redis_client.xrange(stream, '-', '+')
+    return json.loads(entries[-1][1]['data']), len(entries)
+
+
+def test_req01_a_jira_release_ticket_materializes_the_same_release_detail_columns_local_mode_uses(
+    clean_db, monkeypatch, redis_client, jira_instance,  # noqa: F811
+):
+    # From v5.3 a requested Release is pushed In Progress and its candidate's
+    # note is posted to Jira (release-mode-parity.md REQ-09, REQ-13), so the
+    # ticket has to exist in the fixture Jira.
+    jira_instance.add_issue('REL-1', issuetype='Release')
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    for env_name, field_id in RELEASE_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
+    client = Client()
+    stream = registry.webhook_stream_name(PROJECT)
+
+    created = jira_payload(
+        'REL-1', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes login bug.',
+        },
+    )
+    resp = client.post('/webhooks/jira', data=json.dumps(created), content_type='application/json')
+    assert resp.status_code == 200
+
+    envelope, count = _latest_envelope(redis_client, stream)
+    assert count == 1
+    handle_webhook_envelope(envelope)
+
+    item = WorkItem.objects.get(external_key='REL-1')
+    assert item.type == 'release'
+
+    read_after_create = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read_after_create.status_code == 200
+    detail_after_create = read_after_create.json()['releaseDetail']
+    assert detail_after_create['release_notes'] == 'Fixes login bug.'
+    assert detail_after_create['candidate_sha'] is None
+    assert detail_after_create['build_identifier'] is None
+    assert detail_after_create['preview_url'] is None
+
+    # The writer pushes Candidate SHA, Build Identifier and Preview URL onto
+    # the ticket in one edit (release-mode-parity.md REQ-13) — an ordinary
+    # issue_updated
+    # webhook naming the changed field.
+    updated = jira_payload(
+        'REL-1', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes login bug.',
+            'customfield_candidate_sha': 'abc1234',
+            'customfield_build_id': 'build-42',
+            'customfield_preview_url': 'https://preview.example.com/abc1234',
+        },
+        changelog={'id': 'cl-rel-1', 'items': [
+            {'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha', 'from': None, 'to': 'abc1234'},
+        ]},
+        timestamp=2000,
+    )
+    resp2 = client.post('/webhooks/jira', data=json.dumps(updated), content_type='application/json')
+    assert resp2.status_code == 200
+
+    envelope2, count2 = _latest_envelope(redis_client, stream)
+    assert count2 == 2
+    handle_webhook_envelope(envelope2)
+
+    read_after_update = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    detail_after_update = read_after_update.json()['releaseDetail']
+    assert detail_after_update['candidate_sha'] == 'abc1234'
+    assert detail_after_update['build_identifier'] == 'build-42'
+    assert detail_after_update['preview_url'] == 'https://preview.example.com/abc1234'
+    assert detail_after_update['release_notes'] == 'Fixes login bug.'
+
+
+def test_req01_an_update_webhook_for_a_release_ticket_with_no_prior_create_still_materializes_it(
+    clean_db, monkeypatch, redis_client,
+):
+    """BUGFIXES.md BF-01 Pass 1 audit row 2: a Release ticket created
+    before BF-01 shipped (or whose jira:issue_created webhook was never
+    delivered/consumed) has no canonical `release` work item yet — only
+    `jira:issue_updated` webhooks are arriving for it now. REQ-01's
+    "create OR update webhook" acceptance criterion means the update path
+    alone must still materialize the same `release` work item and
+    `work_item_release_detail` row, exercised here through the real
+    dispatch path: POST /webhooks/jira -> the durable stream ->
+    handle_webhook_envelope -> GET /work-items/<id>?full=true, exactly
+    like the create-then-update test above."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    for env_name, field_id in RELEASE_FIELD_IDS.items():
+        monkeypatch.setenv(env_name, field_id)
+    project_config.set_mode(PROJECT, 'jira')
+    project_config.set_mode('engineering-app', 'jira')
+    client = Client()
+    stream = registry.webhook_stream_name(PROJECT)
+
+    updated = jira_payload(
+        'REL-2', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes the checkout bug.',
+            'customfield_candidate_sha': 'def5678',
+        },
+        changelog={'id': 'cl-rel-2', 'items': [
+            {'field': 'Candidate SHA', 'fieldId': 'customfield_candidate_sha', 'from': None, 'to': 'def5678'},
+        ]},
+    )
+    resp = client.post('/webhooks/jira', data=json.dumps(updated), content_type='application/json')
+    assert resp.status_code == 200
+
+    envelope, count = _latest_envelope(redis_client, stream)
+    assert count == 1
+    handle_webhook_envelope(envelope)
+
+    item = WorkItem.objects.get(external_key='REL-2')
+    assert item.type == 'release'
+    assert item.project == 'engineering-app'
+
+    read = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read.status_code == 200
+    detail = read.json()['releaseDetail']
+    assert detail['release_notes'] == 'Fixes the checkout bug.'
+    assert detail['candidate_sha'] == 'def5678'
+
+    # A second update for the same never-created ticket must not create a
+    # duplicate work item or detail row.
+    updated_again = jira_payload(
+        'REL-2', event='jira:issue_updated', issuetype='Release',
+        extra_fields={
+            'customfield_target_project': {'key': 'ENG', 'name': 'engineering-app'},
+            'customfield_release_notes': 'Fixes the checkout bug.',
+            'customfield_candidate_sha': 'def5678',
+            'customfield_build_id': 'build-7',
+        },
+        changelog={'id': 'cl-rel-3', 'items': [
+            {'field': 'Build Identifier', 'fieldId': 'customfield_build_id', 'from': None, 'to': 'build-7'},
+        ]},
+        timestamp=2000,
+    )
+    resp2 = client.post('/webhooks/jira', data=json.dumps(updated_again), content_type='application/json')
+    assert resp2.status_code == 200
+    envelope2, count2 = _latest_envelope(redis_client, stream)
+    assert count2 == 2
+    handle_webhook_envelope(envelope2)
+
+    assert WorkItem.objects.filter(external_key='REL-2').count() == 1
+    read_again = client.get(f'/work-items/{item.id}', {'full': 'true'})
+    assert read_again.json()['releaseDetail']['build_identifier'] == 'build-7'
+
+
+# ---------------------------------------------------------------------------
+# Acceptance: "Kill Django/core immediately after a
+# webhook is durably enqueued but before it's processed; on restart, the
+# event is processed exactly once, without requiring Jira to re-fire it."
+# Mirrors tests/test_relay_integration.py's rigor: a REAL child process,
+# genuinely SIGKILLed mid-batch (proven via partial progress before the
+# kill), not a mocked/simulated crash.
+# ---------------------------------------------------------------------------
+
+def _consumer_env(**overrides):
+    env = dict(os.environ)
+    env.setdefault('PGHOST', os.environ.get('PGHOST', 'localhost'))
+    env.setdefault('PGPORT', os.environ.get('PGPORT', '15432'))
+    env.setdefault('PGUSER', os.environ.get('PGUSER', 'workitem'))
+    env.setdefault('PGPASSWORD', os.environ.get('PGPASSWORD', 'workitem'))
+    env['PGDATABASE'] = connection.settings_dict['NAME']
+    env.setdefault('REDIS_URL', os.environ.get('REDIS_TEST_URL', 'redis://localhost:16399'))
+    env.setdefault('AGENTS_CATALOG_PATH', os.environ['AGENTS_CATALOG_PATH'])
+    env.setdefault('PROJECTS_CONFIG_PATH', os.environ['PROJECTS_CONFIG_PATH'])
+    env.update(overrides)
+    return env
+
+
+# Linux PR_SET_PDEATHSIG. The `spawn_consumers` fixture below reaps a
+# consumer when the test body raises or fails an assertion, but no
+# Python-level teardown — fixture, `try/finally` or `atexit` — runs when the
+# suite process itself is SIGKILLed, or SIGTERMed by a `timeout` bound
+# expiring. That is exactly how one of these consumers once survived a
+# killed run for 3h37m, reparented to PID 1, and kept reading the shared
+# test Redis. Asking the kernel to kill the child when its parent dies is
+# the only reap that covers that path.
+_PR_SET_PDEATHSIG = 1
+try:
+    _libc = ctypes.CDLL('libc.so.6', use_errno=True)
+except OSError:  # pragma: no cover — non-glibc host; the fixture teardown still reaps.
+    _libc = None
+
+
+def _die_with_parent():
+    # Runs in the forked child, before exec. libc is loaded at import time,
+    # above, so the only thing happening after the fork is the prctl call.
+    if _libc is not None:
+        _libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+
+
+def _spawn_consumers(**extra_env):
+    env = _consumer_env(
+        # A dead consumer's pending (unacked) entries are only picked up by
+        # the reclaim loop once idle past retry_delay_ms — production
+        # defaults (60s / 10min) exist so a message merely taking a while
+        # isn't wrongly reclaimed, but this test needs the second instance
+        # to pick up the first's unacked entry in seconds, not minutes.
+        STREAM_RECLAIM_INTERVAL_MS='300', STREAM_RETRY_DELAY_MS='300', **extra_env,
+    )
+    return subprocess.Popen(
+        [sys.executable, str(MANAGE_PY), 'run_consumers', '--consumer-id', 'kill-mid-ingest'],
+        cwd=str(REPO_ROOT), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        preexec_fn=_die_with_parent,
+    )
+
+
+@pytest.fixture
+def spawn_consumers():
+    """Hands a test a spawner whose every child is reaped on the abnormal
+    path as well as the normal one. These consumers join a group on the
+    shared test Redis, so one that outlives its test steals the deliveries a
+    later test is waiting for; a leaked one here corrupted several hours of
+    suite runs. The teardown runs whether the test body returns, raises or
+    fails an assertion — a `wait_for` timeout before the SIGKILL line can no
+    longer leave a consumer live. For the one case no teardown can reach,
+    the suite process being killed outright, see `_die_with_parent` above."""
+    started = []
+
+    def _spawn(**extra_env):
+        proc = _spawn_consumers(**extra_env)
+        started.append(proc)
+        return proc
+
+    yield _spawn
+
+    for proc in started:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGKILL)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover — SIGKILLed and unreaped is not a state Linux offers.
+            pass
+
+
+def _created_count(project):
+    return WorkItem.objects.filter(project=project, type='story').count()
+
+
+def test_req09_killing_the_webhook_consumer_mid_batch_and_restarting_processes_each_event_exactly_once(
+    clean_db, redis_client, monkeypatch, spawn_consumers,
+):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    # Must be a project the fixture catalog (services/scrummaster/test/fixtures/
+    # projects.json) actually knows about — run_consumers only starts a
+    # consumer for each of registry.get_project_names(), so an unregistered
+    # project name would sit unconsumed forever regardless of this test.
+    project = PROJECT
+    # REQ-10: run_consumers runs the real webhook consumer against this
+    # project, which otherwise defaults to local mode and would have every
+    # delivery ignored — this test is about exactly-once consumer
+    # mechanics, not REQ-10, so it needs Jira mode to exercise story
+    # materialization at all.
+    project_config.set_mode(project, 'jira')
+    client = Client()
+
+    total = 6
+    for i in range(total):
+        payload = jira_payload(f'KMI-{i}', event='jira:issue_created', issuetype='Story',
+                                extra_fields={'project': {'name': project, 'key': 'KMI'}, 'summary': f'Story {i}'})
+        resp = client.post('/webhooks/jira', data=json.dumps(payload), content_type='application/json')
+        assert resp.status_code == 200
+
+    stream = registry.webhook_stream_name(project)
+    assert redis_client.xlen(stream) == total, 'every webhook must be durably enqueued before any consumer runs'
+
+    # First consumer instance: an artificial per-event delay makes this
+    # batch slow enough to reliably SIGKILL partway through.
+    # No local try/finally: the `spawn_consumers` fixture owns the reap. The
+    # one this replaced ran `first.wait(timeout=10)` on a child it had not
+    # signalled whenever `wait_for` timed out, so it raised TimeoutExpired
+    # over the real failure and left the consumer running.
+    first = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='700')
+    wait_for(lambda: _created_count(project) >= 1, timeout_s=20.0, interval_s=0.1,
+             expected=f'the first consumer to materialize at least 1 of the {total} {project} stories',
+             observed=lambda: f'{_created_count(project)}/{total} created')
+    mid_run_count = _created_count(project)
+    assert mid_run_count < total, f'expected a partial batch at kill time, got {mid_run_count}/{total} already processed'
+    first.send_signal(signal.SIGKILL)
+    first.wait(timeout=10)
+
+    # Restart with no artificial delay — drains the remainder quickly, with
+    # no Jira redelivery involved (the events are still sitting, durably,
+    # on the Streams entry this consumer never acked).
+    second = spawn_consumers(WEBHOOK_CONSUMER_ROW_DELAY_MS='0')
+    wait_for(lambda: _created_count(project) == total, timeout_s=20.0, interval_s=0.1,
+             expected=f'the restarted consumer to drain the remainder, all {total} {project} stories materialized',
+             observed=lambda: f'{_created_count(project)}/{total} created')
+    second.send_signal(signal.SIGKILL)
+    second.wait(timeout=10)
+
+    # Exactly once: no duplicate Story rows for the same Jira issue key.
+    external_keys = list(WorkItem.objects.filter(project=project).values_list('external_key', flat=True))
+    assert sorted(external_keys) == sorted(f'KMI-{i}' for i in range(total))
+    assert len(external_keys) == len(set(external_keys)), 'no issue key must have been processed twice'
+
+
+# ---------------------------------------------------------------------------
+# REQ-10: routing by jira_project_key, and REQ-11: an issuelink_created body
+# ---------------------------------------------------------------------------
+
+def test_req10_a_webhook_is_routed_by_jira_project_key_before_the_project_name(
+        clean_db, monkeypatch, redis_client):
+    """canonical-delivery-state.md REQ-10: "`views.py`'s `jira_webhook` MUST
+    route a webhook whose `issue.fields.project.key` equals a
+    `ProjectConfig.jira_project_key` to that row's project before falling
+    back to the project name, because a Jira project's name need not match
+    its AI Gang project's."
+
+    Up to v5.1 the name was the only route, so a Jira project named anything
+    else reached a project this service had never heard of, and every
+    webhook for it was recorded as an untracked event for ever."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+
+    payload = jira_payload('TP-77')
+    payload['issue']['fields']['project'] = {'key': 'TP', 'name': 'Totally Different Name'}
+    resp = Client().post('/webhooks/jira', data=json.dumps(payload), content_type='application/json')
+
+    assert resp.status_code == 200
+    entries = redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')
+    assert len(entries) == 1, 'routed by its key, onto the AI Gang project\'s own stream'
+    assert json.loads(entries[0][1]['data'])['project'] == registry.normalize_project_name(PROJECT)
+    assert redis_client.xrange(registry.webhook_stream_name('Totally Different Name'), '-', '+') == []
+
+
+def test_req10_a_webhook_whose_key_matches_no_row_still_falls_back_to_the_project_name(
+        clean_db, monkeypatch, redis_client):
+    """The fallback is unchanged for every project that has no row — which
+    is every local-mode project, since a row is written when its mode or
+    key is."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(jira_payload('TP-78')),
+                          content_type='application/json')
+
+    assert resp.status_code == 200
+    assert len(redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')) == 1
+
+
+def _issuelink_body(link_id='10500', source_id='10001', destination_id='10002'):
+    """Jira's own `issuelink_created` body: it "carries `issueLink` and no
+    `issue`" (REQ-11), which is exactly why this view refused it up to
+    v5.1."""
+    return {
+        'webhookEvent': 'issuelink_created',
+        'issueLink': {
+            'id': link_id,
+            'sourceIssueId': source_id,
+            'destinationIssueId': destination_id,
+            'issueLinkType': {'id': '10001', 'name': 'Blocks',
+                               'outwardName': 'blocks', 'inwardName': 'is blocked by'},
+        },
+    }
+
+
+def test_req11_an_issuelink_created_body_is_accepted_and_routed_by_its_source_issue(
+        clean_db, monkeypatch, redis_client, jira_instance):  # noqa: F811
+    """REQ-11: "`views.py`'s `jira_webhook` MUST accept an
+    `issuelink_created` body, which carries `issueLink` and no `issue` ...
+    it reads `issueLink.sourceIssueId` with `get_issue` (Jira's
+    `/issue/{idOrKey}` takes an id), routes on that issue's project as it
+    routes an issue event, and enqueues the event keyed
+    `webhook:issuelink_created:<issueLink.id>`"."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    jira_instance.add_issue('TP-1')
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                          content_type='application/json')
+
+    assert resp.status_code == 200
+    assert resp.json() == {'received': True, 'deduped': False}
+    entries = redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')
+    assert len(entries) == 1
+    envelope = json.loads(entries[0][1]['data'])
+    assert envelope['payload']['event'] == 'issuelink_created'
+    assert envelope['payload']['issue'] is None, 'the body carries none, and none is invented'
+    assert envelope['payload']['body']['issueLink']['id'] == '10500'
+    # Read with get_issue, by id — the source issue's own project is what
+    # routed it.
+    assert any(request['path'] == '/rest/api/3/issue/1' for request in jira_instance.handler.received)
+
+
+def test_req11_a_redelivered_issuelink_created_is_deduped_on_the_link_id(
+        clean_db, monkeypatch, redis_client, jira_instance):  # noqa: F811
+    """"enqueues the event keyed `webhook:issuelink_created:<issueLink.id>`"
+    — the link id is what Jira redelivers the same event with, and the body
+    carries no changelog id or issue key to key it on instead."""
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    project_config.set_mode(PROJECT, 'jira', jira_project_key='TP')
+    jira_instance.add_issue('TP-1')
+    client = Client()
+
+    first = client.post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                         content_type='application/json')
+    second = client.post('/webhooks/jira', data=json.dumps(_issuelink_body(source_id='1')),
+                          content_type='application/json')
+
+    assert first.json()['deduped'] is False
+    assert second.json()['deduped'] is True
+    assert len(redis_client.xrange(registry.webhook_stream_name(PROJECT), '-', '+')) == 1
+
+
+def test_req11_an_issuelink_created_body_with_no_source_issue_is_refused(clean_db, monkeypatch):
+    monkeypatch.delenv('WEBHOOK_SECRET', raising=False)
+    body = _issuelink_body()
+    del body['issueLink']['sourceIssueId']
+
+    resp = Client().post('/webhooks/jira', data=json.dumps(body), content_type='application/json')
+
+    assert resp.status_code == 400

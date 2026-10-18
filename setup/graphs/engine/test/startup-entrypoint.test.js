@@ -126,7 +126,8 @@ function invalidConfig() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-bad-config-'));
   const file = path.join(dir, 'ai-gang.config.json');
   fs.writeFileSync(file, JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'web', stack: 'not-a-stack' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));
@@ -203,7 +204,8 @@ test("a second run keeps the previous run's record and log rather than deleting 
 
   const secondConfig = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-bad-config-')), 'ai-gang.config.json');
   fs.writeFileSync(secondConfig, JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'not-a-target', stack: 'node-express' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));
@@ -266,6 +268,8 @@ const PLATFORM_ENV = [
   'AIGANG_ADMIN_PASSWORD=a-test-only-password',
   'PGPASSWORD=a-test-only-pg-password',
   'DJANGO_SECRET_KEY=a-test-only-django-key',
+  'MEMORY_PGPASSWORD=a-test-only-memory-pg-password',
+  'MEMORY_DJANGO_SECRET_KEY=a-test-only-memory-django-key',
 ].join('\n') + '\n';
 
 // A checkout the real entrypoint can validate, derive from and record
@@ -276,13 +280,15 @@ function runnableCheckout() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-agent-run-'));
   fs.symlinkSync(path.join(REPO_ROOT, 'scripts'), path.join(root, 'scripts'));
   fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'memory'), { recursive: true });
   fs.copyFileSync(SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
   fs.writeFileSync(path.join(root, '.env'), PLATFORM_ENV);
   fs.writeFileSync(path.join(root, 'ai-gang.config.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    authMethod: 'api-key',
     project: { name: 'a-project', type: 'web', stack: 'node-express' },
     repository: { url: 'https://github.com/an-org/a-repo.git' },
   }));
@@ -325,7 +331,7 @@ function runToAgent(root, binDir) {
 }
 
 // The line an operator would want and, until now, never got.
-const LAST_WORDS = 'waiting for the work-item service to answer, and it never did';
+const LAST_WORDS = 'waiting for the core service to answer, and it never did';
 
 // Stops while a step is still in progress, exit status 0 — the shape of
 // the real thing, which ends its turn without saying so. The earlier

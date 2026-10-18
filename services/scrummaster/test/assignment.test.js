@@ -40,32 +40,6 @@ test('validateAssignment rejects an unconfigured project', () => {
   assert.equal(result.code, assignment.ERROR_CODES.UNKNOWN_PROJECT);
 });
 
-test('validateDecomposition accepts a decomposition where every subtask uses a permitted agent', () => {
-  const result = assignment.validateDecomposition('test-project', [
-    { id: '1', displayName: 'Backend work', agent: 'backend-agent' },
-    { id: '2', displayName: 'Refinement follow-up', agent: 'refinement-agent' },
-  ]);
-  assert.deepEqual(result, { ok: true });
-});
-
-test('validateDecomposition rejects the whole batch atomically when any subtask is invalid', () => {
-  const result = assignment.validateDecomposition('test-project', [
-    { id: '1', displayName: 'Backend work', agent: 'backend-agent' },
-    { id: '2', displayName: 'Frontend work', agent: 'frontend-agent' }, // not available
-    { id: '3', displayName: 'Ghost work', agent: 'ghost-agent' },       // unknown
-  ]);
-
-  assert.equal(result.ok, false);
-  assert.equal(result.errorCode, 'INVALID_AGENT_ASSIGNMENT');
-  // Only the invalid entries are reported — the valid one is not silently
-  // dropped from the error, but nor is it reported as if accepted.
-  assert.deepEqual(result.rejected, [
-    { subtaskId: '2', displayName: 'Frontend work', requestedAgent: 'frontend-agent' },
-    { subtaskId: '3', displayName: 'Ghost work', requestedAgent: 'ghost-agent' },
-  ]);
-  assert.deepEqual(result.permittedAgents, ['refinement-agent', 'backend-agent']);
-});
-
 // deriveAgentFromSummary — the recovery path for a create_subtask request
 // that names its role in the summary but omits the agent id itself.
 

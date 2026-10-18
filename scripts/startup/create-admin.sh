@@ -2,7 +2,7 @@
 # Step 4 — create the Django admin account the operator writes stories
 # with, from the platform .env.
 #
-# The work-item service is where an operator meets AI Gang, and until this
+# The core service is where an operator meets AI Gang, and until this
 # account exists there is no way in. `manage.py ensure_admin` (added with
 # this flow) is the idempotent form: it creates the account the first time
 # and, on every run after that, leaves the existing account's password
@@ -43,7 +43,7 @@ chmod 600 "$env_file"
 } > "$env_file"
 
 docker exec --env-file "$env_file" \
-  work-item-service python manage.py ensure_admin \
+  core-api python manage.py ensure_admin \
   || die "could not create the Django admin account"
 
 rm -f "$env_file"

@@ -43,7 +43,7 @@ function writeTempConfig(content) {
 
 test('cli.main: prints KEY=value decisions and exits 0 for a valid config', () => {
   const configPath = writeTempConfig({
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
   });
 
@@ -55,7 +55,7 @@ test('cli.main: prints KEY=value decisions and exits 0 for a valid config', () =
 });
 
 test('cli.main: exits 1 and prints "config error:" diagnostics for an invalid config, with nothing on stdout', () => {
-  const configPath = writeTempConfig({ schemaVersion: 1, project: { name: 'acceptance-project', type: 'web' } });
+  const configPath = writeTempConfig({ schemaVersion: 2, project: { name: 'acceptance-project', type: 'web' } });
 
   const { code, stdout, stderr } = withCapturedOutput(() => main(['node', 'cli.js', configPath]));
 

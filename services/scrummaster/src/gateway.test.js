@@ -3,11 +3,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
+const { createClient: createRedisClient } = require('redis');
 
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '../config/agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json');
 
-const jira = require('./jira');
 const redis = require('./redis');
 const registry = require('./registry');
 const streams = require('./streams');
@@ -18,25 +21,32 @@ const taskStore = require('./a2a/taskStore');
 const { newMessageId, newArtifactId } = require('./a2a/ids');
 const { buildTextPart, buildDataPart, buildMessage, buildTask, buildArtifact } = require('./a2a/parts');
 const { buildTaskPrompt } = require('./prompt');
-const { _handleA2ASubmission: handleA2ASubmission, _handlePipelineRetry: handlePipelineRetry, _handleTaskStatus: handleTaskStatus } = require('./gateway');
+const { fromStreamFields } = require('./envelope');
+const {
+  _handleA2ASubmission: handleA2ASubmission,
+  _handlePipelineRetry: handlePipelineRetry,
+  _handleTaskStatus: handleTaskStatus,
+  _dispatchGatewayOperation: dispatchGatewayOperation,
+} = require('./gateway');
 
-const ISSUE_KEY = 'GANG-42';
+// The A2A Task id is the work item's canonical id, in every mode (REQ-06).
+const WORK_ITEM_ID = 'wi-gateway-42';
 const PROJECT_NAME = 'hello-world';
 
 function registerTask(overrides = {}) {
   const contextId = 'ctx-gateway-test';
   const messageId = newMessageId();
   const message = buildMessage({
-    messageId, taskId: ISSUE_KEY, contextId, role: 'client', parts: [buildTextPart('dispatch prompt')],
+    messageId, taskId: WORK_ITEM_ID, contextId, role: 'client', parts: [buildTextPart('dispatch prompt')],
   });
   const task = buildTask({
-    id: ISSUE_KEY,
+    id: WORK_ITEM_ID,
     contextId,
     status: { state: 'submitted', timestamp: new Date().toISOString(), message },
     metadata: {
-      jiraIssueKey: ISSUE_KEY,
+      // Display-only residue (RELEASE.md §5). No module resolves anything by it.
       jiraProjectKey: 'GANG',
-      jiraProjectName: PROJECT_NAME,
+      projectName: PROJECT_NAME,
       agentId: 'backend-agent',
       ...overrides,
     },
@@ -49,16 +59,16 @@ function envelope({ contextId, referenceMessageId, state, parts, artifacts }) {
   return {
     schemaVersion: '1',
     messageId: newMessageId(),
-    kind: 'jira_operation',
+    kind: 'gateway_operation',
     project: PROJECT_NAME,
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
     createdAt: new Date().toISOString(),
     payload: {
       state,
       message: buildMessage({
         messageId: newMessageId(),
-        taskId: ISSUE_KEY,
+        taskId: WORK_ITEM_ID,
         contextId,
         role: 'agent',
         parts,
@@ -71,236 +81,94 @@ function envelope({ contextId, referenceMessageId, state, parts, artifacts }) {
 
 test.beforeEach(() => taskStore._reset());
 
-// Every existing test in this file exercises Jira-mode behavior (the
-// existing, unmodified jira.* side effects) — no required behavior change
-// for a Jira-mode project. gateway.js
-// now reads the project's mode via canonicalWorkItems.getMode() before
-// deciding which side effect to perform, so that real HTTP call needs
-// stubbing out here the same way jira.js's calls already are.
-function mockJiraMode(t) {
-  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'jira' }));
+// From v5.1 every gateway side effect is a canonical command on core's
+// Streams command channel — there is no second destination and no mode branch
+// (REQ-04, REQ-05), so this one harness serves every test below. It collects
+// the commands published and stubs the one HTTP read the gateway still makes
+// (a work item's own persisted status, for reporting only).
+//
+// From v6.0 the gateway also publishes its verdict on each A2A submission as a
+// `recordA2AVerdict` command (Durable A2A Message Record REQ-04). Those are
+// collected in a list of their own, `calls.verdicts`, so that every assertion
+// on `calls` — the projection's commands — reads exactly as it did before.
+function mockCanonicalWrites(t) {
+  const calls = [];
+  const verdicts = [];
+  Object.defineProperty(calls, 'verdicts', { value: verdicts, enumerable: false });
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    if (payload.command === 'recordA2AVerdict') verdicts.push({ project, payload });
+    else calls.push({ project, payload });
+    return { deduped: false };
+  });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
+  return calls;
 }
 
-test('comment operation posts a formatted Jira comment', async (t) => {
-  mockJiraMode(t);
+test('a working message with no data part is still appended as a plain comment', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let posted = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
-
-  await handleA2ASubmission(
-    envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })] }),
-    PROJECT_NAME
-  );
-
-  assert.ok(posted, 'postComment must be called');
-  assert.equal(posted.key, ISSUE_KEY);
-  assert.match(posted.body, /progress note/);
-  assert.match(posted.body, new RegExp(ISSUE_KEY));
-});
-
-test('a working message with no data part is still posted as a plain comment', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  let posted = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('just a note')] }),
     PROJECT_NAME
   );
 
-  assert.ok(posted);
-  assert.match(posted.body, /just a note/);
-});
-
-test('input-required sets the Blocked field and posts a comment with the reference', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  let blocked = null;
-  let posted = null;
-  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'input-required',
-      parts: [
-        buildTextPart('Which endpoint should doAuth() call?'),
-        buildDataPart({ reference: { file: 'src/auth.py', function: 'doAuth()' } }),
-      ],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true });
-  assert.match(posted.body, /BLOCKED/);
-  assert.match(posted.body, /doAuth\(\)/);
-  assert.match(posted.body, /src\/auth\.py/);
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  assert.ok(comment);
+  assert.match(comment.payload.body, /just a note/);
 });
 
 test('auth-required is projected distinctly from input-required', async (t) => {
-  mockJiraMode(t);
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let posted = null;
-  t.mock.method(jira, 'setBlockedField', async () => {});
-  t.mock.method(jira, 'postComment', async (key, body) => { posted = { key, body }; });
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'auth-required', parts: [buildTextPart('need prod credentials')] }),
     PROJECT_NAME
   );
 
-  assert.match(posted.body, /AUTHORIZATION REQUIRED/);
+  const comment = calls.find(c => c.payload.command === 'appendComment');
+  assert.match(comment.payload.body, /AUTHORIZATION REQUIRED/);
 });
 
 test('an interrupted task can be resumed and later completed without changing its identity', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  t.mock.method(jira, 'setBlockedField', async () => {});
-  t.mock.method(jira, 'postComment', async () => {});
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'input-required', parts: [buildTextPart('need info')] }),
     PROJECT_NAME
   );
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'input-required');
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'input-required');
 
-  const replyId = taskStore.lastMessage(ISSUE_KEY).messageId;
+  const replyId = taskStore.lastMessage(WORK_ITEM_ID).messageId;
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: replyId, state: 'completed', parts: [buildTextPart('done after clarification')] }),
     PROJECT_NAME
   );
 
-  const record = taskStore.getTaskById(ISSUE_KEY);
-  assert.equal(record.id, ISSUE_KEY);
+  const record = taskStore.getTaskById(WORK_ITEM_ID);
+  assert.equal(record.id, WORK_ITEM_ID);
   assert.equal(record.contextId, contextId);
   assert.equal(record.state, 'completed');
 });
 
-test('completed with a pull-request artifact posts only a comment — no transition or reassignment', async (t) => {
-  mockJiraMode(t);
+test('completed with no artifact and a summary appends only the closing comment', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  const calls = [];
-  t.mock.method(jira, 'postComment', async (k, b) => calls.push(['postComment', k, b]));
-  t.mock.method(jira, 'transitionIssue', async (k, s) => calls.push(['transitionIssue', k, s]));
-  t.mock.method(jira, 'setAgentField', async (k, v) => calls.push(['setAgentField', k, v]));
-  t.mock.method(jira, 'getIssue', async (key) => ({ key, status: 'In Progress' }));
-
-  const artifact = buildArtifact({
-    artifactId: newArtifactId(),
-    taskId: ISSUE_KEY,
-    name: 'pull-request',
-    parts: [
-      { kind: 'file', file: { name: 'pull-request', mimeType: 'text/uri-list', uri: 'https://github.com/org/repo/pull/7' } },
-      buildTextPart('Implements the endpoint'),
-    ],
-  });
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'completed',
-      parts: [buildTextPart('Verified and opened PR')],
-      artifacts: [artifact],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(calls.length, 1, 'only postComment — Jenkins owns the In Review transition');
-  assert.equal(calls[0][0], 'postComment');
-  assert.match(calls[0][2], /github\.com\/org\/repo\/pull\/7/);
-});
-
-test('completed with no artifact and a summary posts only the closing comment', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  const calls = [];
-  t.mock.method(jira, 'postComment', async (k, b) => calls.push(['postComment', k, b]));
-  t.mock.method(jira, 'transitionIssue', async (k, s) => calls.push(['transitionIssue', k, s]));
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'completed', parts: [buildTextPart('Decomposed into 2 subtasks')] }),
     PROJECT_NAME
   );
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], 'postComment');
+  assert.deepEqual(calls.map(c => c.payload.command), ['appendComment'],
+    'completion appends a comment and moves nothing');
 });
 
-test('failed/canceled/rejected leave a visible, attributable blocked state', async (t) => {
-  mockJiraMode(t);
-  // Installed once, not once per iteration: mocking the same method twice
-  // in one test makes the second mock the "original" the first restores to,
-  // so a mock survives the test and the next one silently inherits it.
-  let blocked = null;
-  let posted = null;
-  t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
-  t.mock.method(jira, 'postComment', async (k, b) => { posted = b; });
-
-  for (const state of ['failed', 'canceled', 'rejected']) {
-    taskStore._reset();
-    blocked = null;
-    posted = null;
-    const { contextId, messageId } = registerTask();
-
-    await handleA2ASubmission(
-      envelope({ contextId, referenceMessageId: messageId, state, parts: [buildTextPart('agent process crashed')] }),
-      PROJECT_NAME
-    );
-
-    assert.deepEqual(blocked, { k: ISSUE_KEY, v: true }, `${state} must set Blocked`);
-    assert.match(posted, new RegExp(state.toUpperCase()));
-  }
-});
-
-test('reassign sets the Agent field to a catalog-valid, project-enabled agent', async (t) => {
-  mockJiraMode(t);
+test('reassign with no agentFieldValue reports the rejection on the work item instead of dropping silently', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let set = null;
-  t.mock.method(jira, 'setAgentField', async (k, v) => { set = { k, v }; });
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [buildTextPart('handing off'), buildDataPart({ operation: 'reassign', agentFieldValue: 'frontend-agent' })],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.deepEqual(set, { k: ISSUE_KEY, v: 'frontend-agent' });
-});
-
-test('reassign to an unknown agent reports a visible assignment failure instead of touching the Agent field', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  let setAgentFieldCalled = false;
-  let blocked = null;
-  let posted = null;
-  t.mock.method(jira, 'setAgentField', async () => { setAgentFieldCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
-  t.mock.method(jira, 'postComment', async (k, b) => { posted = b; });
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [buildTextPart('handing off'), buildDataPart({ operation: 'reassign', agentFieldValue: 'nonexistent-agent' })],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(setAgentFieldCalled, false);
-  assert.deepEqual(blocked, { k: ISSUE_KEY, v: true });
-  assert.match(posted, /catalog validation/);
-});
-
-test('reassign with no agentFieldValue comments the rejection on the ticket instead of dropping silently', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  let setAgentFieldCalled = false;
-  let blocked = null;
-  const posted = [];
-  t.mock.method(jira, 'setAgentField', async () => { setAgentFieldCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
-  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
 
   const outcome = await handleA2ASubmission(
     envelope({
@@ -311,94 +179,34 @@ test('reassign with no agentFieldValue comments the rejection on the ticket inst
   );
 
   assert.equal(outcome, null);
-  assert.equal(setAgentFieldCalled, false);
-  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true }, 'a dropped request must not leave the ticket reading as ready to work on');
-  assert.equal(posted.length, 1, 'the ticket must carry a visible record of the rejection');
-  assert.equal(posted[0].key, ISSUE_KEY);
-  assert.match(posted[0].body, /agentFieldValue/);
-  assert.match(posted[0].body, /backend-agent/, 'the permitted agent ids are named for recovery');
-  assert.doesNotMatch(posted[0].body, /resend the create_subtask operation/);
-  assert.equal(taskStore.failedMessageIds(ISSUE_KEY).length, 1, 'the Task must carry the failure so it cannot log completed');
-});
-
-test('create_subtask creates a Jira subtask and dispatches a new Task to it', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-
-  t.mock.method(jira, 'getIssue', async (key) => ({
-    key,
-    project: 'GANG',
-    projectName: 'hello-world',
-    parent: key === 'GANG-43' ? 'GANG-42' : null,
-    summary: 'Backend: implement endpoint',
-    behavior: null,
-    acceptanceCriteria: null,
-    constraints: null,
-    edgeCases: null,
-    outOfScope: null,
-    comments: [],
-  }));
-  let createdSubtask = null;
-  t.mock.method(jira, 'createSubtask', async (parentKey, projectKey, summary, description, agentFieldValue) => {
-    createdSubtask = { parentKey, projectKey, summary, description, agentFieldValue };
-    return 'GANG-43';
-  });
-  t.mock.method(jira, 'transitionIssue', async () => {});
-  t.mock.method(redis, 'getClient', () => ({}));
-  let published = null;
-  t.mock.method(streams, 'publish', async (_client, stream, streamEnvelope) => {
-    published = { stream, envelope: streamEnvelope };
-    return { deduped: false, entryId: '0-1', messageId: streamEnvelope.messageId };
-  });
-  t.mock.method(idempotency, 'getOutcome', async () => undefined);
-  t.mock.method(idempotency, 'recordOutcome', async () => {});
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask: Backend: implement endpoint'),
-        buildDataPart({ operation: 'create_subtask', summary: 'Backend: implement endpoint', description: 'full desc', agentFieldValue: 'backend-agent' }),
-      ],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.deepEqual(createdSubtask, {
-    parentKey: ISSUE_KEY, projectKey: 'GANG', summary: 'Backend: implement endpoint', description: 'full desc', agentFieldValue: 'backend-agent',
-  });
-  assert.ok(published, 'the new subtask Task must be dispatched');
-  assert.equal(published.envelope.taskId, 'GANG-43');
-  assert.notEqual(published.envelope.taskId, ISSUE_KEY, 'the subtask gets its own Task identity');
+  assert.equal(calls.some(c => c.payload.command === 'assign'), false);
+  const transition = calls.find(c => c.payload.command === 'transitionStatus');
+  assert.equal(transition.payload.status, 'needs-clarification',
+    'a dropped request must not leave the work item reading as ready to work on');
+  const comments = calls.filter(c => c.payload.command === 'appendComment');
+  assert.equal(comments.length, 1, 'the work item must carry a visible record of the rejection');
+  assert.equal(comments[0].payload.workItemId, WORK_ITEM_ID);
+  assert.match(comments[0].payload.body, /agentFieldValue/);
+  assert.match(comments[0].payload.body, /backend-agent/, 'the permitted agent ids are named for recovery');
+  assert.equal(taskStore.failedMessageIds(WORK_ITEM_ID).length, 1, 'the Task must carry the failure so it cannot log completed');
 });
 
 test('a pending create_subtask side effect blocks dependent completion until its successful retry', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   let releaseCreate;
   const createReleased = new Promise(resolve => { releaseCreate = resolve; });
   let startedCreate;
   const createStarted = new Promise(resolve => { startedCreate = resolve; });
 
-  t.mock.method(jira, 'getIssue', async key => ({
-    key,
-    project: 'GANG',
-    projectName: PROJECT_NAME,
-    parent: key === 'GANG-43' ? ISSUE_KEY : null,
-    summary: 'Backend: implement endpoint',
-    comments: [],
-  }));
-  t.mock.method(jira, 'createSubtask', async () => {
-    startedCreate();
-    await createReleased;
-    return 'GANG-43';
-  });
-  t.mock.method(jira, 'transitionIssue', async () => {});
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(streams, 'publish', async () => ({ deduped: false, entryId: '0-1' }));
-  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'getOutcome', async () => {
+    startedCreate();
+    await createReleased;
+    return undefined;
+  });
   t.mock.method(idempotency, 'recordOutcome', async () => {});
-  t.mock.method(jira, 'postComment', async () => {});
 
   const create = envelope({
     contextId, referenceMessageId: messageId, state: 'working',
@@ -418,13 +226,13 @@ test('a pending create_subtask side effect blocks dependent completion until its
     handleA2ASubmission(completion, PROJECT_NAME),
     taskStore.A2ACausalDependencyPendingError
   );
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'working');
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'working');
 
   releaseCreate();
   await creating;
   await handleA2ASubmission(completion, PROJECT_NAME);
 
-  const record = taskStore.getTaskById(ISSUE_KEY);
+  const record = taskStore.getTaskById(WORK_ITEM_ID);
   assert.equal(record.state, 'completed');
   assert.deepEqual(record.messages.map(message => message.messageId), [
     messageId,
@@ -434,24 +242,28 @@ test('a pending create_subtask side effect blocks dependent completion until its
 });
 
 test('a completed message retries its pending side effect without a terminal guard or duplicate history', async (t) => {
-  mockJiraMode(t);
   const { contextId, messageId } = registerTask();
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
   let postAttempts = 0;
-  t.mock.method(jira, 'postComment', async () => {
+  // Fails the first projection publish and counts the projection's alone; a
+  // `recordA2AVerdict` (REQ-04) is not part of the projection.
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, payload) => {
+    if (payload.command === 'recordA2AVerdict') return { deduped: false };
     postAttempts += 1;
-    if (postAttempts === 1) throw new Error('temporary Jira outage');
+    if (postAttempts === 1) throw new Error('temporary core outage');
+    return { deduped: false };
   });
 
   const completion = envelope({
     contextId, referenceMessageId: messageId, state: 'completed',
     parts: [buildTextPart('Finished')],
   });
-  await assert.rejects(handleA2ASubmission(completion, PROJECT_NAME), /temporary Jira outage/);
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'completed');
+  await assert.rejects(handleA2ASubmission(completion, PROJECT_NAME), /temporary core outage/);
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'completed');
 
   await handleA2ASubmission(completion, PROJECT_NAME);
 
-  const record = taskStore.getTaskById(ISSUE_KEY);
+  const record = taskStore.getTaskById(WORK_ITEM_ID);
   assert.equal(postAttempts, 2);
   assert.equal(record.state, 'completed');
   assert.equal(
@@ -483,76 +295,7 @@ test('a stream predecessor for a different task remains an invalid reference', a
     handleA2ASubmission(dependent, PROJECT_NAME),
     taskStore.A2AReferenceError
   );
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).messages.length, 1);
-});
-
-test('create_subtask with an invalid agent reports a visible assignment failure and creates nothing', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  let createSubtaskCalled = false;
-  let blocked = null;
-  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
-  t.mock.method(jira, 'postComment', async () => {});
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask'),
-        buildDataPart({ operation: 'create_subtask', summary: 'x', description: 'y', agentFieldValue: 'nonexistent-agent' }),
-      ],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(createSubtaskCalled, false);
-  assert.deepEqual(blocked, { k: ISSUE_KEY, v: true });
-});
-
-test('create_subtask without agentFieldValue derives the agent from the summary role prefix', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-
-  t.mock.method(jira, 'getIssue', async (key) => ({
-    key,
-    project: 'GANG',
-    projectName: PROJECT_NAME,
-    parent: key === 'GANG-43' ? ISSUE_KEY : null,
-    summary: 'Backend: /health endpoint',
-    comments: [],
-  }));
-  let createdSubtask = null;
-  t.mock.method(jira, 'createSubtask', async (parentKey, projectKey, summary, description, agentFieldValue) => {
-    createdSubtask = { parentKey, projectKey, summary, description, agentFieldValue };
-    return 'GANG-43';
-  });
-  t.mock.method(jira, 'transitionIssue', async () => {});
-  t.mock.method(jira, 'postComment', async () => { throw new Error('a derivable request must not be reported as rejected'); });
-  t.mock.method(redis, 'getClient', () => ({}));
-  let published = null;
-  t.mock.method(streams, 'publish', async (_client, stream, streamEnvelope) => {
-    published = { stream, envelope: streamEnvelope };
-    return { deduped: false, entryId: '0-1', messageId: streamEnvelope.messageId };
-  });
-  t.mock.method(idempotency, 'getOutcome', async () => undefined);
-  t.mock.method(idempotency, 'recordOutcome', async () => {});
-
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask: Backend: /health endpoint'),
-        buildDataPart({ operation: 'create_subtask', summary: 'Backend: /health endpoint', description: 'full desc' }),
-      ],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(createdSubtask.agentFieldValue, 'backend-agent', 'the omitted agent id is derived from the "Backend:" prefix');
-  assert.equal(createdSubtask.summary, 'Backend: /health endpoint');
-  assert.ok(published, 'the derived subtask is dispatched like any other');
-  assert.equal(published.envelope.taskId, 'GANG-43');
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).messages.length, 1);
 });
 
 // Derivation is a recovery, not a router: it may only recover an id the
@@ -560,71 +303,236 @@ test('create_subtask without agentFieldValue derives the agent from the summary 
 // to the same role prefix mean the request implies neither of them, and the
 // requesting agent is never a candidate for its own request.
 
-// The prompt is the only place an agent learns what to call the field that
-// carries a subtask's owner, and the gateway is the only thing that reads
-// it. Naming it one thing in the allowed-agent list and another in the
-// submission shape is how the field comes back omitted. This takes the name
-// straight out of the rendered prompt and sends a request under it.
+// What an agent is taught about naming a subtask's owner, end to end.
+//
+// Before V5.0 the dispatch prompt was where an agent learned what to call
+// that field, and this test took the name out of the rendered prompt. The
+// prompt no longer names any submission field: the a2a-submit skill is the
+// one agent-facing description of submitting, and the constructor is what
+// turns the argument it teaches into the field the gateway reads
+// (deterministic-gateway-message-tooling.md REQ-04). The property is
+// unchanged — the name an agent is taught must be the name the gateway reads
+// (gateway.js's `agentFieldValue` at :896 and :920) — so the chain under test
+// is the whole one: the skill's own text supplies the argument, the real
+// constructor runs as a child process and publishes to the real test Redis,
+// and the entry that lands on the gateway stream is what this file's own
+// gateway entry point then consumes. Nothing is retyped in between, which is
+// what makes a rename anywhere in that chain fail here.
 
-test('the field the prompt tells an agent to send an agent id in is the field the gateway reads', async (t) => {
-  mockJiraMode(t);
+const SKILL_PATH = path.join(__dirname, '../../../setup/commons/skills/a2a-submit/SKILL.md');
+const CONSTRUCTOR_PATH = path.join(__dirname, '../../../setup/commons/tools/a2a-submit.js');
+const TEST_REDIS = {
+  host: process.env.REDIS_TEST_HOST || 'localhost',
+  port: process.env.REDIS_TEST_PORT || '16399',
+};
+
+// The skill's create-subtask arguments, read out of the skill rather than
+// restated here: one list entry per argument, each marked required or
+// optional and saying what it sets.
+function skillCreateSubtaskArguments() {
+  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
+  const heading = skill.indexOf('## create-subtask');
+  assert.ok(heading !== -1, 'the skill must document the create-subtask operation');
+  const next = skill.indexOf('\n## ', heading + 1);
+  const section = skill.slice(heading, next === -1 ? undefined : next);
+
+  // One entry per list item, continuation lines folded in, so the skill stays
+  // free to wrap its prose wherever it reads best.
+  const entries = [];
+  for (const line of section.split('\n')) {
+    const match = line.match(/^- `(--[a-z-]+)`(.*)$/);
+    if (match) entries.push({ flag: match[1], text: match[2] });
+    else if (entries.length && /^\s+\S/.test(line)) entries[entries.length - 1].text += ` ${line.trim()}`;
+  }
+  assert.ok(entries.length > 0, 'the skill must list create-subtask\'s arguments');
+  return entries;
+}
+
+function requiredFlags(entries) {
+  return entries.filter(e => e.text.includes('(required)')).map(e => e.flag);
+}
+
+// The one optional argument the skill says sets a given field of the subtask.
+function optionalFlagsFor(entries, field) {
+  const entry = entries.find(e => e.text.includes('(optional') && e.text.includes(field));
+  assert.ok(entry, `the skill must document an optional argument that sets ${field}`);
+  const flags = [entry.flag, ...[...entry.text.matchAll(/`(--[a-z-]+)`/g)].map(m => m[1])];
+  return [...new Set(flags)];
+}
+
+// One dispatch's worth of session state: the constructor reads its context
+// from the environment the subscriber exports and keeps its chain in a
+// `state/` directory beside the commons snapshot.
+function dispatchEnv({ contextId, messageId }) {
+  const dispatchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v5-skill-chain-'));
+  fs.mkdirSync(path.join(dispatchDir, 'state'));
+  return {
+    dispatchDir,
+    env: {
+      ...process.env,
+      PROJECT_NAME: PROJECT_NAME,
+      REDIS_HOST: TEST_REDIS.host,
+      REDIS_PORT: TEST_REDIS.port,
+      A2A_TASK_ID: WORK_ITEM_ID,
+      A2A_CONTEXT_ID: contextId,
+      A2A_LAST_MESSAGE_ID: messageId,
+      AIGANG_COMMONS_DIR: path.join(dispatchDir, 'commons'),
+      // The harness session id the constructor writes into every message
+      // (Durable A2A Message Record REQ-12), set explicitly: the runner's own
+      // environment may not export one.
+      CLAUDE_CODE_SESSION_ID: 'gateway-test-session',
+      // The constructor is mounted read-only beside `services/`, outside this
+      // package, so its own `redis` comes from here.
+      NODE_PATH: path.join(__dirname, '../node_modules'),
+    },
+  };
+}
+
+// Runs the real constructor and returns the envelope it published, read back
+// off the gateway stream exactly as ScrumMaster's own consumer reads it.
+async function submitThroughConstructor(args, { contextId, messageId }) {
+  const stream = `aigang:gateway:${PROJECT_NAME}`;
+  const { dispatchDir, env } = dispatchEnv({ contextId, messageId });
+  const client = createRedisClient({ url: `redis://${TEST_REDIS.host}:${TEST_REDIS.port}` });
+  await client.connect();
+  try {
+    await client.del(stream);
+    const run = await new Promise(resolve => {
+      execFile(process.execPath, [CONSTRUCTOR_PATH, ...args], { env }, (error, stdout, stderr) =>
+        resolve({ code: error ? error.code : 0, stdout, stderr }));
+    });
+    assert.equal(run.code, 0, `the constructor must publish: ${run.stderr}`);
+    const entries = await client.xRange(stream, '-', '+');
+    assert.equal(entries.length, 1, 'exactly one message must reach the gateway stream');
+    await client.del(stream);
+    return fromStreamFields(entries[0].message);
+  } finally {
+    await client.quit().catch(() => {});
+    fs.rmSync(dispatchDir, { recursive: true, force: true });
+  }
+}
+
+test('the argument the skill teaches for a subtask\'s owner is the field the gateway reads', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
-  const issue = {
-    key: ISSUE_KEY, summary: 'Parent story', projectName: PROJECT_NAME, parent: null, comments: [],
-  };
-  const prompt = buildTaskPrompt(issue, registry.getAgent('refinement-agent'), {
-    allowedAgents: registry.getEffectiveAgents(PROJECT_NAME),
-    task: { id: ISSUE_KEY, contextId },
-    message: { messageId },
-  });
+  const entries = skillCreateSubtaskArguments();
+  const required = requiredFlags(entries);
+  assert.deepEqual([...required].sort(), ['--agent', '--description', '--summary'],
+    'the skill must document exactly three required arguments for a subtask request');
+  // Derived, not named: the required argument that is neither the summary nor
+  // the description is the one that carries the owner.
+  const ownerFlag = required.find(flag => flag !== '--summary' && flag !== '--description');
 
-  const allowedSection = prompt.slice(prompt.indexOf('## ALLOWED AGENTS'), prompt.indexOf('## A2A TASK CONTEXT'));
-  assert.match(allowedSection, /agentFieldValue/, 'the allowed-agent list must name the field the submission uses');
-  assert.doesNotMatch(allowedSection, /"agent"/, 'and must not name it a second way');
+  // The prompt must not teach a second name for it. The allowed-agent list is
+  // the only place a prompt still speaks about choosing an agent, and after
+  // REQ-04 it names ids, never a field of a submission.
+  const prompt = buildTaskPrompt(
+    { key: WORK_ITEM_ID, summary: 'Parent story', projectName: PROJECT_NAME, parent: null, comments: [] },
+    registry.getAgent('refinement-agent'),
+    { allowedAgents: registry.getEffectiveAgents(PROJECT_NAME), task: { id: WORK_ITEM_ID, contextId }, message: { messageId } }
+  );
+  const allowedSection = prompt.slice(prompt.indexOf('## ALLOWED AGENTS'), prompt.indexOf('## WORK ITEM REFERENCES'));
+  assert.match(allowedSection, /backend-agent/, 'the allowed-agent list must name the project\'s agent ids');
+  assert.doesNotMatch(allowedSection, /agentFieldValue/,
+    'the prompt must not name a submission field an agent never writes');
 
-  const declared = prompt.match(/"operation":"create_subtask"[^}]*"([A-Za-z]+)":"<agent>"/);
-  assert.ok(declared, 'the prompt must show a create_subtask submission carrying an agent id');
-  const fieldName = declared[1];
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    ownerFlag, 'backend-agent',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+  ], { contextId, messageId });
 
-  t.mock.method(jira, 'getIssue', async (key) => ({
-    key, project: 'GANG', projectName: PROJECT_NAME, parent: key === 'GANG-43' ? ISSUE_KEY : null,
-    summary: 'Backend: implement endpoint', comments: [],
-  }));
-  let createdWith = null;
-  t.mock.method(jira, 'createSubtask', async (_parentKey, _projectKey, _summary, _description, agentFieldValue) => {
-    createdWith = agentFieldValue;
-    return 'GANG-43';
-  });
-  t.mock.method(jira, 'transitionIssue', async () => {});
-  t.mock.method(jira, 'postComment', async () => { throw new Error('a request using the documented field name must not be refused'); });
   t.mock.method(redis, 'getClient', () => ({}));
-  t.mock.method(streams, 'publish', async (_client, _stream, e) => ({ deduped: false, entryId: '0-1', messageId: e.messageId }));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
 
-  await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask'),
-        buildDataPart({
-          operation: 'create_subtask',
-          summary: 'Backend: implement endpoint',
-          description: 'full desc',
-          [fieldName]: 'backend-agent',
-        }),
-      ],
-    }),
-    PROJECT_NAME
-  );
+  await handleA2ASubmission(envelope, PROJECT_NAME);
 
-  assert.equal(createdWith, 'backend-agent',
-    `the gateway must read the agent id from "${fieldName}", the field the prompt declares`);
+  const materialize = calls.find(c => c.payload.command === 'materializeDecomposition');
+  assert.ok(materialize, 'a request built by the constructor must not be refused');
+  assert.equal(materialize.payload.message.subtasks[0].agent, 'backend-agent',
+    `the gateway must read the agent id the skill's ${ownerFlag} carried`);
+  assert.equal(materialize.payload.message.parentWorkItemId, WORK_ITEM_ID);
+});
+
+// v4.1 agent-artifact-automation.md REQ-01, a Locked contract: the
+// create_subtask request shape an agent is shown documents specificationLink
+// and artifactLinks as optional beside the three required fields. That shape
+// used to be an operations table in the dispatch prompt
+// (prompt.test.js asserted it there); it is the skill's now, so the clause is
+// asserted against the skill — and against the canonical command the gateway
+// forwards, so "documented as optional" means the two really do travel and
+// really are optional, rather than merely being written down.
+
+test('the skill documents a subtask\'s two references as optional, and they travel onto the subtask', async (t) => {
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const entries = skillCreateSubtaskArguments();
+  const specificationFlags = optionalFlagsFor(entries, 'specificationLink');
+  const artifactFlags = optionalFlagsFor(entries, 'artifactLinks');
+  assert.equal(specificationFlags.length, 2,
+    'a specification reference is two arguments, an artifact id and a requirement id');
+  assert.equal(artifactFlags.length, 1);
+
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+    '--agent', 'backend-agent',
+    specificationFlags[0], 'art-spec-1',
+    specificationFlags[1], 'REQ-7',
+    artifactFlags[0], 'art-1',
+    artifactFlags[0], 'art-2',
+  ], { contextId, messageId });
+
+  let command = null;
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(envelope, PROJECT_NAME);
+
+  const subtask = command.message.subtasks[0];
+  assert.deepEqual(subtask.specificationLink, { artifactId: 'art-spec-1', requirementId: 'REQ-7' });
+  assert.deepEqual(subtask.artifactLinks, ['art-1', 'art-2']);
+  assert.equal(subtask.agent, 'backend-agent');
+});
+
+test('a subtask request that leaves both references out is created all the same — they are optional', async (t) => {
+  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
+
+  const envelope = await submitThroughConstructor([
+    'create-subtask',
+    '--summary', 'Backend: implement endpoint',
+    '--description', 'full desc',
+    '--agent', 'backend-agent',
+  ], { contextId, messageId });
+
+  let command = null;
+  // Keeps the last projection command, not a `recordA2AVerdict` (REQ-04).
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, c) => {
+    if (c.command !== 'recordA2AVerdict') command = c;
+  });
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(idempotency, 'getOutcome', async () => undefined);
+  t.mock.method(idempotency, 'recordOutcome', async () => {});
+
+  await handleA2ASubmission(envelope, PROJECT_NAME);
+
+  const subtask = command.message.subtasks[0];
+  assert.equal(subtask.specificationLink, undefined);
+  assert.equal(subtask.artifactLinks, undefined);
+  assert.equal(subtask.displayName, 'Backend: implement endpoint');
 });
 
 test('create_subtask does not derive an agent when two of the project\'s agents answer to the same role prefix', async (t) => {
-  mockJiraMode(t);
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
   const backend = registry.getAgent('backend-agent');
@@ -635,12 +543,6 @@ test('create_subtask does not derive an agent when two of the project\'s agents 
     routing: { channelSuffix: 'backend-platform' },
   };
   t.mock.method(registry, 'getEffectiveAgents', () => [backend, twin]);
-
-  let createSubtaskCalled = false;
-  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async () => {});
-  const posted = [];
-  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
 
   const outcome = await handleA2ASubmission(
     envelope({
@@ -654,20 +556,16 @@ test('create_subtask does not derive an agent when two of the project\'s agents 
   );
 
   assert.equal(outcome, null, 'an ambiguous prefix must not be resolved by picking one');
-  assert.equal(createSubtaskCalled, false);
-  assert.equal(posted.length, 1);
-  assert.match(posted[0].body, /agentFieldValue/);
-  assert.match(posted[0].body, /no single one of them/);
+  assert.equal(calls.some(c => c.payload.command === 'materializeDecomposition'), false);
+  const comments = calls.filter(c => c.payload.command === 'appendComment');
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].payload.body, /agentFieldValue/);
+  assert.match(comments[0].payload.body, /no single one of them/);
 });
 
 test('create_subtask does not derive the requesting agent back onto its own subtask', async (t) => {
-  mockJiraMode(t);
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  let createSubtaskCalled = false;
-  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async () => {});
-  const posted = [];
-  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
 
   const outcome = await handleA2ASubmission(
     envelope({
@@ -681,45 +579,14 @@ test('create_subtask does not derive the requesting agent back onto its own subt
   );
 
   assert.equal(outcome, null, 'the requester is not a derivation candidate for its own request');
-  assert.equal(createSubtaskCalled, false);
-  assert.equal(posted.length, 1, 'the parent ticket must carry a visible record of the rejection');
-  assert.match(posted[0].body, /agentFieldValue/);
+  assert.equal(calls.some(c => c.payload.command === 'materializeDecomposition'), false);
+  const comments = calls.filter(c => c.payload.command === 'appendComment');
+  assert.equal(comments.length, 1, 'the parent work item must carry a visible record of the rejection');
+  assert.match(comments[0].payload.body, /agentFieldValue/);
 });
 
-test('create_subtask with no derivable agent comments the rejection on the parent and creates nothing', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  let createSubtaskCalled = false;
-  let blocked = null;
-  t.mock.method(jira, 'createSubtask', async () => { createSubtaskCalled = true; });
-  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
-  const posted = [];
-  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
-
-  const outcome = await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [
-        buildTextPart('Creating subtask'),
-        buildDataPart({ operation: 'create_subtask', summary: 'Add a /health endpoint', description: 'full desc' }),
-      ],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(outcome, null);
-  assert.equal(createSubtaskCalled, false);
-  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true },
-    'a dropped subtask chain must leave the parent in the same state a rejected assignment does, not reading as ready');
-  assert.equal(posted.length, 1, 'the parent ticket must carry a visible record of the rejection');
-  assert.equal(posted[0].key, ISSUE_KEY);
-  assert.match(posted[0].body, /agentFieldValue/);
-  assert.match(posted[0].body, /Add a \/health endpoint/);
-  assert.match(posted[0].body, /backend-agent/, 'the permitted agent ids are named for recovery');
-});
-
-test('local mode: create_subtask with no derivable agent appends the rejection comment and materializes nothing', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask with no derivable agent appends the rejection comment and materializes nothing', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
   await handleA2ASubmission(
@@ -745,11 +612,8 @@ test('local mode: create_subtask with no derivable agent appends the rejection c
 });
 
 test('a task whose submission was rejected is reported failed, not completed', async (t) => {
-  mockJiraMode(t);
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  t.mock.method(jira, 'createSubtask', async () => { throw new Error('must not create anything'); });
-  t.mock.method(jira, 'postComment', async () => {});
-  t.mock.method(jira, 'setBlockedField', async () => {});
 
   await handleA2ASubmission(
     envelope({
@@ -770,21 +634,19 @@ test('a task whose submission was rejected is reported failed, not completed', a
   const result = await handleTaskStatus({
     kind: 'task_status',
     messageId: newMessageId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
-    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+    payload: { status: 'completed', ticket_key: WORK_ITEM_ID, agent_name: 'refinement-agent' },
   }, PROJECT_NAME);
 
   assert.equal(result.status, 'failed');
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'failed');
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'failed');
   assert.ok(!logs.some(line => /completed/.test(line)), 'the task must never be logged as completed');
 });
 
 test('a task whose chain permanently failed is reported failed, not completed', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  t.mock.method(jira, 'postComment', async () => {});
-  t.mock.method(jira, 'setBlockedField', async () => {});
 
   // The rejected create_subtask poisons the rest of the chain: the agent's
   // own completion message references it and is permanently failed.
@@ -811,9 +673,9 @@ test('a task whose chain permanently failed is reported failed, not completed', 
   const result = await handleTaskStatus({
     kind: 'task_status',
     messageId: newMessageId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
-    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+    payload: { status: 'completed', ticket_key: WORK_ITEM_ID, agent_name: 'refinement-agent' },
   }, PROJECT_NAME);
 
   assert.equal(result.status, 'failed');
@@ -821,9 +683,8 @@ test('a task whose chain permanently failed is reported failed, not completed', 
 });
 
 test('a task with no failed submission is still reported completed', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  t.mock.method(jira, 'postComment', async () => {});
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('progress note'), buildDataPart({ operation: 'comment' })] }),
@@ -833,13 +694,13 @@ test('a task with no failed submission is still reported completed', async (t) =
   const result = await handleTaskStatus({
     kind: 'task_status',
     messageId: newMessageId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
-    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'backend-agent' },
+    payload: { status: 'completed', ticket_key: WORK_ITEM_ID, agent_name: 'backend-agent' },
   }, PROJECT_NAME);
 
-  assert.deepEqual(result, { taskId: ISSUE_KEY, status: 'completed' });
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'completed');
+  assert.deepEqual(result, { taskId: WORK_ITEM_ID, status: 'completed' });
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'completed');
 });
 
 // A rejection the requesting agent cannot see or usefully resend leaves the
@@ -848,10 +709,8 @@ test('a task with no failed submission is still reported completed', async (t) =
 // failure, not leave the Task reading failed forever once it genuinely
 // succeeds.
 test('a redispatch supersedes an earlier rejection so the task can complete cleanly afterward', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
-  t.mock.method(jira, 'postComment', async () => {});
-  t.mock.method(jira, 'setBlockedField', async () => {});
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(streams, 'publish', async () => ({ deduped: false, entryId: '0-1' }));
 
@@ -863,18 +722,18 @@ test('a redispatch supersedes an earlier rejection so the task can complete clea
     ],
   });
   await handleA2ASubmission(rejected, PROJECT_NAME);
-  assert.deepEqual(taskStore.failedMessageIds(ISSUE_KEY), [rejected.payload.message.messageId]);
+  assert.deepEqual(taskStore.failedMessageIds(WORK_ITEM_ID), [rejected.payload.message.messageId]);
 
   // The same reopen mechanism a pipeline-retry/rework/unblock redispatch
   // uses (handlers.dispatchTask), driven through its real entry point.
   await handlers.dispatchTask(
-    { key: ISSUE_KEY, project: 'GANG', projectName: PROJECT_NAME },
+    { key: WORK_ITEM_ID, jiraProjectKey: 'GANG', projectName: PROJECT_NAME },
     { id: 'refinement-agent', routing: { channelSuffix: 'refinement' } },
     { dispatchId: 'retry-1', promptFactory: () => 'retry prompt' }
   );
-  assert.deepEqual(taskStore.failedMessageIds(ISSUE_KEY), [], 'the redispatch must supersede the earlier rejection');
+  assert.deepEqual(taskStore.failedMessageIds(WORK_ITEM_ID), [], 'the redispatch must supersede the earlier rejection');
 
-  const newSeed = taskStore.lastMessage(ISSUE_KEY).messageId;
+  const newSeed = taskStore.lastMessage(WORK_ITEM_ID).messageId;
   const completion = envelope({
     contextId, referenceMessageId: newSeed, state: 'completed',
     parts: [buildTextPart('Created the subtask this time')],
@@ -884,21 +743,19 @@ test('a redispatch supersedes an earlier rejection so the task can complete clea
   const result = await handleTaskStatus({
     kind: 'task_status',
     messageId: newMessageId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
-    payload: { status: 'completed', ticket_key: ISSUE_KEY, agent_name: 'refinement-agent' },
+    payload: { status: 'completed', ticket_key: WORK_ITEM_ID, agent_name: 'refinement-agent' },
   }, PROJECT_NAME);
 
-  assert.deepEqual(result, { taskId: ISSUE_KEY, status: 'completed' }, 'a superseding success must not still read failed');
+  assert.deepEqual(result, { taskId: WORK_ITEM_ID, status: 'completed' }, 'a superseding success must not still read failed');
 });
 
 test('create_subtask rejection names every missing required field and blocks causal completion', async (t) => {
-  mockJiraMode(t);
+  mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
   const warnings = [];
   t.mock.method(console, 'warn', (...args) => warnings.push(args.join(' ')));
-  t.mock.method(jira, 'postComment', async () => {});
-  t.mock.method(jira, 'setBlockedField', async () => {});
 
   const rejected = envelope({
     contextId,
@@ -925,151 +782,300 @@ test('create_subtask rejection names every missing required field and blocks cau
     handleA2ASubmission(completion, PROJECT_NAME),
     taskStore.A2ACausalDependencyFailedError
   );
-  assert.equal(taskStore.getTaskById(ISSUE_KEY).state, 'working');
+  assert.equal(taskStore.getTaskById(WORK_ITEM_ID).state, 'working');
 });
 
 // The gateway direction must not accept a reversed (client) role
 
 test('a message with role "client" on the gateway channel is dropped', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let called = false;
-  t.mock.method(jira, 'postComment', async () => { called = true; });
 
   const env = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('spoofed')] });
   env.payload.message.role = 'client';
 
   await handleA2ASubmission(env, PROJECT_NAME);
-  assert.equal(called, false);
+  assert.deepEqual(calls, []);
+});
+
+// REQ-06 — the cross-check against the Task's own recorded project reads
+// `metadata.projectName`, renamed from a tracker-shaped name. It must still
+// drop a submission whose Task belongs to another project.
+test('a submission whose Task metadata names another project is dropped', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask({ projectName: 'hello-desktop' });
+
+  const outcome = await handleA2ASubmission(
+    envelope({
+      contextId, referenceMessageId: messageId, state: 'working',
+      parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })],
+    }),
+    PROJECT_NAME
+  );
+
+  assert.equal(outcome, null);
+  assert.deepEqual(calls, [], 'nothing may be written for a Task belonging to another project');
 });
 
 // Routing: project identity comes from the channel, never from content
 
 test('an envelope for a different project than the channel is dropped', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let called = false;
-  t.mock.method(jira, 'postComment', async () => { called = true; });
 
   await handleA2ASubmission(
     envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })] }),
     'some-other-project'
   );
 
-  assert.equal(called, false);
+  assert.deepEqual(calls, []);
 });
 
 test('an envelope for an unknown task is dropped', async (t) => {
-  let called = false;
-  t.mock.method(jira, 'postComment', async () => { called = true; });
+  const calls = mockCanonicalWrites(t);
 
   const env = envelope({ contextId: 'ctx-x', referenceMessageId: null, state: 'working', parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })] });
-  env.taskId = 'GANG-does-not-exist';
-  env.payload.message.taskId = 'GANG-does-not-exist';
+  env.taskId = 'wi-does-not-exist';
+  env.payload.message.taskId = 'wi-does-not-exist';
 
   await handleA2ASubmission(env, PROJECT_NAME);
-  assert.equal(called, false);
+  assert.deepEqual(calls, []);
 });
 
-test('an invalid submission (bad state) is dropped without touching Jira', async (t) => {
+test('an invalid submission (bad state) is dropped without writing anything', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
-  let called = false;
-  t.mock.method(jira, 'postComment', async () => { called = true; });
 
   const env = envelope({ contextId, referenceMessageId: messageId, state: 'in-progress', parts: [buildTextPart('note')] });
   await handleA2ASubmission(env, PROJECT_NAME);
-  assert.equal(called, false);
+  assert.deepEqual(calls, []);
 });
 
-// handlePipelineRetry — Jenkins reports a failed
-// build back over the gateway channel; ScrumMaster redispatches the ticket's
-// recorded implementation owner. redispatchImplementationOwner/dispatchTask
-// are destructured into gateway.js at load time, so they run for real here —
-// only their lower-level dependencies (jira, redis, streams) are mocked, the
-// same technique the create_subtask test above uses.
+// handlePipelineRetry — two messages share this type and this stream from
+// v5.2 (Canonical Delivery State REQ-01): Jenkins', which carries the
+// promoted pull requests and no canonical id and is RELAYED to core, and
+// core's, which carries the canonical workItemId it resolved and is the one
+// this service acts on. Nothing here derives a Redis key, or anything else,
+// from a tracker key — `acquireOnce`'s key is built from the canonical id.
 
-test('a pipeline_retry message redispatches the ticket\'s recorded agent', async (t) => {
-  t.mock.method(redis, 'acquireOnce', async () => true);
-  t.mock.method(jira, 'getIssue', async (key) => ({
-    key, project: 'GANG', projectName: 'hello-world', parent: null, agent: 'backend-agent', comments: [],
-  }));
-  t.mock.method(redis, 'getClient', () => ({}));
-  let published = null;
-  t.mock.method(streams, 'publish', async (_client, stream, streamEnvelope) => {
-    published = { stream, envelope: streamEnvelope };
-    return { deduped: false, entryId: '0-1', messageId: streamEnvelope.messageId };
-  });
+function retryEnvelope(payload) {
+  return {
+    schemaVersion: '1', messageId: newMessageId(), kind: 'gateway_operation',
+    project: PROJECT_NAME, createdAt: new Date().toISOString(), payload,
+  };
+}
 
-  const result = await handlePipelineRetry(
-    { ticket_key: 'GANG-70', build_url: 'https://jenkins.example.com/job/hello-world/17/', build_number: 17 },
-    PROJECT_NAME
-  );
-
-  assert.deepEqual(result, { ticket_key: 'GANG-70', skipped: false });
-  assert.ok(published, 'the redispatch Task must be published');
-  assert.equal(published.envelope.taskId, 'GANG-70');
-});
-
-test('a pipeline_retry message with no ticket_key is dropped', async (t) => {
-  t.mock.method(redis, 'acquireOnce', async () => { throw new Error('must not be called'); });
-  t.mock.method(jira, 'getIssue', async () => { throw new Error('must not be called'); });
-
-  const result = await handlePipelineRetry({ build_url: 'https://jenkins.example.com/job/hello-world/17/' }, PROJECT_NAME);
-
-  assert.equal(result, null);
-});
-
-test('a duplicate pipeline_retry for the same ticket and build is skipped', async (t) => {
-  t.mock.method(redis, 'acquireOnce', async () => false);
-  let getIssueCalled = false;
-  t.mock.method(jira, 'getIssue', async () => { getIssueCalled = true; });
-  let publishCalled = false;
-  t.mock.method(streams, 'publish', async () => { publishCalled = true; });
-
-  const result = await handlePipelineRetry(
-    { ticket_key: 'GANG-70', build_url: 'https://jenkins.example.com/job/hello-world/17/', build_number: 17 },
-    PROJECT_NAME
-  );
-
-  assert.deepEqual(result, { ticket_key: 'GANG-70', skipped: true });
-  assert.equal(getIssueCalled, false);
-  assert.equal(publishCalled, false);
-});
-
-test('the pipeline_retry dedupe key is derived from the ticket and build, falling back from build_url to build_number', async (t) => {
-  let dedupeKey = null;
-  t.mock.method(redis, 'acquireOnce', async (key) => { dedupeKey = key; return false; });
-
-  await handlePipelineRetry({ ticket_key: 'GANG-70', build_number: 17 }, PROJECT_NAME);
-
-  assert.equal(dedupeKey, 'retry-dispatch:GANG-70:17');
-});
-
-// --- Local-mode routing — the same submissions above, but for a project
-// in local mode:
-// every write must go through canonicalWorkItems.publishCommand's Streams
-// command channel instead of jira.*, and no Jira call may occur.
-
-function mockLocalMode(t) {
-  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ mode: 'local' }));
+test("Jenkins' pipeline_retry carries pull requests, dispatches nobody here, and is relayed to core", async (t) => {
   const calls = [];
   t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
     calls.push({ project, payload });
     return { deduped: false };
   });
-  t.mock.method(jira, 'postComment', async () => { throw new Error('must not call jira in local mode'); });
-  t.mock.method(jira, 'setBlockedField', async () => { throw new Error('must not call jira in local mode'); });
-  t.mock.method(jira, 'setAgentField', async () => { throw new Error('must not call jira in local mode'); });
-  t.mock.method(jira, 'getIssue', async () => { throw new Error('must not call jira in local mode'); });
-  t.mock.method(jira, 'createSubtask', async () => { throw new Error('must not call jira in local mode'); });
-  t.mock.method(jira, 'transitionIssue', async () => { throw new Error('must not call jira in local mode'); });
-  // The gateway reports a work item's own persisted status rather than
-  // asserting one from its in-memory Task state — same HTTP boundary as
-  // getMode, stubbed the same way.
-  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
-  return calls;
-}
+  let dispatched = false;
+  t.mock.method(streams, 'publish', async () => { dispatched = true; });
 
-test('local mode: comment operation appends a canonical comment instead of posting to Jira', async (t) => {
-  const calls = mockLocalMode(t);
+  const env = retryEnvelope({
+    type: 'pipeline_retry',
+    pull_requests: ['https://github.com/org/repo/pull/7'],
+    failure_text: 'Pipeline failed on the post-merge dev build.',
+    build_url: 'https://jenkins.example.com/job/hello-world/17/',
+    build_number: 17,
+  });
+  const result = await handlePipelineRetry(env.payload, env, PROJECT_NAME);
+
+  assert.deepEqual(result, { relayed: 'recordPipelineFailure', sourceMessageId: env.messageId });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.command, 'recordPipelineFailure');
+  assert.deepEqual(calls[0].payload.pull_requests, ['https://github.com/org/repo/pull/7']);
+  assert.equal(calls[0].payload.sourceMessageId, env.messageId,
+    "the GATEWAY envelope's messageId, since publishCommand mints a fresh one on each relay");
+  assert.equal('ticket_key' in calls[0].payload, false);
+  assert.equal(dispatched, false, 'ScrumMaster takes no action on Jenkins\' message itself');
+});
+
+test("core's pipeline_retry redispatches the canonical work item's owner, once per (work item, build)", async (t) => {
+  const keys = [];
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async (key) => {
+    const first = !keys.includes(key);
+    keys.push(key);
+    return first;
+  });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'backend-agent',
+    display_name: 'A task', comments: [], history: [], artifacts: [],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ project: PROJECT_NAME, mode: 'local', jiraProjectKey: null }));
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issueLike, agent, opts) => {
+    dispatched.push({ key: issueLike.key, agentId: agent.id, prompt: opts.promptFactory({ id: 't' }, { messageId: 'm' }) });
+  });
+
+  const msg = {
+    type: 'pipeline_retry', workItemId: WORK_ITEM_ID,
+    build_url: 'https://jenkins.example.com/job/hello-world/17/', build_number: 17,
+  };
+  const first = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+  const second = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.deepEqual(first, { workItemId: WORK_ITEM_ID, skipped: false });
+  assert.deepEqual(second, { workItemId: WORK_ITEM_ID, skipped: true },
+    'a second identical message dispatches no one');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].agentId, 'backend-agent', 'the owner the canonical record names');
+  assert.equal(dispatched[0].key, WORK_ITEM_ID);
+  assert.match(dispatched[0].prompt, /pipeline failed/i);
+  assert.match(dispatched[0].prompt, /jenkins\.example\.com\/job\/hello-world\/17/);
+  assert.deepEqual(keys, [
+    `retry-dispatch:${WORK_ITEM_ID}:https://jenkins.example.com/job/hello-world/17/`,
+    `retry-dispatch:${WORK_ITEM_ID}:https://jenkins.example.com/job/hello-world/17/`,
+  ], 'the dedupe key is built from the canonical id, never from a tracker key');
+});
+
+test("core's pipeline_retry whose redispatch throws gives its dedupe key back, so the redelivery dispatches the owner", async (t) => {
+  const held = new Set();
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async (key) => {
+    if (held.has(key)) return false;
+    held.add(key);
+    return true;
+  });
+  t.mock.method(redis, 'releaseOnce', async (key) => { held.delete(key); });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'backend-agent',
+    display_name: 'A task', comments: [], history: [], artifacts: [],
+  }));
+  t.mock.method(canonicalWorkItems, 'getMode', async () => ({ project: PROJECT_NAME, mode: 'local', jiraProjectKey: null }));
+  let attempts = 0;
+  const dispatched = [];
+  t.mock.method(handlers, 'dispatchTask', async (issueLike, agent) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('Redis went away');
+    dispatched.push(agent.id);
+  });
+
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await assert.rejects(() => handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME), /Redis went away/);
+  const redelivered = await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.deepEqual(redelivered, { workItemId: WORK_ITEM_ID, skipped: false });
+  assert.deepEqual(dispatched, ['backend-agent'], 'the redelivery dispatched the owner');
+});
+
+test("core's pipeline_retry for a work item with no assignee dispatches nobody and logs it as unresolved", async (t) => {
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async () => true);
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: null,
+  }));
+  let dispatched = false;
+  t.mock.method(handlers, 'dispatchTask', async () => { dispatched = true; });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.equal(dispatched, false);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /Unresolved pipeline_retry/);
+  assert.match(errors[0], new RegExp(WORK_ITEM_ID), 'the workItemId is named');
+});
+
+test("core's pipeline_retry naming an agent the registry does not know dispatches nobody", async (t) => {
+  t.mock.method(redis, 'getClient', () => ({}));
+  t.mock.method(redis, 'acquireOnce', async () => true);
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async () => ({
+    id: WORK_ITEM_ID, project: PROJECT_NAME, status: 'in-review', assignee_agent_id: 'ghost-agent',
+  }));
+  let dispatched = false;
+  t.mock.method(handlers, 'dispatchTask', async () => { dispatched = true; });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+
+  const msg = { type: 'pipeline_retry', workItemId: WORK_ITEM_ID, build_number: 17 };
+  await handlePipelineRetry(msg, retryEnvelope(msg), PROJECT_NAME);
+
+  assert.equal(dispatched, false);
+  assert.match(errors[0], /ghost-agent/);
+});
+
+// beta_deployed — REQ-01's canonical deployment event. ScrumMaster relays it
+// and decides nothing about it; core resolves the pull requests, posts the
+// evidence and makes the transition.
+
+test('a beta_deployed entry is relayed to core as recordBetaDeployment, carrying the gateway messageId', async (t) => {
+  const calls = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    calls.push({ project, payload });
+    return { deduped: false };
+  });
+
+  const env = retryEnvelope({
+    type: 'beta_deployed',
+    pull_requests: ['https://github.com/org/repo/pull/7'],
+    deployed_sha: 'deadbeef', build_identifier: 'hello-world-deadbee-7',
+    build_url: 'https://jenkins.example.com/job/hello-world/18/',
+    beta_url: 'https://hello-world.beta.example.com',
+  });
+  const result = await dispatchGatewayOperation(env, PROJECT_NAME);
+
+  assert.deepEqual(result, { relayed: 'recordBetaDeployment', sourceMessageId: env.messageId });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].project, PROJECT_NAME);
+  assert.equal(calls[0].payload.command, 'recordBetaDeployment');
+  assert.equal(calls[0].payload.sourceMessageId, env.messageId);
+  assert.equal(calls[0].payload.deployed_sha, 'deadbeef');
+  assert.equal(calls[0].payload.beta_url, 'https://hello-world.beta.example.com');
+  // No field whose name or value is tracker-specific survives the relay.
+  assert.equal(JSON.stringify(calls[0].payload).toLowerCase().includes('jira'), false);
+  assert.equal('ticket_key' in calls[0].payload, false);
+});
+
+test('a relay whose publishCommand fails raises, so the gateway entry stays pending', async (t) => {
+  t.mock.method(canonicalWorkItems, 'publishCommand', async () => { throw new Error('Redis unavailable'); });
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+
+  const env = retryEnvelope({
+    type: 'beta_deployed', pull_requests: [], deployed_sha: 'a', build_identifier: 'b',
+    build_url: 'u', beta_url: 'bu',
+  });
+
+  await assert.rejects(() => dispatchGatewayOperation(env, PROJECT_NAME), /Redis unavailable/,
+    'the relay must not swallow the failure — raising is what leaves the entry unacknowledged');
+  assert.match(errors[0], /stays pending/);
+  assert.match(errors[0], new RegExp(env.messageId), "the entry's messageId is named");
+});
+
+test('idempotency.once records no completion for a handler that raises, so a redelivery runs it again', async (t) => {
+  // REQ-01 requires `once` to release any claim it took before a handler
+  // that raises. It takes none: it READS the recorded outcome, runs the
+  // function, and records only after the function resolves — so there is
+  // nothing to release, and this is the confirmation rather than a change.
+  const store = new Map();
+  const client = {
+    async get(key) { return store.has(key) ? store.get(key) : null; },
+    async set(key, value) { store.set(key, value); return 'OK'; },
+  };
+  let attempts = 0;
+
+  await assert.rejects(() => idempotency.once(client, 'gateway', 'msg-raise', async () => {
+    attempts += 1;
+    throw new Error('transient');
+  }), /transient/);
+  assert.equal(store.size, 0, 'no completion was recorded for the raising handler');
+
+  const { duplicate } = await idempotency.once(client, 'gateway', 'msg-raise', async () => {
+    attempts += 1;
+    return 'ok';
+  });
+  assert.equal(duplicate, false, 'the redelivery runs the handler again');
+  assert.equal(attempts, 2);
+});
+
+test('comment operation appends a canonical comment instead of posting to Jira', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   await handleA2ASubmission(
@@ -1079,12 +1085,12 @@ test('local mode: comment operation appends a canonical comment instead of posti
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.command, 'appendComment');
-  assert.equal(calls[0].payload.workItemId, ISSUE_KEY);
+  assert.equal(calls[0].payload.workItemId, WORK_ITEM_ID);
   assert.match(calls[0].payload.body, /progress note/);
 });
 
-test('local mode: input-required transitions to needs-clarification and appends a comment', async (t) => {
-  const calls = mockLocalMode(t);
+test('input-required transitions to needs-clarification and appends a comment', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   await handleA2ASubmission(
@@ -1104,11 +1110,11 @@ test('local mode: input-required transitions to needs-clarification and appends 
   assert.equal(comment.payload.referenceFunction, 'doAuth()');
 });
 
-test('local mode: failed/canceled/rejected transition to the mapped terminal status and append a comment', async (t) => {
+test('failed/canceled/rejected transition to the mapped terminal status and append a comment', async (t) => {
   const expected = { failed: 'failed', canceled: 'cancelled', rejected: 'cancelled' };
   // Installed once — see the Jira-mode sibling above for why a second
   // mock of the same method in one test outlives it.
-  const calls = mockLocalMode(t);
+  const calls = mockCanonicalWrites(t);
   for (const state of Object.keys(expected)) {
     taskStore._reset();
     calls.length = 0;
@@ -1124,13 +1130,13 @@ test('local mode: failed/canceled/rejected transition to the mapped terminal sta
   }
 });
 
-test('local mode: completed with a pull-request artifact only appends a comment, no status transition', async (t) => {
-  const calls = mockLocalMode(t);
+test('completed with a pull-request artifact records the association and appends a comment, no status transition', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   const artifact = buildArtifact({
     artifactId: newArtifactId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     name: 'pull-request',
     parts: [
       { kind: 'file', file: { name: 'pull-request', mimeType: 'text/uri-list', uri: 'https://github.com/org/repo/pull/7' } },
@@ -1147,9 +1153,36 @@ test('local mode: completed with a pull-request artifact only appends a comment,
     PROJECT_NAME
   );
 
+  // V5.2 REQ-03: the association AND the comment, in that order — the
+  // association is what REQ-02's resolver reads to turn a deployed pull
+  // request back into the work item that delivered it.
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].payload, {
+    command: 'attachArtifact',
+    actor: 'Backend Agent',
+    workItemId: WORK_ITEM_ID,
+    artifactType: 'pull_request',
+    reference: 'https://github.com/org/repo/pull/7',
+  });
+  assert.equal(calls[1].payload.command, 'appendComment');
+  assert.match(calls[1].payload.body, /github\.com\/org\/repo\/pull\/7/);
+  assert.equal(calls.filter(c => c.payload.command === 'transitionStatus').length, 0,
+    'opening a PR moves no status');
+});
+
+test('a task completed without a pull-request artifact records no association and raises no error', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+
+  await handleA2ASubmission(
+    envelope({ contextId, referenceMessageId: messageId, state: 'completed', parts: [buildTextPart('Done, no PR')] }),
+    PROJECT_NAME
+  );
+
+  assert.equal(calls.filter(c => c.payload.command === 'attachArtifact').length, 0,
+    'the pull-request Artifact is optional and stays optional');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.command, 'appendComment');
-  assert.match(calls[0].payload.body, /github\.com\/org\/repo\/pull\/7/);
 });
 
 // The gateway's Task state is not the work item's status. Nothing in the
@@ -1158,15 +1191,15 @@ test('local mode: completed with a pull-request artifact only appends a comment,
 // the persisted one. It used to assert "In Progress" while the admin showed
 // the item untouched.
 
-test('local mode: the PR-opened log reports the work item\'s persisted status, not an assumed one', async (t) => {
-  const calls = mockLocalMode(t);
+test('the PR-opened log reports the work item\'s persisted status, not an assumed one', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
   const logs = [];
   t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
 
   const artifact = buildArtifact({
     artifactId: newArtifactId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     name: 'pull-request',
     parts: [
       { kind: 'file', file: { name: 'pull-request', mimeType: 'text/uri-list', uri: 'https://github.com/org/repo/pull/7' } },
@@ -1190,8 +1223,8 @@ test('local mode: the PR-opened log reports the work item\'s persisted status, n
   assert.ok(!calls.some(c => c.payload.command === 'transitionStatus'), 'reporting the status must not change it');
 });
 
-test('local mode: reassign publishes an assign command for a catalog-valid agent', async (t) => {
-  const calls = mockLocalMode(t);
+test('reassign publishes an assign command for a catalog-valid agent', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   await handleA2ASubmission(
@@ -1203,11 +1236,11 @@ test('local mode: reassign publishes an assign command for a catalog-valid agent
   );
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].payload, { command: 'assign', actor: 'Backend Agent', workItemId: ISSUE_KEY, agentId: 'frontend-agent' });
+  assert.deepEqual(calls[0].payload, { command: 'assign', actor: 'Backend Agent', workItemId: WORK_ITEM_ID, agentId: 'frontend-agent' });
 });
 
-test('local mode: reassign to an unknown agent reports a visible failure instead of publishing assign', async (t) => {
-  const calls = mockLocalMode(t);
+test('reassign to an unknown agent reports a visible failure instead of publishing assign', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   await handleA2ASubmission(
@@ -1225,8 +1258,8 @@ test('local mode: reassign to an unknown agent reports a visible failure instead
   assert.match(comment.payload.body, /catalog validation/);
 });
 
-test('local mode: create_subtask publishes a single-subtask materializeDecomposition command and does not dispatch directly', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask publishes a single-subtask materializeDecomposition command and does not dispatch directly', async (t) => {
+  const calls = mockCanonicalWrites(t);
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   let recorded = null;
@@ -1249,7 +1282,7 @@ test('local mode: create_subtask publishes a single-subtask materializeDecomposi
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.command, 'materializeDecomposition');
-  assert.equal(calls[0].payload.message.parentWorkItemId, ISSUE_KEY);
+  assert.equal(calls[0].payload.message.parentWorkItemId, WORK_ITEM_ID);
   assert.equal(calls[0].payload.message.subtasks.length, 1);
   const subtask = calls[0].payload.message.subtasks[0];
   assert.equal(subtask.displayName, 'Backend: implement endpoint');
@@ -1259,8 +1292,8 @@ test('local mode: create_subtask publishes a single-subtask materializeDecomposi
   assert.equal(publishToAgentStream, false, 'gateway.js must not dispatch directly — dispatch must follow the work_item.status_changed event');
 });
 
-test('local mode: create_subtask reuses the previously-minted id on a from-scratch retry, without re-publishing', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask reuses the previously-minted id on a from-scratch retry, without re-publishing', async (t) => {
+  const calls = mockCanonicalWrites(t);
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => 'already-minted-id');
   t.mock.method(idempotency, 'recordOutcome', async () => { throw new Error('must not re-record on a reused outcome'); });
@@ -1282,8 +1315,8 @@ test('local mode: create_subtask reuses the previously-minted id on a from-scrat
   assert.equal(calls.length, 0, 'materialize.py\'s own store-level idempotency already covers redelivery; no need to re-publish');
 });
 
-test('local mode: create_subtask without agentFieldValue derives the agent from the summary role prefix', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask without agentFieldValue derives the agent from the summary role prefix', async (t) => {
+  const calls = mockCanonicalWrites(t);
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -1312,8 +1345,8 @@ test('local mode: create_subtask without agentFieldValue derives the agent from 
 // optional specificationLink/artifactLinks ride, unchanged, inside the
 // canonical materializeDecomposition command's subtasks entry.
 
-test('local mode: create_subtask forwards a well-formed specificationLink and artifactLinks onto the materialized subtask', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask forwards a well-formed specificationLink and artifactLinks onto the materialized subtask', async (t) => {
+  const calls = mockCanonicalWrites(t);
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -1345,8 +1378,8 @@ test('local mode: create_subtask forwards a well-formed specificationLink and ar
   assert.deepEqual(subtask.artifactLinks, ['artifact-2', 'artifact-3']);
 });
 
-test('local mode: create_subtask with neither reference materializes a subtask entry carrying neither key', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask with neither reference materializes a subtask entry carrying neither key', async (t) => {
+  const calls = mockCanonicalWrites(t);
   t.mock.method(redis, 'getClient', () => ({}));
   t.mock.method(idempotency, 'getOutcome', async () => undefined);
   t.mock.method(idempotency, 'recordOutcome', async () => {});
@@ -1372,8 +1405,8 @@ test('local mode: create_subtask with neither reference materializes a subtask e
   assert.ok(!('artifactLinks' in subtask), 'an unreferenced subtask entry must carry no artifactLinks key at all');
 });
 
-test('local mode: create_subtask with a malformed specificationLink rejects the whole request, naming the field as refused rather than missing', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask with a malformed specificationLink rejects the whole request, naming the field as refused rather than missing', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
   const outcome = await handleA2ASubmission(
@@ -1403,8 +1436,8 @@ test('local mode: create_subtask with a malformed specificationLink rejects the 
   assert.equal(transition.payload.status, 'needs-clarification');
 });
 
-test('local mode: create_subtask with a malformed artifactLinks rejects the whole request and creates nothing', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask with a malformed artifactLinks rejects the whole request and creates nothing', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
   const outcome = await handleA2ASubmission(
@@ -1430,8 +1463,8 @@ test('local mode: create_subtask with a malformed artifactLinks rejects the whol
   assert.match(comment.payload.body, /artifactLinks/);
 });
 
-test('local mode: create_subtask with an invalid agent reports a visible failure and publishes nothing', async (t) => {
-  const calls = mockLocalMode(t);
+test('create_subtask with an invalid agent reports a visible failure and publishes nothing', async (t) => {
+  const calls = mockCanonicalWrites(t);
 
   const { contextId, messageId } = registerTask({ agentId: 'refinement-agent' });
 
@@ -1455,33 +1488,8 @@ test('local mode: create_subtask with an invalid agent reports a visible failure
 // logged and dropped: the agent believed it had asked for something, the
 // work item recorded nothing, and the only trace was a container log line.
 
-test('an operation the gateway cannot carry out is reported on the ticket, not only logged', async (t) => {
-  mockJiraMode(t);
-  const { contextId, messageId } = registerTask();
-  const posted = [];
-  let blocked = null;
-  t.mock.method(jira, 'postComment', async (key, body) => { posted.push({ key, body }); });
-  t.mock.method(jira, 'setBlockedField', async (key, value) => { blocked = { key, value }; });
-
-  const outcome = await handleA2ASubmission(
-    envelope({
-      contextId, referenceMessageId: messageId, state: 'working',
-      parts: [buildTextPart('promoting'), buildDataPart({ operation: 'promote_to_release' })],
-    }),
-    PROJECT_NAME
-  );
-
-  assert.equal(outcome, null);
-  assert.equal(posted.length, 1, 'the ticket must carry a visible record of the refused request');
-  assert.equal(posted[0].key, ISSUE_KEY);
-  assert.match(posted[0].body, /promote_to_release/, 'the comment names the operation that was refused');
-  assert.match(posted[0].body, /create_subtask/, 'and the operations that would have worked');
-  assert.deepEqual(blocked, { key: ISSUE_KEY, value: true });
-  assert.equal(taskStore.failedMessageIds(ISSUE_KEY).length, 1, 'the Task must carry the failure so it cannot log completed');
-});
-
-test('local mode: an operation the gateway cannot carry out is appended and flagged on the work item', async (t) => {
-  const calls = mockLocalMode(t);
+test('an operation the gateway cannot carry out is appended and flagged on the work item', async (t) => {
+  const calls = mockCanonicalWrites(t);
   const { contextId, messageId } = registerTask();
 
   const outcome = await handleA2ASubmission(
@@ -1505,36 +1513,16 @@ test('local mode: an operation the gateway cannot carry out is appended and flag
 // against both modes since it has its own mode branch independent of
 // handleA2ASubmission's.
 
-test('handleTaskStatus (jira mode): failed posts a comment and blocks the ticket', async (t) => {
-  mockJiraMode(t);
-  const { contextId } = registerTask();
-  let blocked = null;
-  let posted = null;
-  t.mock.method(jira, 'setBlockedField', async (k, v) => { blocked = { k, v }; });
-  t.mock.method(jira, 'postComment', async (k, b) => { posted = b; });
-
-  await handleTaskStatus({
-    kind: 'task_status',
-    messageId: newMessageId(),
-    taskId: ISSUE_KEY,
-    contextId,
-    payload: { status: 'failed', ticket_key: ISSUE_KEY, agent_name: 'backend-agent', reason: 'timeout' },
-  }, PROJECT_NAME);
-
-  assert.deepEqual(blocked, { k: ISSUE_KEY, v: true });
-  assert.match(posted, /timeout/);
-});
-
 test('handleTaskStatus (local mode): failed transitions the work item to failed and appends a comment', async (t) => {
-  const calls = mockLocalMode(t);
+  const calls = mockCanonicalWrites(t);
   const { contextId } = registerTask();
 
   await handleTaskStatus({
     kind: 'task_status',
     messageId: newMessageId(),
-    taskId: ISSUE_KEY,
+    taskId: WORK_ITEM_ID,
     contextId,
-    payload: { status: 'failed', ticket_key: ISSUE_KEY, agent_name: 'backend-agent', reason: 'timeout' },
+    payload: { status: 'failed', ticket_key: WORK_ITEM_ID, agent_name: 'backend-agent', reason: 'timeout' },
   }, PROJECT_NAME);
 
   assert.equal(calls.length, 2);
@@ -1542,4 +1530,184 @@ test('handleTaskStatus (local mode): failed transitions the work item to failed 
   const comment = calls.find(c => c.payload.command === 'appendComment');
   assert.equal(transition.payload.status, 'failed');
   assert.match(comment.payload.body, /timeout/);
+});
+
+// ---------------------------------------------------------------------------
+// Durable A2A Message Record REQ-04 — the gateway publishes its verdict on
+// each submission, and the outcome after the projection, as
+// `recordA2AVerdict` commands on the project's command stream.
+// ---------------------------------------------------------------------------
+
+function verdict(envelope, fields) {
+  return {
+    project: PROJECT_NAME,
+    payload: {
+      command: 'recordA2AVerdict',
+      actor: 'scrummaster',
+      taskId: envelope.taskId,
+      messageId: envelope.payload.message.messageId,
+      sourceMessageId: envelope.messageId,
+      ...fields,
+    },
+  };
+}
+
+test('REQ-04: an applied comment publishes applied before the projection and succeeded after it', async (t) => {
+  const order = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    order.push({ project, payload });
+    return { deduped: false };
+  });
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('a comment'), buildDataPart({ operation: 'comment' })],
+  });
+
+  await handleA2ASubmission(env, PROJECT_NAME);
+
+  assert.deepEqual(order.map(c => c.payload.command), ['recordA2AVerdict', 'appendComment', 'recordA2AVerdict']);
+  assert.deepEqual(order[0], verdict(env, { verdict: 'applied' }));
+  assert.deepEqual(order[2], verdict(env, { outcome: 'succeeded' }));
+});
+
+test('REQ-04: a projection that returns no outcome publishes applied, then the outcome failed', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('hand it over'), buildDataPart({ operation: 'reassign' })],
+  });
+
+  const outcome = await handleA2ASubmission(env, PROJECT_NAME);
+
+  assert.equal(outcome, null);
+  assert.deepEqual(calls.verdicts, [verdict(env, { verdict: 'applied' }), verdict(env, { outcome: 'failed' })]);
+});
+
+test('REQ-04: each early refusal publishes refused with its reason and nothing else', async (t) => {
+  const cases = [
+    {
+      reason: 'invalid',
+      build: ({ contextId, messageId }) => envelope({ contextId, referenceMessageId: messageId, state: 'in-progress', parts: [buildTextPart('x')] }),
+    },
+    {
+      reason: 'unknown_task',
+      build: () => {
+        const env = envelope({ contextId: 'ctx-x', state: 'working', parts: [buildTextPart('x')] });
+        env.taskId = 'wi-not-held';
+        env.payload.message.taskId = 'wi-not-held';
+        return env;
+      },
+    },
+    {
+      reason: 'wrong_project',
+      overrides: { projectName: 'hello-desktop' },
+      build: ({ contextId, messageId }) => envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] }),
+    },
+    {
+      reason: 'wrong_role',
+      build: ({ contextId, messageId }) => {
+        const env = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+        env.payload.message.role = 'client';
+        return env;
+      },
+    },
+  ];
+  for (const { reason, overrides, build } of cases) {
+    taskStore._reset();
+    const calls = [];
+    const verdicts = [];
+    const restore = t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+      (payload.command === 'recordA2AVerdict' ? verdicts : calls).push({ project, payload });
+    });
+    const env = build(registerTask(overrides));
+    const outcome = await handleA2ASubmission(env, PROJECT_NAME);
+    restore.mock.restore();
+
+    assert.equal(outcome, null, reason);
+    assert.deepEqual(calls, [], `${reason}: no projection`);
+    assert.deepEqual(verdicts, [verdict(env, { verdict: 'refused', reason })], reason);
+  }
+});
+
+test('REQ-04: an invalid submission with no A2A messageId publishes no command at all', async (t) => {
+  const calls = mockCanonicalWrites(t);
+  const { contextId, messageId } = registerTask();
+  const env = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+  delete env.payload.message.messageId;
+
+  assert.equal(await handleA2ASubmission(env, PROJECT_NAME), null);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(calls.verdicts, [], 'core cannot key it, so it is given no verdict');
+});
+
+test('REQ-04: a late submission publishes task_finished with the finished state, before its report', async (t) => {
+  const order = [];
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    order.push({ project, payload });
+  });
+  t.mock.method(canonicalWorkItems, 'getWorkItem', async (id) => ({ id, status: 'ready' }));
+  const { contextId, messageId } = registerTask();
+  const done = envelope({ contextId, referenceMessageId: messageId, state: 'completed', parts: [buildTextPart('done')] });
+  await handleA2ASubmission(done, PROJECT_NAME);
+  order.length = 0;
+
+  const late = envelope({
+    contextId, referenceMessageId: done.payload.message.messageId, state: 'working', parts: [buildTextPart('late')],
+  });
+  const outcome = await handleA2ASubmission(late, PROJECT_NAME);
+
+  assert.deepEqual(outcome, { ticket_key: WORK_ITEM_ID, alreadyFinished: 'completed' });
+  assert.deepEqual(order.map(c => c.payload.command), ['recordA2AVerdict', 'appendComment']);
+  assert.deepEqual(order[0], verdict(late, { verdict: 'refused', reason: 'task_finished', finishedState: 'completed' }));
+});
+
+test('REQ-04: a failed applied publication raises before any projection, and the redelivery records the message once', async (t) => {
+  const published = [];
+  let failApplied = true;
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (project, payload) => {
+    if (payload.command === 'recordA2AVerdict' && payload.verdict === 'applied' && failApplied) {
+      failApplied = false;
+      throw new Error('command stream unavailable');
+    }
+    published.push(payload);
+  });
+  const { contextId, messageId } = registerTask();
+  const env = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })],
+  });
+
+  await assert.rejects(handleA2ASubmission(env, PROJECT_NAME), /command stream unavailable/);
+  assert.deepEqual(published, [], 'nothing of the projection ran');
+
+  await handleA2ASubmission(env, PROJECT_NAME);
+  assert.deepEqual(published.map(p => p.verdict || p.outcome || p.command), ['applied', 'appendComment', 'succeeded']);
+  const record = taskStore.getTaskById(WORK_ITEM_ID);
+  assert.equal(record.messages.filter(m => m.messageId === env.payload.message.messageId).length, 1);
+});
+
+test('REQ-04: a failed refusal or outcome publication is logged and the handler returns its outcome', async (t) => {
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args.join(' ')));
+  t.mock.method(canonicalWorkItems, 'publishCommand', async (_project, payload) => {
+    if (payload.command === 'recordA2AVerdict' && payload.verdict !== 'applied') {
+      throw new Error('command stream unavailable');
+    }
+  });
+  const { contextId, messageId } = registerTask();
+
+  const comment = envelope({
+    contextId, referenceMessageId: messageId, state: 'working',
+    parts: [buildTextPart('note'), buildDataPart({ operation: 'comment' })],
+  });
+  assert.deepEqual(await handleA2ASubmission(comment, PROJECT_NAME), { ticket_key: WORK_ITEM_ID });
+
+  const spoofed = envelope({ contextId, referenceMessageId: messageId, state: 'working', parts: [buildTextPart('x')] });
+  spoofed.payload.message.role = 'client';
+  assert.equal(await handleA2ASubmission(spoofed, PROJECT_NAME), null);
+
+  assert.ok(errors.some(line => /outcome "succeeded".*could not|Could not publish the outcome "succeeded"/i.test(line)));
+  assert.ok(errors.some(line => /Could not publish the verdict "refused"/.test(line)));
 });

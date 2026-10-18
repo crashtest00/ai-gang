@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * Gateway publish helper — replaces `redis-cli publish jira-gateway:$PROJECT`
+ * in agent prompts with a supported Streams gateway command/helper.
+ *
+ * Usage:
+ *   node /agent-docs/commons/tools/gateway-publish.js <project-name> <path-to-json-file>
+ *   node /agent-docs/commons/tools/gateway-publish.js <project-name> -   (read JSON from stdin)
+ *
+ * This is the raw entry point: it takes a message the producer already holds,
+ * which is Jenkins' case (setup/Jenkinsfile.template's pipeline-failure
+ * handler). An agent names an operation and its fields instead, through
+ * a2a-submit.js, and authors no message.
+ *
+ * Wraps the raw payload in the versioned envelope and durably XADDs
+ * it to aigang:gateway:{project}. Exits non-zero (and prints to stderr) on
+ * any failure — the caller should treat a non-zero exit as "the gateway
+ * operation was NOT durably accepted" and retry.
+ *
+ * a2a-validate.js runs on the payload before the connection is opened, so a
+ * message the gateway would refuse only after it was durably written is
+ * refused here instead, naming the failing field(s) on stderr in the same call
+ * the producer made (V5.0 Deterministic Gateway Message Tooling REQ-01,
+ * REQ-02, REQ-03).
+ *
+ * The normal V1 payload shape is the canonical A2A submission documented in
+ * SCRUMMASTER_SPEC_v1.md:
+ *   { state, message: { taskId, contextId, ... }, artifacts?: [...] }
+ * taskId/contextId for the transport envelope come from that message —
+ * never from agent-supplied top-level fields, so an agent cannot misroute a
+ * submission by writing a different id at the top level. The
+ * ticket_key/parent_ticket_key/parentWorkItemId fallbacks below exist only for
+ * the operations that define their own structured-data contract outside A2A
+ * Message shape: materializeDecomposition, whose id field is the parent work
+ * item's canonical id (v5.1 REQ-06).
+ *
+ * Jenkins' two messages, `pipeline_retry` and `beta_deployed`, name no work
+ * item at all from v5.2: they carry the promoted pull requests, and core
+ * resolves each to a canonical work item (V5.2 Canonical Delivery State
+ * REQ-01, REQ-02). One message can resolve to several work items, so there is
+ * no single id for the transport envelope's `taskId` to carry and it is null
+ * — which the envelope allows, since `gateway_operation` is not one of the
+ * kinds that require task identity (`envelope.js`'s TASK_KINDS). The
+ * `ticket_key` fallback goes with the Jira-key regex that produced it.
+ */
+
+const fs = require('fs');
+const { createClient } = require('redis');
+const { buildEnvelope, KIND, toStreamFields } = require('./envelope');
+const { validateGatewayPayload, GatewayValidationError } = require('./a2a-validate');
+
+// An unreachable Redis used to retry for ever here, and this is the entry point
+// Jenkins calls: the `sh` step in setup/Jenkinsfile.template's failure handler
+// had no bound of its own, so the build hung indefinitely and
+// disableConcurrentBuilds() queued every later dev build behind it (V5.0 audit
+// row 9). Three connection attempts, each itself bounded, then the strategy
+// returns an Error — which makes `connect()` reject, so this tool exits
+// non-zero with the reason on stderr within seconds. a2a-submit.js, the
+// constructor entry point, carries the same two options for the same reason.
+const CONNECT_TIMEOUT_MS = 5000;
+const CONNECT_ATTEMPTS = 3;
+
+function boundedSocket(redisUrl) {
+  return {
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    reconnectStrategy: retries => (
+      retries + 1 >= CONNECT_ATTEMPTS
+        ? new Error(`${redisUrl} is unreachable — gave up after ${CONNECT_ATTEMPTS} connection attempts`)
+        : Math.min(200 * 2 ** retries, 1000)
+    ),
+  };
+}
+
+async function main() {
+  const [, , projectArg, pathArg] = process.argv;
+
+  if (!projectArg || !pathArg) {
+    console.error('Usage: gateway-publish.js <project-name> <path-to-json-file|->');
+    process.exit(1);
+  }
+
+  const raw = pathArg === '-'
+    ? fs.readFileSync(0, 'utf8')
+    : fs.readFileSync(pathArg, 'utf8');
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (err) {
+    console.error('Invalid JSON payload:', err.message);
+    process.exit(1);
+  }
+
+  // Before the envelope, before the connection, before any XADD.
+  try {
+    validateGatewayPayload(payload);
+  } catch (err) {
+    if (!(err instanceof GatewayValidationError)) throw err;
+    console.error(`[gateway-publish] Refused: this ${err.kind} payload is not valid, so nothing was published:`);
+    for (const problem of err.errors) console.error(`  - ${problem}`);
+    process.exit(1);
+  }
+
+  const project = projectArg.toLowerCase();
+  const stream = `aigang:gateway:${project}`;
+
+  const envelope = buildEnvelope({
+    kind: KIND.GATEWAY_OPERATION,
+    project,
+    taskId: payload.message?.taskId || payload.parent_ticket_key || payload.parentWorkItemId || null,
+    contextId: payload.message?.contextId || null,
+    payload,
+  });
+
+  const redisUrl = `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
+  const client = createClient({ url: redisUrl, socket: boundedSocket(redisUrl) });
+  client.on('error', err => console.error('[gateway-publish] Redis error:', err.message));
+
+  try {
+    await client.connect();
+    const entryId = await client.xAdd(stream, '*', toStreamFields(envelope));
+    console.log(`Accepted: ${stream} entry ${entryId} (messageId=${envelope.messageId})`);
+  } catch (err) {
+    console.error('[gateway-publish] Failed to durably enqueue:', err.message);
+    process.exitCode = 1;
+  } finally {
+    await client.quit().catch(() => {});
+  }
+}
+
+main();

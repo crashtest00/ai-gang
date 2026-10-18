@@ -17,7 +17,6 @@
 #
 # Prerequisites:
 #   - ~/ai-gang/.env contains:
-#       JIRA_URL, JIRA_EMAIL, JIRA_TOKEN
 #       GITHUB_TOKEN
 #       JENKINS_URL      (optional — set after first boot, used by ScrumMaster)
 
@@ -57,7 +56,7 @@ ok "Jenkins directory structure"
 
 # Required secrets
 MISSING_VARS=()
-for var in JIRA_URL JIRA_EMAIL JIRA_TOKEN GITHUB_TOKEN; do
+for var in GITHUB_TOKEN; do
   [[ -z "${!var:-}" ]] && MISSING_VARS+=("$var")
 done
 
@@ -119,7 +118,7 @@ else
 fi
 
 # Export so docker compose picks them up
-export JIRA_URL JIRA_EMAIL JIRA_TOKEN GITHUB_TOKEN JENKINS_ADMIN_PASSWORD JENKINS_URL
+export GITHUB_TOKEN JENKINS_ADMIN_PASSWORD JENKINS_URL
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 step "Building Jenkins image (plugins install during build — takes a few minutes)..."
@@ -162,29 +161,6 @@ while true; do
   sleep $INTERVAL
   elapsed=$((elapsed + INTERVAL))
 done
-
-# ── Verify Jira connection ─────────────────────────────────────────────────────
-step "Verifying Jira connection via Jenkins API..."
-
-CRUMB=$(curl -s -u "admin:${JENKINS_ADMIN_PASSWORD}" \
-  "$JENKINS_LOCAL/crumbIssuer/api/json" | jq -r '.crumb // empty')
-
-if [[ -z "$CRUMB" ]]; then
-  warn "Could not retrieve Jenkins crumb — skipping Jira connection test."
-  warn "Verify manually: Manage Jenkins → System → Jira → Test Connection."
-else
-  jira_test=$(curl -s -u "admin:${JENKINS_ADMIN_PASSWORD}" \
-    -H "Jenkins-Crumb: $CRUMB" \
-    -X POST "$JENKINS_LOCAL/descriptorByName/hudson.plugins.jira.JiraGlobalConfiguration/testConnection" \
-    -d "url=${JIRA_URL}&credentialsId=jira-token" 2>/dev/null || true)
-
-  if echo "$jira_test" | grep -qi "success\|ok"; then
-    ok "Jira connection verified."
-  else
-    warn "Jira connection test inconclusive — verify manually."
-    warn "Manage Jenkins → System → Jira → Test Connection."
-  fi
-fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

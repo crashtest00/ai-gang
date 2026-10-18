@@ -3,11 +3,11 @@
 // The reload that makes the configured project reachable, and the health
 // check that proves it happened.
 //
-// Both the work-item service and ScrumMaster read
+// Both the core service and ScrumMaster read
 // services/scrummaster/config/projects.json once, when they start, and
 // both are started before the step that registers the configured project
 // in it. ScrumMaster has always been restarted at the end of the step
-// that starts the project container; the work-item service was not, and
+// that starts the project container; the core service was not, and
 // on a live run that was the whole of the failure: a story was
 // dispatched, the commands it produced landed on
 // aigang:workitems:<project> with no consumer group reading them, no
@@ -29,18 +29,20 @@ const { spawnSync } = require('node:child_process');
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const STARTUP_DIR = path.join(REPO_ROOT, 'scripts', 'startup');
 const PROJECT = 'acceptance-project';
+const MEMORY_CONTAINERS = ['memory-copier', 'memory-api', 'memory-extraction', 'memory-extractor', 'memory-indexer'];
 const COMMAND_STREAM = `aigang:workitems:${PROJECT}`;
 
 const CONFIG = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  authMethod: 'api-key',
   project: { name: PROJECT, type: 'web', stack: 'node-express' },
   repository: { url: 'https://github.com/an-org/a-repo.git' },
 };
 
-// A `docker` that answers the four questions these two steps ask —
-// is the project container running, does the API answer /health, is the
-// project's subscriber up, and does the project's command stream have a
-// consumer group — and records every call. The consumer group appears
+// A `docker` that answers the questions these two steps ask — is the
+// project container running, are Memory's copier and API running, does the
+// API answer /health, is the project's subscriber up, and does the
+// project's command stream have a consumer group — and records every call. The consumer group appears
 // when, and only when, the consumers have been restarted: without that
 // restart the stand-in behaves exactly as the daemon did on the live run.
 //
@@ -49,17 +51,17 @@ const CONFIG = {
 // redis-cli's own reply arriving in more than one read: the target group
 // is in the first write, everything after it (consumers, pending, and
 // more) in the second.
-function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds = 0 } = {}) {
+function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds = 0, stoppedContainers = [] } = {}) {
   const bin = path.join(dir, 'bin');
   fs.mkdirSync(bin, { recursive: true });
   const stub = path.join(bin, 'docker');
   const groupsReply = groupsReplyPauseSeconds > 0
     ? [
-        '        printf "name\\nworkitemservice\\n"',
+        '        printf "name\\ncore\\n"',
         `        sleep ${groupsReplyPauseSeconds}`,
         '        printf "consumers\\n1\\npending\\n0\\n"',
       ].join('\n')
-    : '        printf "name\\nworkitemservice\\nconsumers\\n1\\npending\\n0\\n"';
+    : '        printf "name\\ncore\\nconsumers\\n1\\npending\\n0\\n"';
   fs.writeFileSync(stub, [
     '#!/usr/bin/env bash',
     'printf "%s|%s\\n" "${PWD#$AIGANG_TEST_ROOT/}" "$*" >> "$AIGANG_TEST_ARGV"',
@@ -69,7 +71,16 @@ function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds =
     '  fi',
     '  exit 0',
     'fi',
-    'if [[ "$1" == "inspect" ]]; then printf "true\\n"; exit 0; fi',
+    // Memory's five containers (confirm-health.sh's `memory` check, through
+    // lib.sh's memory_running) report running unless named as stopped;
+    // any other inspect answers true, as before.
+    'if [[ "$1" == "inspect" ]]; then',
+    ...stoppedContainers.map((name) => `  if [[ "$*" == *" ${name}"* ]]; then printf "false\\n"; exit 0; fi`),
+    '  case "$*" in',
+    '    *" memory-copier"*|*" memory-api"*|*" memory-extraction"*|*" memory-extractor"*|*" memory-indexer"*) printf "true\\n"; exit 0 ;;',
+    '  esac',
+    '  printf "true\\n"; exit 0',
+    'fi',
     'if [[ "$1" == "exec" ]]; then',
     '  shift',
     '  case "$*" in',
@@ -99,7 +110,7 @@ function makeRoot() {
   fs.mkdirSync(path.join(root, 'projects', PROJECT), { recursive: true });
   fs.writeFileSync(path.join(root, 'projects', PROJECT, 'Dockerfile'), 'FROM node:22-alpine\n');
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   // The validator the steps read their decisions back through lives in
   // the real checkout, so it is linked rather than copied.
   fs.mkdirSync(path.join(root, 'setup', 'graphs', 'engine', 'lib'), { recursive: true });
@@ -168,7 +179,7 @@ function completeStepsBefore(id, env) {
 
 // ---- the reload ----
 
-test('the step that starts the project reloads the work-item service too, and waits for it', () => {
+test('the step that starts the project reloads the core service too, and waits for it', () => {
   const root = makeRoot();
   const env = environment(root);
   const result = runStep('start-project.sh', env);
@@ -179,7 +190,7 @@ test('the step that starts the project reloads the work-item service too, and wa
     restarts.map((c) => `${c.cwd}: ${c.command}`),
     [
       'services/scrummaster: compose restart scrummaster',
-      'services/work-item-service: compose restart api consumers',
+      'services/core: compose restart api consumers',
     ],
     'the project registry has to be reloaded in both services that read it'
   );
@@ -205,7 +216,7 @@ test('the outbox relay is left running — it never reads the project list', () 
   );
 });
 
-test('a work-item service that comes back still not serving the project fails the step, by name', () => {
+test('a core service that comes back still not serving the project fails the step, by name', () => {
   const root = makeRoot();
   const env = environment(root, { restartCreatesGroup: false });
   const result = runStep('start-project.sh', env);
@@ -218,7 +229,7 @@ test('a work-item service that comes back still not serving the project fails th
 
 // ---- the health check ----
 
-test('health confirms the work-item service is serving the configured project', () => {
+test('health confirms the core service is serving the configured project', () => {
   const root = makeRoot();
   const env = environment(root);
   fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
@@ -231,7 +242,7 @@ test('health confirms the work-item service is serving the configured project', 
     'the health check must ask about the configured project, not only about the containers'
   );
   const doc = record(env);
-  assert.equal(doc.services['workitem-consumers'], 'healthy');
+  assert.equal(doc.services['core-consumers'], 'healthy');
   assert.equal(doc.state, 'complete');
 });
 
@@ -251,7 +262,7 @@ test('the health check still recognizes the group once found, even while more of
   const result = runStep('confirm-health.sh', env);
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   const doc = record(env);
-  assert.equal(doc.services['workitem-consumers'], 'healthy');
+  assert.equal(doc.services['core-consumers'], 'healthy');
   assert.equal(doc.state, 'complete');
 });
 
@@ -264,14 +275,45 @@ test('health fails, naming the project, when the consumers are not serving it', 
 
   const result = runStep('confirm-health.sh', env);
   assert.notEqual(result.status, 0, 'a project nothing is consuming is not a healthy platform');
-  assert.match(result.stderr, /workitem-consumers: NOT healthy/);
+  assert.match(result.stderr, /core-consumers: NOT healthy/);
   assert.ok(result.stderr.includes(PROJECT), 'the diagnostic must name the project');
   assert.ok(result.stderr.includes(COMMAND_STREAM), `the diagnostic must name ${COMMAND_STREAM}`);
 
   const doc = record(env);
   assert.equal(doc.state, 'failed');
-  assert.equal(doc.services['workitem-consumers'], 'unhealthy');
+  assert.equal(doc.services['core-consumers'], 'unhealthy');
   assert.equal(doc.services.redis, 'healthy');
   assert.equal(doc.adminUrl, null, 'a failed health check must not publish an address to open');
   assert.ok(doc.error.includes(PROJECT));
 });
+
+// ---- Memory's check (Durable Agent Session Record REQ-01) ----
+
+test('health checks Memory, and passes when all five long-running containers are running', () => {
+  const root = makeRoot();
+  const env = environment(root);
+  fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
+  completeStepsBefore('confirm-health', env);
+
+  const result = runStep('confirm-health.sh', env);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(record(env).services.memory, 'healthy');
+  for (const name of MEMORY_CONTAINERS) {
+    assert.ok(calls(env).some((c) => c.command.startsWith('inspect') && c.command.includes(name)),
+      `the memory check must ask whether ${name} is running`);
+  }
+});
+
+for (const stopped of MEMORY_CONTAINERS) {
+  test(`health fails, naming memory, when ${stopped} is stopped`, () => {
+    const root = makeRoot();
+    const env = environment(root, { stoppedContainers: [stopped] });
+    fs.writeFileSync(env.AIGANG_TEST_GROUP_FLAG, 'restarted\n');
+    completeStepsBefore('confirm-health', env);
+
+    const result = runStep('confirm-health.sh', env);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not healthy: .*\bmemory\b/);
+    assert.equal(record(env).services.memory, 'unhealthy');
+  });
+}

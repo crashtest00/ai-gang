@@ -1,6 +1,6 @@
 # `docker compose up` here builds and starts exactly one container: the AI
 # Gang container. Everything else AI Gang runs — Redis, the work-item
-# service, ScrumMaster, the configured project's container — is created by
+# service, ScrumMaster, Memory, the configured project's container — is created by
 # that container's own initialization, as a sibling on this same daemon,
 # through each service's existing compose file. This file does not include
 # or replace any of them.

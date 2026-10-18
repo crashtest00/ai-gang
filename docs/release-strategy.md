@@ -98,7 +98,7 @@ Tester reviews on the Beta VM → moves Story to Done
 ```text
 Human creates a Jira Release ticket
     ↓
-Jenkins verifies `beta`'s queue is clean
+The `core` service verifies `beta`'s queue is clean
     (no story whose commits are on `beta` is still awaiting acceptance)
     ↓ clean
 Jenkins pins `beta`'s exact HEAD by creating `release/<sha>`

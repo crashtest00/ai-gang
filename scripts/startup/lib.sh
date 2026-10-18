@@ -24,10 +24,10 @@ AIGANG_STATE_DIR="${AIGANG_STATE_DIR:-$AIGANG_ROOT/.ai-gang}"
 AIGANG_STATUS_FILE="$AIGANG_STATE_DIR/status.json"
 AIGANG_IDENTITY_FILE="$AIGANG_STATE_DIR/config-identity.json"
 
-# The one address an operator opens. The work-item service's `api` service
-# publishes 127.0.0.1:9100 (services/work-item-service/docker-compose.yml)
+# The one address an operator opens. The core service's `api` service
+# publishes 127.0.0.1:9100 (services/core/docker-compose.yml)
 # and Django's admin site is mounted at /django-admin/
-# (services/work-item-service/workitemservice/urls.py). status.sh holds
+# (services/core/core/urls.py). status.sh holds
 # the value, since it is what writes it into the status record.
 AIGANG_ADMIN_URL="$("$STARTUP_DIR/status.sh" admin-url)"
 
@@ -157,6 +157,20 @@ env_value() {
   printf ''
 }
 
+# The name of the Claude credential an authentication method requires: the
+# <NAME> of the contract's `REQUIRED_IN_METHOD <method> <NAME>` line.
+# Nothing outside env-contract.sh writes those names.
+auth_credential_name() {
+  local method="$1" kind first second
+  while read -r kind first second; do
+    if [[ "$kind" == "REQUIRED_IN_METHOD" && "$first" == "$method" ]]; then
+      printf '%s' "$second"
+      return 0
+    fi
+  done < <("$STARTUP_DIR/env-contract.sh")
+  die "the env contract names no credential for authentication method '$method'"
+}
+
 status() {
   "$STARTUP_DIR/status.sh" "$@"
 }
@@ -178,24 +192,45 @@ end_step() {
   status step-done "$id"
 }
 
-# The four configured values, read back through the same validator that
+# The five configured values, read back through the same validator that
 # gated the run. Steps call this rather than parsing the configuration
 # themselves, so no step can act on a value the validator never approved.
-# Sets PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK and REPOSITORY_URL.
+# Sets PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK, REPOSITORY_URL and
+# AUTH_METHOD.
 load_decisions() {
   local output key value
   output="$("$STARTUP_DIR/validate-config.sh")" || exit 1
-  PROJECT_NAME=""; PROJECT_TYPE=""; PROJECT_STACK=""; REPOSITORY_URL=""
+  PROJECT_NAME=""; PROJECT_TYPE=""; PROJECT_STACK=""; REPOSITORY_URL=""; AUTH_METHOD=""
   while IFS='=' read -r key value; do
     case "$key" in
       PROJECT_NAME) PROJECT_NAME="$value" ;;
       PROJECT_TYPE) PROJECT_TYPE="$value" ;;
       PROJECT_STACK) PROJECT_STACK="$value" ;;
       REPOSITORY_URL) REPOSITORY_URL="$value" ;;
+      AUTH_METHOD) AUTH_METHOD="$value" ;;
     esac
   done <<< "$output"
-  [[ -n "$PROJECT_NAME" && -n "$PROJECT_TYPE" && -n "$PROJECT_STACK" && -n "$REPOSITORY_URL" ]] \
+  [[ -n "$PROJECT_NAME" && -n "$PROJECT_TYPE" && -n "$PROJECT_STACK" && -n "$REPOSITORY_URL" && -n "$AUTH_METHOD" ]] \
     || die "configuration validation did not produce the expected decisions"
+}
+
+# The shared harness volume every project container mounts its own
+# subdirectory of, at the agent harness's `projects/` directory (Durable
+# Agent Session Record REQ-01). Created by start-memory.sh;
+# scripts/init-project.sh refuses to generate a project without it.
+AIGANG_HARNESS_VOLUME=aigang-harness
+
+# Memory is up when all five of its long-running containers are running:
+# the copier, which keeps the archive; the API, which serves it and answers
+# retrieval; the extraction dispatcher; the extractor, which parses files for
+# it; and the indexer, which keeps the corpus index. (`migrate` is one-shot
+# and `memory-postgres` is the database; neither is checked here.) Used by
+# start-memory.sh and confirm-health.sh's `memory` check alike.
+memory_running() {
+  local name
+  for name in memory-copier memory-api memory-extraction memory-extractor memory-indexer; do
+    [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] || return 1
+  done
 }
 
 # `docker compose` run exactly where an operator would run it: from the
@@ -206,24 +241,24 @@ compose_in() {
   ( cd "$AIGANG_ROOT/$dir" && docker compose "$@" )
 }
 
-# The Django API of the work-item service, answering its own health
+# The Django API of the core service, answering its own health
 # endpoint from inside its container. Both the step that restarts it and
 # the step that confirms health ask the same question the same way.
 workitem_api_healthy() {
-  docker exec work-item-service curl -fsS http://localhost:9100/health
+  docker exec core-api curl -fsS http://localhost:9100/health
 }
 
-# One project's command channel in the work-item service: the stream its
+# One project's command channel in the core service: the stream its
 # commands are written to, and the consumer group its consumers read them
-# through (services/work-item-service/workitems/stream_topology.py —
+# through (services/core/workitems/stream_topology.py —
 # command_stream_name and COMMAND_GROUP).
-WORKITEM_COMMAND_GROUP="workitemservice"
+WORKITEM_COMMAND_GROUP="core"
 
 workitem_command_stream() {
   printf 'aigang:workitems:%s' "$1"
 }
 
-# True when the work-item service is actually consuming a project's
+# True when the core service is actually consuming a project's
 # commands. Its consumers process creates that project's consumer group
 # as it starts (workitems/streams.py, XGROUP CREATE with MKSTREAM), so
 # the group's presence is the one observable fact that says the project

@@ -1,6 +1,6 @@
 # ScrumMaster
 
-The routing service between the work-item store and the agent containers. It
+The routing service between the core service and the agent containers. It
 consumes canonical work-item events, decides what to dispatch and to whom,
 publishes the dispatch onto the assigned agent's stream, and applies what the
 agents send back — comments, subtasks, reassignments, outcomes — to the work
@@ -36,12 +36,12 @@ test compose file next door, which is where the port number comes from:
 
 ```bash
 # from the repository root, before running the tests
-docker compose -f services/work-item-service/docker-compose.test.yml up --wait
+docker compose -f services/core/docker-compose.test.yml up --wait
 
 cd services/scrummaster && npm test
 
 # from the repository root, when you are done
-docker compose -f services/work-item-service/docker-compose.test.yml down -v
+docker compose -f services/core/docker-compose.test.yml down -v
 ```
 
 `npm test` checks the port before it starts anything and stops with that

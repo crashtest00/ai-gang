@@ -152,3 +152,57 @@ test('the image carries a git identity, without which the first project commit f
   assert.match(text, /git config --system user\.name/);
   assert.match(text, /git config --system user\.email/);
 });
+
+// ---- Memory's compose file takes its database credential from Memory's .env alone ----
+// Platform startup runs with the core service's PGUSER/PGPASSWORD/PGDATABASE
+// in its environment, and Compose interpolates the calling environment before
+// any .env file. memory-postgres must therefore carry no ${...} reference for
+// its credential, or its database is initialised with Core's password while
+// migrate/memory-copier/memory-api/memory-extraction/memory-indexer use
+// Memory's own (REQ-01, REQ-02).
+
+const MEMORY_COMPOSE_PATH = path.join(REPO_ROOT, 'services', 'memory', 'docker-compose.yml');
+
+test("memory-postgres's credential does not come from host interpolation (static)", () => {
+  const compose = yaml.load(fs.readFileSync(MEMORY_COMPOSE_PATH, 'utf8'));
+  const service = compose.services['memory-postgres'];
+  const interpolated = JSON.stringify([service.environment || [], service.healthcheck || {}]);
+  assert.doesNotMatch(
+    interpolated,
+    /(?<!\$)\$\{?(PG|POSTGRES)[A-Z_]*/,
+    'memory-postgres references PG*/POSTGRES_* by ${...} interpolation, which the calling environment overrides'
+  );
+  assert.equal(service.env_file, '.env');
+});
+
+test("resolved memory-postgres credentials are Memory's .env values even when the caller's environment holds Core's", () => {
+  const { execFileSync } = require('node:child_process');
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-compose-'));
+  try {
+    fs.copyFileSync(MEMORY_COMPOSE_PATH, path.join(dir, 'docker-compose.yml'));
+    fs.writeFileSync(
+      path.join(dir, '.env'),
+      [
+        'PGUSER=memory',
+        'PGPASSWORD=memory-own-password',
+        'PGDATABASE=memory',
+        'POSTGRES_USER=memory',
+        'POSTGRES_PASSWORD=memory-own-password',
+        'POSTGRES_DB=memory',
+        '',
+      ].join('\n')
+    );
+    const out = execFileSync('docker', ['compose', '-f', path.join(dir, 'docker-compose.yml'), '--env-file', path.join(dir, '.env'), 'config', '--format', 'json'], {
+      env: { ...process.env, PGUSER: 'core', PGPASSWORD: 'core-password', PGDATABASE: 'core' },
+      encoding: 'utf8',
+    });
+    const service = JSON.parse(out).services['memory-postgres'];
+    assert.equal(service.environment.POSTGRES_USER, 'memory');
+    assert.equal(service.environment.POSTGRES_PASSWORD, 'memory-own-password');
+    assert.equal(service.environment.POSTGRES_DB, 'memory');
+    assert.doesNotMatch(JSON.stringify(service), /core-password/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

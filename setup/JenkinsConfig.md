@@ -2,7 +2,10 @@
 
 Setup checklist and configuration record for the AI Gang Jenkins master. Work through each section in order. Check off steps as completed.
 
-**Reference:** `DEVOPS_HANDBOOK_v1.md` for architectural context.
+**Reference:** the DevOps handbook, for architectural context. `JenkinsConfig.md` stays on the
+`/agent-docs` mount (V5.0 Agent Commons Amendment 1, decision 14-2), but the handbook does not: a
+dispatched DevOps session reads its own snapshot copy of it, at the path its dispatch context
+gives — not `DEVOPS_HANDBOOK_v1.md` beside this file on the mount.
 
 ---
 
@@ -10,9 +13,13 @@ Setup checklist and configuration record for the AI Gang Jenkins master. Work th
 
 Handled by `scripts/init-jenkins.sh`. Prerequisites before running:
 
-- `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `GITHUB_TOKEN` set in `~/ai-gang/.env`
-- `VERCEL_TOKEN` set in `~/ai-gang/.env` (optional — can be added later)
+- `GITHUB_TOKEN` set in `~/ai-gang/.env`
 - Docker and `docker compose` installed on the droplet
+
+Jenkins itself holds no Jira credential (`canonical-delivery-state.md`
+REQ-06): connecting a project to Jira is `core`'s `connect_jira` command,
+which reads `JIRA_URL`, `JIRA_EMAIL` and `JIRA_TOKEN` from
+`services/core/.env` (REQ-10) — unrelated to this section.
 
 ```bash
 ./scripts/init-jenkins.sh
@@ -29,13 +36,20 @@ Handled by `scripts/init-jenkins.sh`. Prerequisites before running:
 Installed automatically at Docker image build time via `jenkins/plugins.txt`. No manual step needed.
 
 Installed plugins:
-- **Generic Webhook Trigger** — receives Jira Done events from ScrumMaster
+- **Generic Webhook Trigger** — receives the release-job invocations ScrumMaster sends, carrying a canonical `workItemId`
 - **Docker Pipeline** — runs pipeline steps inside project containers
 - **GitHub** — PR webhook integration and status reporting
-- **Jira** — ticket status updates and comments from pipeline
+- **GitHub Branch Source** — required for `hello-world-pipeline`'s multibranch PR discovery and automatic webhook registration; not included in Workflow: Aggregator (`docs/ClaudeInstructions.md` §2.2)
 - **Credentials Binding** — injects secrets into pipeline steps
 - **Configuration as Code** — JCasC config applied on container start
 - **Job DSL** — `release-candidate`, `production-promote`, and `release-preview-teardown` jobs created on first boot (see §6); `jenkins-cache-retention-nightly` and `jenkins-disk-usage-sweep` jobs also created on first boot (see §10)
+
+Also installed, as pipeline prerequisites rather than AI-Gang-specific
+configuration: Git, Pipeline: Model Definition, Pipeline: Workflow
+Aggregator. See `jenkins/plugins.txt` for the exact, versioned list.
+
+No Jira plugin: Jenkins makes no Jira write in any mode — `core`'s outbound
+writer does, through v5.1's client (`canonical-delivery-state.md` REQ-06).
 
 ---
 
@@ -45,8 +59,8 @@ Injected automatically via JCasC (`jenkins/jenkins.yaml`) from environment varia
 
 | Credential ID | Env var | Purpose |
 |---|---|---|
-| `jira-api-token` | `JIRA_API_TOKEN` | Jira plugin auth |
 | `github-token` | `GITHUB_TOKEN` | PR auto-merge (`gh pr merge`), release/prod PRs |
+| `github-api-token` | `GITHUB_TOKEN` | Same PAT, bound as Secret Text: the classic GitHub plugin's webhook/status-check management only accepts that credential kind, not Username/Password (`jenkins.yaml`'s `gitHubPluginConfig`) |
 
 Deploy credentials will be added here once deployment targets are decided.
 
@@ -63,7 +77,7 @@ generic permissions error, not an obvious one:
 
 | Permission | Classic PAT scope | Fine-grained PAT permission | Needed for |
 |---|---|---|---|
-| Read/write commit statuses | `repo:status` | Commit statuses: Read and write | PR checks showing up at all (§2.3 above) |
+| Read/write commit statuses | `repo:status` | Commit statuses: Read and write | PR checks showing up at all (§2 above: the GitHub plugin) |
 | Merge PRs | `repo` | Pull requests: Read and write | Auto-merge to `dev`; merging the frozen `release/<sha> → prod` PR |
 | Trigger workflows | `workflow` | Actions: Read and write | `gh workflow run build-desktop.yml` |
 | Push tags | `repo` | Contents: Read and write | Pushing the `vX.Y.Z` release tag on production approval |
@@ -75,12 +89,16 @@ to do once it tries.
 
 ---
 
-## 4. Jira Integration
+## 4. Jira Integration — retired, v5.2
 
-Configured automatically via JCasC from `JIRA_URL` and `JIRA_API_TOKEN` in `~/ai-gang/.env`.
-
-- [ ] Verify: **Manage Jenkins → System → Jira → Test Connection** shows success
-  - If it fails, check `JIRA_URL` format (must include `https://`) and that `JIRA_API_TOKEN` is valid
+**Nothing to configure here.** Through v5.1 this section documented Jenkins'
+own Jira plugin, credential and connection test. `canonical-delivery-state.md`
+REQ-06 retires all of it: Jenkins holds no Jira credential and writes to no
+tracker in any mode. A project's Jira connection is `core`'s
+`connect_jira`/`disconnect_jira` management commands (REQ-10), run in
+`core`'s own environment — see `setup/JIRA_SPEC_v1.md` and
+`DEVOPS_HANDBOOK_v1.md`'s Jira Integration section for that configuration;
+neither is a Jenkins step.
 
 ---
 
@@ -99,7 +117,7 @@ Repos configured:
 
 ---
 
-## 6. Release Flow (dev → beta automatic, beta → prod via Release ticket)
+## 6. Release Flow (dev → beta automatic, beta → prod via a Release work item)
 
 Earlier iteration: a single `jira-done-promote` job fired on *every* Done
 transition and promoted `dev → beta` per ticket. That doesn't scale — N
@@ -107,27 +125,33 @@ stories means N promotions and N approvals — so promotion is now split into
 the three jobs described below (`dev → beta` automatic, `release-candidate`,
 and `production-promote`), batching many tickets' work into one release
 approval. There is no Jira automation rule driving any of it — ScrumMaster
-calls Jenkins directly in every case, same as before, just via these
-different jobs.
+calls Jenkins directly for a release in either mode, the same way, via these
+different jobs: a Jira-mode release event triggers its job exactly as a
+local-mode one does, naming only the canonical work-item id
+(`canonical-delivery-state.md` REQ-08).
 
-### dev → beta (automatic, no Jira involvement)
+### dev → beta (automatic, with no tracker call of any kind)
 
 Handled entirely inside each project's own per-project Jenkinsfile (see
-`setup/Jenkinsfile.template`) — not by any Jira transition, and not by a
+`setup/Jenkinsfile.template`) — not by any tracker transition, and not by a
 separate Jenkins job. It is two builds of that one file, because the PR
 build *is* the status check that unlocks the merge, and GitHub only merges
 after that build has ended:
 
 1. **PR build** (`PR-N`): Install → Test → Build, then `gh pr merge --auto`.
    GitHub squash-merges into `dev` the moment the build's final status lands.
-   Nothing beta- or Jira-status-related happens here; the ticket stays
-   In Progress.
+   Nothing beta-related happens here; the work item's status is left as it
+   is.
 2. **`dev` build**, triggered by the push that merge makes: Install → Test →
    Build on the merged tip, fast-forward `beta` to exactly that commit,
-   deploy it to the Beta VM, comment the Beta URL + SHA + build identifier
-   onto every ticket whose PR landed since `beta` was last promoted (found
-   via GitHub's commit → PR association over `origin/beta..dev`), then move
-   each of those tickets to In Review.
+   deploy it to the Beta VM, then publish a canonical event naming every
+   pull request promoted since `beta` was last promoted (found via GitHub's
+   commit → PR association over `origin/beta..dev`), the deployed SHA, the
+   build identifier and the Beta URL — carrying no tracker identifier.
+   `core` resolves each PR to its work item, posts the Beta URL + SHA +
+   build identifier as its evidence comment, and moves it to In Review,
+   through the outbound writer for a Jira-mode project, directly otherwise
+   (`canonical-delivery-state.md` REQ-01, REQ-04, REQ-05).
 
 Because the `dev` build works off `origin/beta..dev`, it copes with several
 PRs merging before it gets an executor, with a human merging from the GitHub
@@ -145,26 +169,49 @@ Build stages and the Beta URL/SHA comment step do not.
 
 ### beta → release candidate (`release-candidate` job)
 
-ScrumMaster's `handleReleaseRequested` (fired on `jira:issue_created` when
-`issuetype === 'Release'`) runs the beta-queue-clean check itself, then
-triggers this job:
+`core` runs the beta-queue-clean check itself (`store.py`'s
+`transition_status`) before publishing a local-mode release's `requested`
+event, which a local Release's request (`proposed` → `in-progress`) triggers
+(release-mode-parity.md REQ-09); a Jira-mode release's `requested` is published by the webhook
+consumer instead, on the Release ticket's creation, after the same
+canonical beta-queue query (`canonical-delivery-state.md` REQ-04, REQ-08).
+Either way ScrumMaster's `handleReleaseRequested` reacts to the event and
+triggers this job with the release's canonical work-item id — a Jira-mode
+release event triggers the same job the same way a local-mode one does:
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-candidate
-Body: { "issueKey": "REL-3", "projectName": "hello-world" }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world" }
 ```
 
 The job pins `beta`'s current SHA as the candidate, cuts `release/<sha>`,
 opens the `release/<sha> → prod` PR, deploys a SHA-pinned preview container
 to the Beta VM (reusing the image already built there — no rebuild), writes
-Candidate SHA / Build Identifier / Preview URL onto the Release ticket, posts
-a summary comment, and moves the ticket to **In Review**.
+Candidate SHA / Build Identifier / Preview URL onto the Release work item in
+`core` through `core`'s release-candidate report endpoint (in Jira mode one edit
+that pushes the three fields to the ticket), and `core` posts the candidate
+note there; when a native build ran, the report also carries its URL and
+status and `core` posts a separate comment `Native build (<status>): <URL>`,
+keyed `release-candidate:<sha>:native-build` (release-mode-parity.md
+REQ-12, REQ-13).
+
+`core` accepts the report only while it holds the Release at `in-progress`,
+in both modes (release-mode-parity.md REQ-09). A report for a Release at any
+other status (`proposed`, `in-review`, `done` or `cancelled`) is refused with
+a 400 `VALIDATION_ERROR` before anything happens: the report records nothing,
+posts no candidate or native-build comment and pushes nothing to Jira. The
+report call then fails the job, and the job's `post { failure }` step posts its
+usual `Failed to cut a release candidate` comment with the build log. That one
+comment (in Jira mode, its one Jira write) is the visible failure; it is a
+known limitation of REQ-09 (release-mode-parity.md §5). To report a new candidate for a Release already `in-review`, move it
+back to `in-progress` first; that move triggers no new candidate.
 
 For a desktop-lane project (detected by the presence of
 `.github/workflows/build-desktop.yml` in the checked-out repo — no separate
 config needed), the job also dispatches `build-desktop.yml` for the pinned SHA
-via `jenkins/scripts/trigger-native-build.sh` and includes the resulting build
-link and status in the same Jira comment as the web preview. See Desktop App
+via `jenkins/scripts/trigger-native-build.sh` and reports the resulting build
+link and status to `core`, which posts them as the separate native-build
+comment (REQ-12), not inside the candidate note. See Desktop App
 Support. A native build
 failure never fails this job — it's supplementary to the web preview.
 
@@ -172,20 +219,28 @@ failure never fails this job — it's supplementary to the web preview.
 - [ ] `BETA_VM_HOST` set in `~/ai-gang/.env` and passed through
       `jenkins/docker-compose.yml`
 - [ ] `PREVIEW_DOMAIN` set in `~/ai-gang/.env` (see `scripts/setup-cloudflare-tunnel.sh`)
-- [ ] `JIRA_CANDIDATE_SHA_FIELD_ID`, `JIRA_BUILD_IDENTIFIER_FIELD_ID`,
-      `JIRA_PREVIEW_URL_FIELD_ID` set (via `scripts/create-release-fields.sh`)
-      and passed through `jenkins/docker-compose.yml`
 - [ ] Beta VM remote-deploy mechanism installed — see `beta-vm/README.md`
 
-### Release ticket Done → production (`production-promote` job)
+The job reports candidate SHA, build identifier and preview URL to
+`core`'s `/admin/work-items/<id>/release-candidate` endpoint, in every
+mode (`canonical-delivery-state.md` REQ-06) — not to Jira fields Jenkins
+holds itself. A Jira-mode project's `JIRA_CANDIDATE_SHA_FIELD_ID`,
+`JIRA_BUILD_IDENTIFIER_FIELD_ID` and `JIRA_PREVIEW_URL_FIELD_ID` (created by
+`scripts/create-release-fields.sh`) are read by `core`'s outbound writer
+from `services/core/.env`, not by Jenkins; nothing passes them through
+`jenkins/docker-compose.yml`.
 
-ScrumMaster's `handleDone` now branches on issue type: a Story/Sub-task Done
-is a no-op (beta already has the code); a Release Done triggers this job —
-the single production-approval gate:
+### Release reaches `done` → production (`production-promote` job)
+
+`core` publishes the release event only for a release work item, so
+ScrumMaster's `handleDone` receives an already-resolved `release` and branches
+on nothing: it reads the Candidate SHA and triggers this job — the single
+production-approval gate. A Story or Sub-task reaching `done` publishes no
+release event at all, so no trigger exists for it (beta already has the code):
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=production-promote
-Body: { "issueKey": "REL-3", "projectName": "hello-world", "candidateSha": "abc1234..." }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world", "candidateSha": "abc1234..." }
 ```
 
 The job merges the frozen `release/<sha> → prod` PR (squash, no merge
@@ -197,7 +252,7 @@ at the approved SHA via `jenkins/scripts/tag-desktop-release.sh` — this push
 is what triggers `release-desktop.yml` on GitHub, which builds and publishes
 the cross-platform GitHub Release. Unlike the native-build stage above, a
 failure here fails the job (the tag *is* the desktop production artifact),
-and is reported through the same failure Jira comment as any other
+and is reported through the same failure comment as any other
 production-promote failure.
 
 - [ ] Verify job exists: Jenkins UI → `production-promote`
@@ -205,32 +260,52 @@ production-promote failure.
       `jenkins/docker-compose.yml`
 - [ ] `prod` branch protection restricts merges to this frozen PR (see §7)
 
-### Release ticket abandoned → preview teardown (`release-preview-teardown` job)
+### Release abandoned → preview teardown (`release-preview-teardown` job)
 
-Fired by `handleReleaseAbandoned` when a Release ticket's resolution is set
-to **Abandoned** without shipping:
+Fired by `handleReleaseAbandoned` when a release work item reaches
+`cancelled` without shipping — in Jira mode the person moves the ticket to the
+`Abandoned` status, which `core` maps to `cancelled` (REQ-14). `core` maps
+`cancelled` to the release event's `abandoned` kind and publishes it, and the
+handler tears the preview down:
 
 ```
 POST http://<JENKINS_URL>/generic-webhook-trigger/invoke?token=release-preview-teardown
-Body: { "issueKey": "REL-3", "projectName": "hello-world" }
+Body: { "workItemId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43", "projectName": "hello-world" }
 ```
 
 - [ ] Verify job exists: Jenkins UI → `release-preview-teardown`
 
 ### End-to-end test
 
-- [ ] Move a Story ticket's PR through: merge → beta auto-deploys → comment
-      posted → move ticket to Done (no promotion fires)
-- [ ] Create a Release ticket with an open Story still `In Review` on that
-      project → confirm it blocks with a comment naming the ticket
-- [ ] Resolve that Story, re-create the Release ticket → confirm a preview
-      link, SHA, and build identifier land on the ticket and it moves to
-      In Review
-- [ ] Move the Release ticket to Done → confirm the frozen PR merges and
-      production redeploys the previewed artifact
+These steps run against the canonical work items in `core`. They are written
+against a local-mode project; the same sequence on a Jira-mode project's
+Release goes through the ticket in Jira instead of the admin, and through
+`core`'s outbound writer (`canonical-delivery-state.md` REQ-09). A Jira-mode
+Release is abandoned by moving its ticket to the `Abandoned` status, which the
+provisioned workflow offers from every status; `Done` is not offered from
+`Abandoned`.
+
+- [ ] Move a Story's PR through: merge → beta auto-deploys → comment posted →
+      move the Story to `done` (no promotion fires, and no release event is
+      published for it)
+- [ ] With a Story still `in-review` on the target project, request a release
+      work item (move it from `proposed` to `in-progress`) → confirm `core`
+      refuses the request and comments on the release naming the outstanding
+      work items
+- [ ] Move that Story to `done`, retry the release's request (`proposed` →
+      `in-progress`) → confirm `core` publishes the `requested` release event,
+      ScrumMaster triggers `release-candidate`, and a preview link, SHA and
+      build identifier land on the release work item, which then moves to
+      `in-review`
+- [ ] Move the release work item to `done` → confirm `core` publishes the
+      `done` release event, the frozen PR merges, and production redeploys the
+      previewed artifact
+- [ ] Move a release work item to `cancelled` instead (in Jira mode, move its
+      ticket to `Abandoned`) → confirm the `abandoned` release event fires
+      `release-preview-teardown`
 - [ ] For a desktop-lane project (e.g. `hello-desktop`): confirm the release
-      candidate's Jira comment includes a native build link/status, and that
-      moving its Release ticket to Done pushes a `vX.Y.Z` tag and produces a
+      candidate carries a separate `Native build (<status>): <URL>` comment, and that moving
+      its release work item to `done` pushes a `vX.Y.Z` tag and produces a
       GitHub Release with Windows/macOS/Linux installers attached
 
 ---
@@ -347,16 +422,17 @@ Projects with Jenkinsfile in place:
 
 End-to-end verification after setup is complete.
 
-- [ ] Create a test branch `feature/GANG-TEST-jenkins-smoke`
+- [ ] Create a test branch `feature/jenkins-smoke`
 - [ ] Open a PR against `dev`
 - [ ] Confirm Jenkins pipeline triggers and runs
 - [ ] Confirm test pass → PR auto-merges to `dev`, `beta` fast-forwards, and the
       Beta VM redeploys automatically — no Jira transition involved
-- [ ] Confirm the ticket receives a comment with the Beta VM URL and commit SHA
-- [ ] Move the ticket to Done → confirm nothing fires (acceptance only)
-- [ ] Create a Release ticket targeting this project → confirm `release-candidate`
-      fires, a preview link lands on the ticket, and it moves to In Review
-- [ ] Move the Release ticket to Done → confirm `production-promote` fires,
+- [ ] Confirm the work item receives a comment with the Beta VM URL and commit SHA
+- [ ] Move the work item to `done` → confirm nothing fires (acceptance only)
+- [ ] Create a release work item targeting this project and request it
+      (`proposed` → `in-progress`) → confirm `release-candidate` fires and a
+      preview link lands on it, after which it is `in-review`
+- [ ] Move the release work item to `done` → confirm `production-promote` fires,
       the frozen PR merges, and production serves the previewed SHA
 
 ---
@@ -439,5 +515,4 @@ _Log actual values and decisions here as setup is completed._
 |---|---|---|
 | Droplet IP | | |
 | Jenkins version | | |
-| Jira org URL | | |
 | GitHub org | | |

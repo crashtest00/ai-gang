@@ -5,13 +5,20 @@ require('dotenv').config();
 const { connect, getClient } = require('./redis');
 const streams = require('./streams');
 const registry = require('./registry');
-const { startGatewaySubscriber } = require('./gateway');
+const canonicalWorkItems = require('./canonicalWorkItems');
+const { startGatewaySubscriber, stopGatewaySubscriber } = require('./gateway');
 const { createServer } = require('./server');
-const { scheduleAgentFieldAudit } = require('./audit');
-const { startJiraCatchupConsumers } = require('./jiraCatchupConsumer');
-const { startDispatchConsumers } = require('./dispatchConsumer');
+const { startDispatchConsumers, stopDispatchConsumers } = require('./dispatchConsumer');
 
 const PORT = process.env.PORT || 9000;
+
+// core's own consumer group on its command channel
+// (aigang:workitems:{project}), matching
+// services/core/workitems/stream_topology.py's COMMAND_GROUP exactly — a
+// local literal rather than a cross-service require, for the same reason
+// canonicalWorkItems.js keeps its own copy of the stream-naming contract
+// instead of requiring core's source tree.
+const CORE_COMMAND_GROUP = 'core';
 
 // Idempotently create every stream + consumer group this deployment will
 // ever address, before any producer or consumer starts (streams/groups
@@ -23,7 +30,6 @@ async function bootstrapStreams() {
 
   for (const projectName of registry.getProjectNames()) {
     await streams.ensureGroup(client, registry.gatewayStreamName(projectName), registry.GATEWAY_GROUP);
-    await streams.ensureGroup(client, registry.workItemEventStreamName(projectName), registry.JIRA_CATCHUP_GROUP);
     await streams.ensureGroup(client, registry.workItemEventStreamName(projectName), registry.DISPATCH_GROUP);
 
     for (const agent of registry.getEffectiveAgents(projectName)) {
@@ -40,12 +46,16 @@ async function bootstrapStreams() {
 }
 
 // Every stream + group this deployment addresses, for retention trimming.
+// Includes core's command stream (BF-08 finding 2): core's own
+// trim_acknowledged/trim_dead_letters have no caller, so without this entry
+// aigang:workitems:{project} is never trimmed. Same defaults as every other
+// entry here — no separate schedule.
 function everyStreamGroup() {
   const targets = [];
   for (const projectName of registry.getProjectNames()) {
     targets.push({ stream: registry.gatewayStreamName(projectName), group: registry.GATEWAY_GROUP });
-    targets.push({ stream: registry.workItemEventStreamName(projectName), group: registry.JIRA_CATCHUP_GROUP });
     targets.push({ stream: registry.workItemEventStreamName(projectName), group: registry.DISPATCH_GROUP });
+    targets.push({ stream: canonicalWorkItems.commandStreamName(projectName), group: CORE_COMMAND_GROUP });
     for (const agent of registry.getEffectiveAgents(projectName)) {
       const suffix = agent.routing.channelSuffix;
       targets.push({ stream: registry.agentStreamName(projectName, suffix), group: registry.agentGroupName(suffix) });
@@ -87,20 +97,42 @@ async function main() {
   await connect();
   await bootstrapStreams();
   await startGatewaySubscriber();
-  await startJiraCatchupConsumers();
   await startDispatchConsumers();
   scheduleRetention();
-
-  // Startup + every-24h Jira Agent-field drift audit. Runs against live
-  // Jira, so it starts only after redis.connect()
-  // succeeds — no point auditing before the service is otherwise healthy.
-  scheduleAgentFieldAudit();
 
   const app = createServer();
   app.listen(PORT, () => {
     console.log(`[scrummaster] Listening on port ${PORT}`);
   });
 }
+
+// BF-08 finding 1: without this, the gateway and dispatch consumer groups
+// are never released on shutdown — the mechanism behind a consumer that
+// outlived its run holding a group for 3h37m and corrupting later suites
+// (audit row 5). Wired to the existing stop functions (gateway.js's
+// stopGatewaySubscriber, dispatchConsumer.js's stopDispatchConsumers) —
+// no new shutdown mechanism. Guarded against a second signal arriving
+// while the first is still shutting down.
+let shuttingDown = false;
+
+// Relies on process.exit to close the retention setInterval and the Redis client.
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[scrummaster] ${signal} received, stopping gateway and dispatch consumers...`);
+  try {
+    await stopGatewaySubscriber();
+    await stopDispatchConsumers();
+    console.log('[scrummaster] Shutdown complete.');
+    process.exit(0);
+  } catch (err) {
+    console.error('[scrummaster] Error during shutdown:', err);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 main().catch(err => {
   console.error('[scrummaster] Fatal error:', err);

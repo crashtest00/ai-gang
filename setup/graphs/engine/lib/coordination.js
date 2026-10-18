@@ -14,7 +14,7 @@ const TERMINAL_STATUSES = new Set(['done', 'failed', 'cancelled', 'paused-for-hu
  *   - tracks each branch to a terminal or paused-for-human outcome in its
  *     own local record,
  * and nothing else. It deliberately has no method that calls out to
- * the canonical work-item store, Jira, or Redis/Streams, and no method
+ * the core service, Jira, or Redis/Streams, and no method
  * that edits a graph document.
  *
  * The local tracking record lives only in this instance's memory

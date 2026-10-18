@@ -196,7 +196,7 @@ echo ""
 echo "Copying deploy scripts and Traefik config to $BETA_VM_HOST..."
 ssh "$SSH_ADMIN" 'mkdir -p /tmp/beta-deploy-staging/scripts /tmp/beta-deploy-staging/traefik'
 scp -q "$DEPLOY_SRC"/deploy.sh "$DEPLOY_SRC"/preview-deploy.sh "$DEPLOY_SRC"/preview-teardown.sh \
-  "$DEPLOY_SRC"/preview-teardown-by-issue.sh "$DEPLOY_SRC"/forced-command.sh \
+  "$DEPLOY_SRC"/preview-teardown-by-work-item.sh "$DEPLOY_SRC"/forced-command.sh \
   "$SSH_ADMIN:/tmp/beta-deploy-staging/scripts/"
 scp -q "$TRAEFIK_SRC" "$SSH_ADMIN:/tmp/beta-deploy-staging/traefik/"
 

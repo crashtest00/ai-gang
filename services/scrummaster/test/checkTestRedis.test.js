@@ -37,7 +37,7 @@ test('the check fails fast and names what to start when nothing is listening', a
   assert.match(result.stderr, /localhost:16498/, 'it must say which address it could not reach');
   assert.match(
     result.stderr,
-    /docker compose -f services\/work-item-service\/docker-compose\.test\.yml up --wait/,
+    /docker compose -f services\/core\/docker-compose\.test\.yml up --wait/,
     'and name the one thing that provides it'
   );
 });

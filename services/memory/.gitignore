@@ -1,0 +1,5 @@
+# Memory's own test virtualenv (run_tests.sh); built inside the image, never committed.
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc

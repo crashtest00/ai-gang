@@ -28,7 +28,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# `redis` npm package for setup/lib/gateway-publish.js, which the Jenkinsfile
+# `redis` npm package for setup/commons/tools/gateway-publish.js, which the Jenkinsfile
 # invokes to publish the pipeline_retry message durably onto the gateway
 # Streams transport instead of legacy Pub/Sub.
 # gateway-publish.js itself reaches this image via setup/ being bind-mounted

@@ -93,8 +93,8 @@ test('both documents give the Django admin address the status record actually wr
 
 test('the admin address matches where the service is actually published and mounted', () => {
   const adminUrl = run('status.sh', 'admin-url').trim();
-  const compose = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'docker-compose.yml'));
-  const urls = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitemservice', 'urls.py'));
+  const compose = read(path.join(REPO_ROOT, 'services', 'core', 'docker-compose.yml'));
+  const urls = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'urls.py'));
   assert.match(compose, /"127\.0\.0\.1:9100:9100"/);
   assert.match(urls, /path\('django-admin\/', admin\.site\.urls\)/);
   assert.equal(adminUrl, 'http://127.0.0.1:9100/django-admin/');
@@ -190,7 +190,7 @@ test("the UserGuide's example configuration is one the validator accepts", () =>
 test('the services the documents say startup brings up are the ones it checks', () => {
   // confirm-health.sh is the definition of "AI Gang is up".
   const health = read(path.join(STARTUP_DIR, 'confirm-health.sh'));
-  for (const service of ['redis', 'work-item-service', 'scrummaster']) {
+  for (const service of ['redis', 'core-api', 'scrummaster', 'memory']) {
     assert.ok(health.includes(`check ${service} `), `confirm-health.sh does not check ${service}`);
   }
   assert.match(health, /check "\$PROJECT_NAME" project_ok/);
@@ -198,16 +198,20 @@ test('the services the documents say startup brings up are the ones it checks', 
   // Markdown wraps, so the guide is compared with its line breaks
   // flattened rather than as written.
   const guide = read(USER_GUIDE).replace(/\s+/g, ' ');
-  assert.ok(guide.includes('work-item service'));
+  assert.ok(guide.includes('core service'));
   assert.ok(guide.includes('ScrumMaster'));
   assert.ok(guide.includes('Redis'));
+  assert.ok(guide.includes('**Memory**'), 'the opening service list must name Memory');
+  const whatHappens = guide.slice(guide.indexOf('### What happens then'));
+  assert.match(whatHappens, /Redis, the core service, ScrumMaster, Memory,? and your project/,
+    "'What happens then' must list Memory among the services startup brings up");
   // Jenkins is not part of this flow and must not be claimed as part of it.
   assert.match(guide, /\*\*Jenkins\*\*[^.]*is a later addition/);
 });
 
 test('the phases the section claims to cover, and those it excludes, both exist in the document', () => {
   const doc = read(CLAUDE_DOC);
-  for (const heading of ['### 2.1 Redis', '### 2.2 ScrumMaster', '### 3.0 Create Project Repo',
+  for (const heading of ['### 2.1 Redis', '### 2.2 ScrumMaster', '### 2.6 Memory', '### 3.0 Create Project Repo',
     '### 3.1 Project Initialisation', '### 3.2 Container Setup', '### 3.5 Start the Redis Subscriber',
     '### 2.0 Cloudflare Tunnel', '### 2.3 Jenkins', '### 3.6 Jenkins Pipeline', '### 3.7 Release Promotion']) {
     assert.ok(doc.includes(heading), `the section refers to a phase with no heading: ${heading}`);
@@ -233,64 +237,97 @@ test('the end-to-end leg uses the work-item type and status the service actually
   assert.ok(leg.includes('`refinement-agent`'));
   assert.ok(leg.includes('`story`'));
   // store.py requires story detail before a story may leave 'proposed'.
-  const store = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'store.py'));
+  const store = read(path.join(REPO_ROOT, 'services', 'core', 'workitems', 'store.py'));
   assert.match(store, /if item\.type == 'story' and validity\['baseline'\] != 'proposed'/);
   assert.match(leg.replace(/\s+/g, ' '), /story fields .{0,40}(before|and moving)/i,
     'the leg should say the story fields have to be saved before the status moves');
 
   // The admin's story-detail inline is hidden on the add form, which is
   // why the sequence takes three saves rather than one.
-  const admin = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'admin.py'));
+  const admin = read(path.join(REPO_ROOT, 'services', 'core', 'workitems', 'admin.py'));
   assert.match(admin, /def get_inlines\(self, request, obj\)/);
   assert.match(admin, /WorkItemStoryDetailInline/);
   assert.match(leg.replace(/\s+/g, ' '), /three saves/);
 
-  // An External key names a Jira issue: with no Jira integration configured
-  // the dispatch refuses the item rather than routing it through Jira, so
-  // the leg has to say to leave it empty.
+  // An External key names an issue in an external tracker. From v5.1 the
+  // dispatch never resolves one (v5.1 REQ-05): it copies the value onto the
+  // issue-like object for the prompt's display line and branches on no
+  // property of it, so the value has no effect on a project that is not in
+  // Jira mode. The leg still says to leave it empty, because a key that names
+  // nothing is misleading to whoever reads the work item next.
   const dispatchSource = read(path.join(REPO_ROOT, 'services', 'scrummaster', 'src', 'dispatchConsumer.js'));
-  assert.match(dispatchSource, /if \(full\.external_key\) \{[\s\S]{0,600}?mode\.mode !== 'jira'[\s\S]{0,600}?return jira\.getIssue\(full\.external_key\)/);
+  assert.match(dispatchSource, /externalKey: jiraMode \? \(full\.external_key \|\| null\) : null/,
+    'the external key is copied for display, unread');
+  assert.doesNotMatch(dispatchSource, /if \(full\.external_key\)/,
+    'and nothing branches on whether a work item has one');
   assert.match(leg.replace(/\s+/g, ' '), /External key.{0,40}leave it empty/i);
 });
 
-// ---- the work-item service's own environment example ----
+// ---- the core service's own environment example ----
 
-test('every variable the .env.example declares is one settings.py reads, or a documented Jira custom-field id read directly via os.environ', () => {
-  const example = read(path.join(REPO_ROOT, 'services', 'work-item-service', '.env.example'));
-  const settings = read(path.join(REPO_ROOT, 'services', 'work-item-service', 'workitemservice', 'settings.py'));
-  // The Jira custom-field ids (JIRA_*_FIELD_ID) are the one documented
-  // exception to "settings.py reads it": jira_interpret.py and
-  // webhook_consumer.py read them directly via os.environ, never through
-  // settings.py (see .env.example's own header and
+test('every variable the .env.example declares is one settings.py reads, or a documented os.environ reader names directly', () => {
+  const example = read(path.join(REPO_ROOT, 'services', 'core', '.env.example'));
+  const settings = read(path.join(REPO_ROOT, 'services', 'core', 'core', 'settings.py'));
+  // The Jira custom-field ids (JIRA_*_FIELD_ID), WEBHOOK_SECRET and, since
+  // V5.1's Jira client, the three Jira credentials are the documented
+  // exceptions to "settings.py reads it": jira_interpret.py,
+  // webhook_consumer.py, views.py and jira_client.py read them directly via
+  // os.environ, never through settings.py (see .env.example's own header and
   // scripts/startup/derive-env.sh's comment on the same variables). An
   // explicit list of reader files, not a wildcard over the package, so a
   // var declared in .env.example still has to name a real reader, not
   // merely live somewhere under workitems/.
-  const jiraReaders = [
-    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'jira_interpret.py'),
-    path.join(REPO_ROOT, 'services', 'work-item-service', 'workitems', 'webhook_consumer.py'),
+  const directReaders = [
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_interpret.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'webhook_consumer.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'views.py'),
+    path.join(REPO_ROOT, 'services', 'core', 'workitems', 'jira_client.py'),
   ].map(read);
   const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
   assert.ok(declared.length > 0);
   for (const name of new Set(declared)) {
-    const readsIt = settings.includes(`'${name}'`) || jiraReaders.some((source) => source.includes(`'${name}'`));
+    const readsIt = settings.includes(`'${name}'`) || directReaders.some((source) => source.includes(`'${name}'`));
     assert.ok(
       readsIt,
-      `${name} is in services/work-item-service/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py reads it`
+      `${name} is in services/core/.env.example but neither settings.py nor jira_interpret.py/webhook_consumer.py/views.py/jira_client.py reads it`
     );
   }
 });
 
-test('the variables derive-env.sh actually writes are all declared in the .env.example', () => {
-  const example = read(path.join(REPO_ROOT, 'services', 'work-item-service', '.env.example'));
-  const derive = read(path.join(STARTUP_DIR, 'derive-env.sh'));
-  const written = [...derive.matchAll(/echo "([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]);
-  assert.ok(written.length > 0);
-  for (const name of new Set(written)) {
-    assert.match(
-      example,
-      new RegExp(`^#?\\s*${name}=`, 'm'),
-      `derive-env.sh writes ${name} but the .env.example does not declare it`
-    );
+// derive-env.sh writes two generated files, each in its own block: the core
+// service's and Memory's. Each block's variables are checked against that
+// service's own .env.example, so a variable one service needs cannot pass
+// because the other declares it.
+function deriveEnvBlock(derive, heading) {
+  const start = derive.indexOf(`# --- ${heading} `);
+  assert.ok(start >= 0, `derive-env.sh has no "${heading}" block`);
+  const next = derive.indexOf('\n# --- ', start + 1);
+  return derive.slice(start, next === -1 ? undefined : next);
+}
+
+for (const [heading, service] of [['core service', 'core'], ['Memory', 'memory']]) {
+  test(`the variables derive-env.sh writes for ${service} are all declared in that service's .env.example`, () => {
+    const example = read(path.join(REPO_ROOT, 'services', service, '.env.example'));
+    const block = deriveEnvBlock(read(path.join(STARTUP_DIR, 'derive-env.sh')), heading);
+    const written = [...block.matchAll(/echo "([A-Z][A-Z0-9_]*)=/g)].map((m) => m[1]);
+    assert.ok(written.length > 0);
+    for (const name of new Set(written)) {
+      assert.match(
+        example,
+        new RegExp(`^#?\\s*${name}=`, 'm'),
+        `derive-env.sh writes ${name} for ${service} but services/${service}/.env.example does not declare it`
+      );
+    }
+  });
+}
+
+test("every variable Memory's .env.example declares is one Memory's settings read", () => {
+  const example = read(path.join(REPO_ROOT, 'services', 'memory', '.env.example'));
+  const settings = read(path.join(REPO_ROOT, 'services', 'memory', 'memory', 'settings.py'));
+  const declared = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]);
+  assert.ok(declared.length > 0);
+  // POSTGRES_* are read by the postgres image (memory-postgres), not by settings.py.
+  for (const name of new Set(declared.filter((n) => !n.startsWith('POSTGRES_')))) {
+    assert.ok(settings.includes(`'${name}'`), `${name} is in services/memory/.env.example but memory/settings.py does not read it`);
   }
 });

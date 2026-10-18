@@ -18,8 +18,8 @@
 //   WORKSPACE_ROOT           default /var/jenkins_home/workspace
 //   JENKINS_INTERNAL_URL     default http://localhost:8080 -- deliberately
 //     NOT the JENKINS_URL env var jenkins/docker-compose.yml already
-//     defines (that's the public-facing URL used in Jira links/email
-//     footers, e.g. behind a Cloudflare tunnel per setup/JenkinsConfig.md,
+//     defines (that's the public-facing URL used in build-notification
+//     links/email footers, e.g. behind a Cloudflare tunnel per setup/JenkinsConfig.md,
 //     and may not even be reachable from inside this same container). This
 //     script always wants to reach the controller's own local port.
 //   JENKINS_ADMIN_USER       default admin
