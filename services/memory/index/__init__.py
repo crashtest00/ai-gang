@@ -52,10 +52,12 @@ it records them once measured):
                        takes about 6.5 hours (1.24 s per unit measured over
                        2,000 units, tests/scale_bench.py); route latency
                        645 / 1,182 ms median / p95 over 543 units, and
-                       3.1 / 5.4 s over 20,000 synthetic units, where the
-                       full-text half takes 0.8-1.5 s and the embedding
-                       half about 0.15 s once the process holds the
-                       vectors; peak resident memory 424 MB (543 units)
+                       2.84 / 5.19 s over 20,000 synthetic units against
+                       2.55 / 4.57 s for full-text search alone on the same
+                       corpus and questions (gate 6: +0.29 s median). The
+                       full-text half is the floor there (2.32 s median);
+                       the embedding half takes 0.19 s once the process
+                       holds the vectors; peak resident memory 424 MB (543 units)
                        and 885 MB (20,000). Scale assumption: a project's
                        index of tens of thousands of units, compared in
                        process, with no vector index

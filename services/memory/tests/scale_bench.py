@@ -15,7 +15,11 @@ suite (it runs for many minutes); run it by name, under the suite lock:
    embedding 20,000 texts.
 3. **Query.** 50 of the set's questions are asked through ``POST /retrieve``
    with the route's defaults; median and p95 latency are reported, with the
-   process's peak resident memory.
+   process's peak resident memory. They are asked again with the route's
+   ranker replaced by full-text search alone (its relevance floor, no
+   embedding): the baseline gate 6 compares the hybrid against (median at
+   most 0.5 s above it). Each question's time in the full-text and the
+   embedding halves of the ranker is reported too.
 """
 
 import json
@@ -99,6 +103,33 @@ def test_scale(client, redis_client, closed_core):  # noqa: F811
         latency.append((time.perf_counter() - t1) * 1000)
         assert status == 200, body
 
+    from retrieval import ranking, service
+
+    halves = {'lexical': [], 'embedding': []}
+    for q in questions:
+        t1 = time.perf_counter()
+        ranking._lexical(q['question'], None, ranking.Params())
+        halves['lexical'].append((time.perf_counter() - t1) * 1000)
+        t1 = time.perf_counter()
+        ranking._similar(q['question'], None, 20)
+        halves['embedding'].append((time.perf_counter() - t1) * 1000)
+
+    def full_text_only(question, *, scope=None, limit=10, params=ranking.Params()):
+        found, present = ranking._lexical(question, scope, params)
+        return ranking._floored(found, present, params)[:limit]
+
+    real = service.ranking.rank
+    service.ranking.rank = full_text_only
+    baseline = []
+    try:
+        for q in questions:
+            t1 = time.perf_counter()
+            status, body = ask(client, q['question'], limit=10)
+            baseline.append((time.perf_counter() - t1) * 1000)
+            assert status == 200, body
+    finally:
+        service.ranking.rank = real
+
     out = {
         'model': f'{embedding.MODEL.name}@{embedding.MODEL.revision}',
         'embedded_units': embedded, 'embedded_chars_mean': round(chars / embedded),
@@ -106,6 +137,10 @@ def test_scale(client, redis_client, closed_core):  # noqa: F811
         'build_seconds_extrapolated_to_20000': round(build_seconds / embedded * TOTAL),
         'units_in_index': TOTAL, 'queries': len(latency),
         'route_latency_ms': {'median': round(statistics.median(latency), 1), 'p95': round(_p95(latency), 1)},
+        'route_latency_full_text_only_ms': {'median': round(statistics.median(baseline), 1),
+                                            'p95': round(_p95(baseline), 1)},
+        'ranker_halves_ms': {k: {'median': round(statistics.median(v), 1), 'p95': round(_p95(v), 1)}
+                             for k, v in halves.items()},
         'peak_rss_mb': round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
     }
     print('SCALE BENCH', json.dumps(out, indent=1))
