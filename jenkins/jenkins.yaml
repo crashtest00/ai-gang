@@ -155,10 +155,11 @@ jobs:
                     steps {
                       script {
                         // One call, store.report_release_candidate, and core decides the
-                        // rest by mode (V5.2 Canonical Delivery State REQ-06): in Jira mode
-                        // it pushes the three candidate fields to Jira in one edit and the
-                        // candidate is recorded from Jira's webhook, the In Review
-                        // transition being the writer's; in local mode it records the
+                        // rest by mode (V5.2 Canonical Delivery State REQ-06): in tracker
+                        // mode it pushes the three candidate fields to the external tracker
+                        // in one edit and the candidate is recorded from the tracker's
+                        // webhook, the In Review transition being the writer's; in local
+                        // mode it records the
                         // candidate directly and moves the Release to in-review (V5.3
                         // REQ-13, REQ-09). The work item is still `in-progress` when this
                         // job runs (a request moves it there, V5.3 REQ-09), so there is no
