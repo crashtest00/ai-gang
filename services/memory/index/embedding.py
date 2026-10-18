@@ -12,10 +12,11 @@ that cannot be embedded is recorded as an indexing failure (REQ-09) and a
 question that cannot be embedded fails, rather than either fetching weights.
 
 **Units longer than the model's input.** The model reads at most
-``MODEL.max_tokens`` tokens (512, with its two special tokens). A unit is at
-most 2,000 characters (a session turn 4,000), which is often more, so a unit
-is embedded as overlapping windows of its tokens, each within the limit, and
-it scores as its best window (``retrieval.ranking``). No text is cut off.
+``MODEL.max_tokens`` tokens (8,192, with its two special tokens). A unit is
+at most 2,000 characters (a session turn 4,000), far less, so every unit is
+one window. A longer text would be embedded as overlapping windows of its
+tokens, each within the limit, scoring as its best window
+(``retrieval.ranking``), so no text is ever cut off.
 
 **The stored form.** A unit's vector is its windows' L2-normalised float32
 vectors, one after another, packed as bytes in ``IndexUnit.embedding``
@@ -45,14 +46,18 @@ class ModelSpec:
 
 
 # Chosen on the frozen paraphrase set (strategy/v6.0/v6.1/eval-paraphrase/),
-# run through this module and retrieval.ranking (tests/test_retrieval_paraphrase.py).
+# run through this module and retrieval.ranking (tests/paraphrase_gate.py),
+# against BAAI/bge-small-en-v1.5 and three others (index/__init__.py). The
+# 8-bit quantised ONNX export of gte-modernbert-base: 768 dimensions, CLS
+# pooling, no query prefix, and an 8,192-token input, so every unit Memory
+# writes (at most 4,000 characters) fits in one window.
 MODEL = ModelSpec(
-    name='BAAI/bge-small-en-v1.5',
-    revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a',
-    dim=384,
-    max_tokens=512,
+    name='Alibaba-NLP/gte-modernbert-base',
+    revision='e7f32e3c00f91d699e8c43b53106206bcc72bb22',
+    dim=768,
+    max_tokens=8192,
     pooling='cls',
-    query_prefix='Represent this sentence for searching relevant passages: ',
+    query_prefix='',
 )
 
 # Tokens two neighbouring windows of one unit share, so a sentence cut by a
@@ -94,8 +99,8 @@ class _Model:
     def windows(self, text: str) -> list[list[int]]:
         ids = self.tokenizer.encode(text, add_special_tokens=False).ids
         size = MODEL.max_tokens - 2
-        step = size - WINDOW_OVERLAP
-        starts = range(0, max(len(ids) - WINDOW_OVERLAP, 1), step) if len(ids) > size else [0]
+        step = size - min(WINDOW_OVERLAP, size // 2)
+        starts = range(0, len(ids) - (size - step), step) if len(ids) > size else [0]
         return [[self.cls] + ids[s:s + size] + [self.sep] for s in starts]
 
     def encode(self, sequences: list[list[int]]) -> np.ndarray:

@@ -178,7 +178,10 @@ def test_req04_an_earlier_uploads_event_read_late_leaves_the_current_text_curren
     redis_client.xadd(ARTIFACTS, upload_event(artifact_id, first))      # the first upload's event, late
     index_once()
     assert [u.current for u in search('merlin rate')] == [True]
-    assert [c.source_key for c in ranking.rank('merlin rate')] == [f'artifact:{artifact_id}']
+    # First, and the only one of its source: the embedding ranking fuses in
+    # other units after it (track 5).
+    found = [c.source_key for c in ranking.rank('merlin rate')]
+    assert found[0] == f'artifact:{artifact_id}' and found.count(f'artifact:{artifact_id}') == 1
     assert not PendingArtifact.objects.exists() and not index_status()['incomplete']
 
 

@@ -22,7 +22,7 @@ export PGDATABASE="${PGDATABASE:-memory}"
 
 # The embedding model the suite runs (index/embedding.py). Tests read it from
 # here and never download it; the one-time setup below fetches it.
-export MEMORY_EMBED_MODEL_DIR="${MEMORY_EMBED_MODEL_DIR:-/tmp/aigang-memory-embedding-model/bge-small-en-v1.5-5c38ec7}"
+export MEMORY_EMBED_MODEL_DIR="${MEMORY_EMBED_MODEL_DIR:-/tmp/aigang-memory-embedding-model/gte-modernbert-base-e7f32e3}"
 export HF_HUB_OFFLINE=1
 
 EX_PREFLIGHT=78

@@ -409,17 +409,22 @@ def follow_platform(*, force: bool = False) -> int:
         store.record_failure(key, CLASS_PLATFORM, str(err), {'read': PLATFORM})
         return 0
     count = 0
-    with transaction.atomic():
-        IndexUnit.objects.filter(source_class=CLASS_PLATFORM).delete()
-        IndexSource.objects.filter(source_class=CLASS_PLATFORM).delete()
-        for path, text in documents:
-            count += store.replace_units(f'platform:{path}', CLASS_PLATFORM, {'commit': commit},
-                                         _cuts_with_lines(text, {'commit': commit, 'path': path},
-                                                          written.get(path, written[None])))
-        IndexState.objects.filter(pk=1).update(platform_commit=commit)
-        IndexFailure.objects.filter(source_key=key).delete()
-        IndexCursor.objects.get_or_create(name=PLATFORM)
-        IndexCursor.objects.filter(name=PLATFORM).update(caught_up=True, last_round_at=timezone.now())
+    try:
+        with transaction.atomic():
+            IndexUnit.objects.filter(source_class=CLASS_PLATFORM).delete()
+            IndexSource.objects.filter(source_class=CLASS_PLATFORM).delete()
+            for path, text in documents:
+                count += store.replace_units(f'platform:{path}', CLASS_PLATFORM, {'commit': commit},
+                                             _cuts_with_lines(text, {'commit': commit, 'path': path},
+                                                              written.get(path, written[None])))
+            IndexState.objects.filter(pk=1).update(platform_commit=commit)
+            IndexFailure.objects.filter(source_key=key).delete()
+            IndexCursor.objects.get_or_create(name=PLATFORM)
+            IndexCursor.objects.filter(name=PLATFORM).update(caught_up=True, last_round_at=timezone.now())
+    except Exception as err:  # noqa: BLE001 - REQ-09: e.g. the embedding model cannot run; recorded, retried
+        log.exception('indexing the platform corpus failed')
+        store.record_failure(key, CLASS_PLATFORM, f'{type(err).__name__}: {err}', {'read': PLATFORM})
+        return 0
     return count
 
 

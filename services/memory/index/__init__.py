@@ -13,6 +13,8 @@
                   field in Core's read (REQ-02; Knowledge Retrieval REQ-04)
     sessions.py   a transcript cut into turns (REQ-10)
     chunking.py   a text cut into located units (§4)
+    embedding.py  the local embedding model each unit and question is
+                  embedded by (REQ-03, REQ-06)
     platform.py   the platform corpus, read at the checkout's commit (REQ-08)
     status.py     the lag signal retrieval consumes (REQ-05)
     store.py      writing units, removals and failures (REQ-02, REQ-07–09)
@@ -24,11 +26,15 @@ commands.
 Values recorded at build (the specification leaves each to the build, and
 it records them once measured):
 
-    index structure    PostgreSQL full-text search: a generated ``tsvector``
-                       (``english`` configuration) over each unit's text,
-                       with a GIN index, in memory-postgres. No embedding
-                       model, so no weights in the image and none fetched
-                       at runtime (I-08), and no PostgreSQL extension
+    index structure    two per unit, in memory-postgres. PostgreSQL
+                       full-text search: a generated ``tsvector``
+                       (``english`` configuration) over the text, with a GIN
+                       index. And an embedding (``embedding.py``): the
+                       text's vectors from a local ONNX model, packed in
+                       ``IndexUnit.embedding``, compared in process. No
+                       PostgreSQL extension. The weights are baked into the
+                       image and never fetched at runtime (I-08)
+    embedding model    MODEL_PLACEHOLDER
     unit size          at most 2,000 characters (chunking.UNIT_MAX_CHARS);
                        a session turn's unit at most 4,000
                        (sessions.TURN_UNIT_MAX_CHARS)

@@ -15,18 +15,19 @@ set -euo pipefail
 dest="${1:?usage: fetch-embedding-model.sh <directory>}"
 
 # Keep in step with index/embedding.py's MODEL.
-repo='BAAI/bge-small-en-v1.5'
-revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a'
+# Each entry: the file in the model's repository, the name it is saved as,
+# and its SHA-256. The model is the 8-bit quantised ONNX export.
+repo='Alibaba-NLP/gte-modernbert-base'
+revision='e7f32e3c00f91d699e8c43b53106206bcc72bb22'
 files=(
-  'onnx/model.onnx 828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35'
-  'tokenizer.json d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66'
+  'onnx/model_int8.onnx model.onnx bae96b276d342bf86eeee07c1bdbc0c75bb82bf4033941aab7fabc1e33ee3b44'
+  'tokenizer.json tokenizer.json 6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30'
 )
 
 mkdir -p "$dest"
 for entry in "${files[@]}"; do
-  path="${entry% *}"
-  sum="${entry#* }"
-  out="$dest/$(basename "$path")"
+  read -r path name sum <<<"$entry"
+  out="$dest/$name"
   if [ -f "$out" ] && echo "$sum  $out" | sha256sum --check --status; then
     continue
   fi

@@ -17,8 +17,8 @@ from django.db.models.functions import Length, Mod
 from django.db.models.lookups import Exact, GreaterThan
 
 # Written out here, not imported from index.embedding, so this migration
-# keeps meaning what it meant if the model changes later: 384 float32s.
-VECTOR_BYTES = 384 * 4
+# keeps meaning what it meant if the model changes later: 768 float32s.
+VECTOR_BYTES = 768 * 4
 
 
 def empty_the_index(apps, schema_editor):
