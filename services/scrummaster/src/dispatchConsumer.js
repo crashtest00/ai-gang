@@ -228,7 +228,7 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
 // in both modes (release-mode-parity.md REQ-10), called from the status
 // transition in local mode and from `webhook_consumer.py`'s release handlers
 // in Jira mode, each event carrying the materialized Release's
-// canonical id and, as `project`, its Target Project — the former
+// canonical id and, as `project`, the project it belongs to — the former
 // Jira-mode early return here (which used to read the project's mode and
 // decline every such event, because nothing published one with a
 // `workItemId` before this stage) is gone, so this function triggers

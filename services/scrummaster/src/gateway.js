@@ -396,8 +396,8 @@ async function handlePipelineRetry(msg, envelope, projectName) {
 // dispatchConsumer.js's canonical pattern (the owner from
 // `assignee_agent_id`, the agent from the registry, the prompt from
 // `buildRetryPrompt`'s evidence). `e39e9ab`'s Jira-reading
-// `redispatchImplementationOwner`, which read the ticket's own preserved
-// Agent field off a live `jira.getIssue`, does not return.
+// `redispatchImplementationOwner`, which read the owner off a live tracker
+// issue fetch, does not return.
 //
 // A work item with no assignee, or an assignee the registry does not know, is
 // logged at error level as unresolved, naming the workItemId and the message,
