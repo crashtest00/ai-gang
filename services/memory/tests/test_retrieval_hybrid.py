@@ -99,3 +99,18 @@ def test_session_weight_applies_to_the_fused_score(client, evaluated):
     assert half['x1'] == pytest.approx(full['x1'] * 0.5, abs=1e-4)
     authored = [k for k in full if not k.startswith('x')]
     assert all(half[k] == full[k] for k in authored if k in half)
+
+
+def test_a_replaced_unit_is_ranked_by_its_new_embedding_not_a_kept_one(client, evaluated):
+    # The process keeps vectors it has read (ranking._VectorCache); a unit
+    # whose text changes is a new row, so its new vector is read.
+    question = 'Who has to sign off before we pay a customer back a large sum?'
+    assert evaluated[passages(client, question)[0]['unitId']] == 's4'
+    s4 = ev.PASSAGES['s4']
+    replaced = ev.Passage('s4', s4.source_class, 'REQ-30: Lighthouse lamps are cleaned every winter by the harbour crew.')
+    ev.seed([replaced])
+    by_unit = {u.id: u.source_key.split(':', 1)[1] for u in IndexUnit.objects.all()}
+    found = [by_unit[p['unitId']] for p in passages(client, question)]
+    assert 's4' not in found[:1]
+    assert by_unit[passages(client, 'When are the lighthouse lamps cleaned?')[0]['unitId']] == 's4'
+

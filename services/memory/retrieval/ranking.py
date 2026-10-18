@@ -22,6 +22,8 @@ keeps a unit only if its coverage reaches ``MIN_COVERAGE``, it holds
 (``index.embedding``; nothing leaves the deployment, REQ-08). The question
 is embedded by the same model, and a unit's similarity is the cosine of its
 best window, computed in process over the units in scope (``_similar``).
+Each unit's vector is read from the database once per process and kept
+(``_VectorCache``), since a unit's embedding never changes.
 
 **Fusion.** The two rankings, each cut to its best ``FUSION_DEPTH`` units
 (more if the caller asks for more), are fused by reciprocal rank fusion:
@@ -60,6 +62,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -231,24 +234,74 @@ def _floored(found: list[Candidate], present: int, params: Params) -> list[Candi
     return [c for c in kept if c.score * _weight(c, params) >= best * params.relative_floor]
 
 
+class _VectorCache:
+    """Unit vectors already read, by unit id and row version (``xmin``,
+    which any rewrite of the row changes). A unit's
+    embedding is written once, with the unit, and never changed: new text
+    is a new unit (``index.store.replace_units``). So a cached vector is
+    always the unit's own, and a question reads only the vectors of units
+    written since the last question, not every unit's. Which units are
+    candidates is still decided by each question's own query, with its scope
+    (REQ-06); the cache only spares reading their vectors again."""
+
+    def __init__(self):
+        self.vectors: dict = {}
+        self.lock = threading.Lock()
+        self.last: tuple = ((), None)
+
+    def matrix(self, keys: list):
+        """The stacked window vectors of ``keys`` that are still in the
+        index, the row each unit's windows start at, and which keys those
+        are."""
+        with self.lock:
+            if self.last[0] == tuple(keys):
+                return self.last[1]
+            missing = [k for k in keys if k not in self.vectors]
+            for start in range(0, len(missing), 2000):
+                chunk = missing[start:start + 2000]
+                with connection.cursor() as cur:
+                    cur.execute('SELECT id, xmin::text, embedding FROM index_unit WHERE id = ANY(%s)',
+                                [[unit_id for unit_id, _ in chunk]])
+                    for unit_id, version, blob in cur.fetchall():
+                        self.vectors[(unit_id, version)] = embedding.unpack(blob)
+            if len(self.vectors) > 2 * max(len(keys), 1000):   # drop units gone from the index
+                wanted = set(keys)
+                self.vectors = {k: v for k, v in self.vectors.items() if k in wanted}
+            # A unit removed between the two reads has no vector: it is no candidate.
+            present = [k for k in keys if k in self.vectors]
+            blocks = [self.vectors[k] for k in present]
+            stacked = None
+            if blocks:
+                starts = np.cumsum([0] + [len(b) for b in blocks[:-1]])
+                stacked = (np.concatenate(blocks), starts, present)
+            self.last = (tuple(keys), stacked)
+            return stacked
+
+
+_vectors = _VectorCache()
+
+
 def _similar(question: str, scope: Optional[str], depth: int) -> list[tuple[int, float, bool]]:
     """The units most similar to the question by embedding, as ``(unit id,
     cosine, is a session unit)``, best first: the best ``depth`` session
     units and the best ``depth`` of every other class (REQ-10)."""
     query = embedding.embed_query(question)
-    sql = 'SELECT id, source_class, embedding FROM index_unit WHERE current '
+    sql = 'SELECT id, source_class, xmin::text FROM index_unit WHERE current '
     args = []
     if scope is not None:
         sql += 'AND scope = %s '
         args.append(scope)
+    sql += 'ORDER BY id'
     with connection.cursor() as cur:
         cur.execute(sql, args)
         rows = cur.fetchall()
-    if not rows:
+    classes = {(row[0], row[2]): row[1] for row in rows}
+    stacked = _vectors.matrix([(row[0], row[2]) for row in rows])
+    if stacked is None:
         return []
-    blocks = [embedding.unpack(row[2]) for row in rows]
-    starts = np.cumsum([0] + [len(b) for b in blocks[:-1]])
-    sims = np.maximum.reduceat(np.vstack(blocks) @ query, starts)
+    vectors, starts, present = stacked
+    sims = np.maximum.reduceat(vectors @ query, starts)
+    rows = [(key[0], classes[key]) for key in present]
     ids = np.array([row[0] for row in rows])
     session = np.array([row[1] == CLASS_SESSION for row in rows])
     best = []

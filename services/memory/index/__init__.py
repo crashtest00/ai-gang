@@ -34,7 +34,31 @@ it records them once measured):
                        ``IndexUnit.embedding``, compared in process. No
                        PostgreSQL extension. The weights are baked into the
                        image and never fetched at runtime (I-08)
-    embedding model    MODEL_PLACEHOLDER
+    embedding model    Alibaba-NLP/gte-modernbert-base at e7f32e3, its 8-bit
+                       ONNX export (150 MB), under ONNX Runtime on CPU:
+                       768 dimensions, CLS pooling, an 8,192-token input
+                       (every unit fits one window; longer text would be
+                       cut into overlapping windows, never truncated).
+                       Chosen over BAAI/bge-small-en-v1.5 on the frozen
+                       paraphrase set through the real route
+                       (tests/paraphrase_gate.py): paraphrase hit@3 0.375
+                       against 0.225, lexical 0.95 for both. Also tried,
+                       outside the route: jina-embeddings-v2-small-en,
+                       snowflake-arctic-embed-s and -m-v1.5 (8-bit), and
+                       bge-base-en-v1.5
+    embedding cost     measured on a 4-vCPU host, no GPU: the frozen set's
+                       543 passages embed in 652 s (1.2 s per unit of
+                       about 1,200 characters), so a 20,000-unit rebuild
+                       takes about 6.5 hours (1.24 s per unit measured over
+                       2,000 units, tests/scale_bench.py); route latency
+                       645 / 1,182 ms median / p95 over 543 units, and
+                       3.1 / 5.4 s over 20,000 synthetic units, where the
+                       full-text half takes 0.8-1.5 s and the embedding
+                       half about 0.15 s once the process holds the
+                       vectors; peak resident memory 424 MB (543 units)
+                       and 885 MB (20,000). Scale assumption: a project's
+                       index of tens of thousands of units, compared in
+                       process, with no vector index
     unit size          at most 2,000 characters (chunking.UNIT_MAX_CHARS);
                        a session turn's unit at most 4,000
                        (sessions.TURN_UNIT_MAX_CHARS)
