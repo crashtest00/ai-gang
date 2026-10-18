@@ -7,7 +7,8 @@ embedding model run in this process with ONNX Runtime. Nothing is sent
 anywhere: the model's files are read from ``settings.MEMORY_EMBED_MODEL_DIR``,
 which Memory's image fills at build time (``scripts/fetch-embedding-model.sh``,
 the same script the test setup runs). This module never downloads. A missing
-or incomplete model directory is ``ModelUnavailable``, an error, so a unit
+or incomplete model directory, or one whose ``MODEL`` marker names another
+model than ``MODEL``, is ``ModelUnavailable``, an error, so a unit
 that cannot be embedded is recorded as an indexing failure (REQ-09) and a
 question that cannot be embedded fails, rather than either fetching weights.
 
@@ -41,7 +42,6 @@ class ModelSpec:
     revision: str
     dim: int
     max_tokens: int
-    pooling: str  # 'cls' or 'mean'
     query_prefix: str
 
 
@@ -56,7 +56,6 @@ MODEL = ModelSpec(
     revision='e7f32e3c00f91d699e8c43b53106206bcc72bb22',
     dim=768,
     max_tokens=8192,
-    pooling='cls',
     query_prefix='',
 )
 
@@ -65,6 +64,16 @@ MODEL = ModelSpec(
 WINDOW_OVERLAP = 64
 BATCH = 16
 MODEL_FILES = ('model.onnx', 'tokenizer.json')
+# The model directory's record of what it holds, ``<repo>@<revision>``,
+# written by scripts/fetch-embedding-model.sh after it has verified every
+# file. A directory whose marker does not name ``MODEL`` is refused, so the
+# script's pin and ``MODEL`` cannot drift apart unnoticed.
+MARKER = 'MODEL'
+
+
+def pinned() -> str:
+    """The marker a model directory must hold: ``MODEL``'s repo and revision."""
+    return f'{MODEL.name}@{MODEL.revision}'
 
 
 class ModelUnavailable(RuntimeError):
@@ -74,12 +83,19 @@ class ModelUnavailable(RuntimeError):
 
 class _Model:
     def __init__(self, directory: str):
-        missing = [f for f in MODEL_FILES if not os.path.isfile(os.path.join(directory, f))]
+        missing = [f for f in MODEL_FILES + (MARKER,) if not os.path.isfile(os.path.join(directory, f))]
         if missing:
             raise ModelUnavailable(
                 f"the embedding model {MODEL.name} is not in {directory!r} (missing {', '.join(missing)}). "
                 'Memory never downloads it: the image bakes it in at build time, and a host test run fetches '
                 'it once with scripts/fetch-embedding-model.sh')
+        with open(os.path.join(directory, MARKER), encoding='utf-8') as f:
+            marker = f.read().strip()
+        if marker != pinned():
+            raise ModelUnavailable(
+                f'{directory!r} holds the embedding model {marker!r}, not {pinned()!r}, the model this code '
+                'embeds with. Memory never downloads it: the image bakes it in at build time, and a host test '
+                'run fetches it once with scripts/fetch-embedding-model.sh')
         import onnxruntime
         from tokenizers import Tokenizer
 
@@ -118,11 +134,7 @@ class _Model:
             if 'token_type_ids' in self.inputs:
                 feed['token_type_ids'] = np.zeros_like(ids)
             hidden = self.session.run(None, feed)[0]
-            if MODEL.pooling == 'cls':
-                pooled = hidden[:, 0]
-            else:
-                weights = mask[:, :, None].astype(np.float32)
-                pooled = (hidden * weights).sum(axis=1) / np.maximum(weights.sum(axis=1), 1e-9)
+            pooled = hidden[:, 0]  # CLS pooling, as MODEL is trained for
             norms = np.linalg.norm(pooled, axis=1, keepdims=True)
             out[batch] = pooled / np.maximum(norms, 1e-12)
         return out
