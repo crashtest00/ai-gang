@@ -105,3 +105,37 @@ def test_req08_a_directory_inside_another_repository_is_not_taken_for_the_checko
     index_once()
     assert units(source_class='platform_document') == []
     assert 'not the top of a git checkout' in IndexFailure.objects.get(source_key=f'platform:{inner}').reason
+
+
+def test_req09_a_platform_corpus_that_fails_to_index_serves_no_earlier_passage_until_a_retry_succeeds(
+        ready, settings, tmp_path):
+    """Row 33: the platform corpus's failure is keyed by its checkout and its
+    units by document; a failure removes them all, and the retry restores
+    them at the new commit."""
+    index_once()
+    assert search('aurora valve')
+    model_dir = settings.MEMORY_EMBED_MODEL_DIR
+    (ready / 'docs' / 'UserGuide.md').write_text('# User guide\n\nThe borealis valve replaced the old one.\n')
+    new_commit = commit_all(ready)
+    settings.MEMORY_EMBED_MODEL_DIR = str(tmp_path / 'no-model')  # the model cannot run
+    index_once()
+    failure = IndexFailure.objects.get(source_key=f'platform:{ready}')
+    assert 'ModelUnavailable' in failure.reason
+    assert units(source_class='platform_document') == [] and search('aurora valve') == []
+    assert index_status()['incomplete']
+
+    settings.MEMORY_EMBED_MODEL_DIR = model_dir
+    call_command('index_retry')
+    assert not IndexFailure.objects.exists()
+    assert search('aurora valve') == [] and search('borealis valve')
+    assert {u.reference['commit'] for u in units(source_class='platform_document')} == {new_commit}
+
+
+def test_req09_a_checkout_that_cannot_be_read_removes_the_platform_passages_it_had(ready, settings):
+    index_once()
+    assert search('aurora valve')
+    inner = ready / 'docs'
+    settings.MEMORY_PLATFORM_CORPUS_ROOT = str(inner)
+    index_once()
+    assert IndexFailure.objects.filter(source_key=f'platform:{inner}').exists()
+    assert units(source_class='platform_document') == []

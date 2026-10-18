@@ -54,12 +54,23 @@ def replace_units(source_key: str, source_class: str, stamp: dict, units: Iterab
     and optionally ``written_at``/``current``), record what they were built
     from, and clear the source's failure, in one transaction.
 
-    Every unit's text is embedded here, before the transaction, so a unit
-    whose text changes is embedded again with it and a rebuild embeds every
-    unit afresh (REQ-03). A model that cannot run raises, and the caller
-    records the source's failure (REQ-09)."""
+    Each unit's text is embedded here, before the transaction, unless the
+    source already holds a unit of byte-identical text: that unit's stored
+    vector is the same model's vector of the same text (``embedding``
+    refuses a model directory that is not ``MODEL``), so it is kept, and
+    only new or changed text is embedded. A source that grows, such as an
+    active session's transcript or a work item's history, is re-indexed
+    without embedding its unchanged units again, which the freshness bound
+    depends on (REQ-04). A rebuild empties the index first, so it embeds
+    every unit afresh (REQ-03). A model that cannot run raises, and the
+    caller records the source's failure (REQ-09)."""
     units = list(units)
-    vectors = embedding.embed_units([unit['text'] for unit in units])
+    texts = [unit['text'] for unit in units]
+    known = _stored_vectors(source_key, texts)
+    new = [text for text in dict.fromkeys(texts) if text not in known]
+    if new:
+        known.update(zip(new, embedding.embed_units(new)))
+    vectors = [known[text] for text in texts]
     now = timezone.now()
     scope = scope_for(source_class)
     rows = [IndexUnit(source_class=source_class, scope=scope, source_key=source_key, work_item_id=work_item_id,
@@ -74,6 +85,16 @@ def replace_units(source_key: str, source_class: str, stamp: dict, units: Iterab
             'source_class': source_class, 'stamp': stamp, 'indexed_at': now, 'work_item_id': work_item_id})
         IndexFailure.objects.filter(source_key=source_key).delete()
     return len(rows)
+
+
+def _stored_vectors(source_key: str, texts: Iterable[str]) -> dict:
+    """The stored embedding of each of ``texts`` that a unit of the source
+    already holds, by text."""
+    wanted = set(texts)
+    if not wanted:
+        return {}
+    return {text: bytes(vector) for text, vector in IndexUnit.objects.filter(
+        source_key=source_key, text__in=wanted).values_list('text', 'embedding')}
 
 
 def remove_source(source_key: str) -> None:

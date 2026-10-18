@@ -199,3 +199,46 @@ def test_bookkeeping_lines_alone_produce_no_units(indexer, roots, copier):
     copier.reconcile()
     index_once()
     assert units(source_class='session') == []
+
+
+def test_req04_a_growing_session_is_reindexed_without_embedding_its_unchanged_turns_again(
+        indexer, roots, copier, monkeypatch):
+    """Row 31: an active session's archive copy grows with every record its
+    running turn writes. Each poll re-reads it, but the turns already
+    indexed are not embedded again: while the run is going nothing is
+    written, and when it ends only the new turn is embedded."""
+    from index import embedding
+    harness, _ = roots
+    s = Src(harness)
+    s.append([enqueue()] + chained(prompt('First run.'), asst('m1', text_block('The gecko check passed.')))
+             + [cost_state()])
+    running = chained(prompt('Second run.'), asst('m2', text_block('Now checking the iguana.')))
+    s.append([enqueue()] + running)
+    copier.reconcile()
+    index_once()
+    key = next(u.source_key for u in search('gecko'))
+    before = {u.text: (bytes(u.embedding), u.indexed_at) for u in units(source_key=key)}
+    assert before
+
+    embedded = []
+    real = embedding.embed_units
+    monkeypatch.setattr(embedding, 'embed_units', lambda texts: embedded.extend(texts) or real(texts))
+
+    # The run goes on: its transcript grows, its last end record does not move.
+    s.append(chained(asst('m3', text_block('Still checking the iguana.')), parent=running[-1]['uuid']))
+    copier.reconcile()
+    index_once()
+    assert embedded == []
+    assert {u.text: (bytes(u.embedding), u.indexed_at) for u in units(source_key=key)} == before
+
+    # The run ends: its turn is embedded, the first run's turn is not again.
+    s.append([cost_state()])
+    copier.reconcile()
+    index_once()
+    after = units(source_key=key)
+    new = [u.text for u in after if u.text not in before]
+    assert new and search('iguana')
+    assert sorted(embedded) == sorted(set(new))
+    for unit in after:
+        if unit.text in before:
+            assert bytes(unit.embedding) == before[unit.text][0]
