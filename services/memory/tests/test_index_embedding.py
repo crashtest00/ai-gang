@@ -8,7 +8,9 @@ The model is read from the directory run_tests.sh names
 no test here downloads anything."""
 
 import dataclasses
+import re
 import socket
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,7 +21,7 @@ from index import embedding, store
 from index.models import CLASS_LIBRARY, IndexFailure, IndexUnit
 from index.status import index_status
 from tests.index_support import (  # noqa: F401 - fixtures
-    archive_api, checkout, core, index_once, redis_client, search, seeded,
+    archive_api, checkout, core, index_once, redis_client, search, seeded, units,
 )
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -89,6 +91,7 @@ def test_rebuild_embeds_every_unit_afresh(seeded, core, roots, monkeypatch):
 
 def test_a_missing_model_is_an_error_recorded_as_the_records_failure_never_a_download(
         core, redis_client, archive_api, checkout, settings, tmp_path, monkeypatch):
+    model_dir = settings.MEMORY_EMBED_MODEL_DIR
     settings.MEMORY_EMBED_MODEL_DIR = str(tmp_path / 'no-model')
     connections = []
     monkeypatch.setattr(socket.socket, 'connect', lambda self, address: connections.append(address) or
@@ -106,6 +109,13 @@ def test_a_missing_model_is_an_error_recorded_as_the_records_failure_never_a_dow
     assert search('heron pond') == []
     assert index_status()['incomplete']
 
+    # REQ-09: once the model is back, the indexer's own retry indexes it.
+    settings.MEMORY_EMBED_MODEL_DIR = model_dir
+    index_once()
+    assert not IndexFailure.objects.exists()
+    [unit] = search('heron pond')
+    assert embedding.unpack(unit.embedding).shape == (1, embedding.MODEL.dim)
+
 
 def test_loading_the_model_opens_no_network_connection(monkeypatch):
     embedding._loaded.clear()
@@ -119,3 +129,125 @@ def test_loading_the_model_opens_no_network_connection(monkeypatch):
     vectors = embedding.embed_units(['The kingfisher perch was repainted.'])
     query = embedding.embed_query('Who repainted the perch?')
     assert connections == [] and vectors and query.shape == (embedding.MODEL.dim,)
+
+
+# --- Row 31: an unchanged text keeps its vector (REQ-04's freshness bound) ------
+
+@pytest.fixture
+def embedded(monkeypatch):
+    """Every text the real model is asked to embed, from here on."""
+    texts = []
+    real = embedding.embed_units
+    monkeypatch.setattr(embedding, 'embed_units', lambda batch: texts.extend(batch) or real(batch))
+    return texts
+
+
+def _vectors(source_key):
+    return {u.text: bytes(u.embedding) for u in units(source_key=source_key)}
+
+
+def test_req04_a_work_item_that_gains_history_and_a_comment_embeds_only_the_new_text(
+        core, redis_client, archive_api, checkout, embedded):
+    item = core.work_item('Calibrate the narwhal sensor', 'The narwhal sensor drifts in cold rooms.',
+                          history=[('status', 'todo', 'in_progress')])
+    index_once()
+    key = f"work_item:{item['id']}"
+    before = _vectors(key)
+    assert len(before) == 2  # its fields and its history
+
+    embedded.clear()
+    item['history'].append({'id': 'h-2', 'work_item_id': item['id'], 'field': 'status', 'old_value': 'in_progress',
+                            'new_value': 'review', 'actor': 'agent', 'occurred_at': '2026-10-18T10:00:00+00:00'})
+    core.put('work_items', item)
+    comment = core.comment(item['id'], 'The pelican cache was the culprit.')
+    index_once()
+
+    after = _vectors(key)
+    kept = {text for text in after if text in before}
+    changed = set(after) - kept
+    assert len(kept) == 1 and len(changed) == 1  # the fields unchanged, the history grown
+    assert all(after[text] == before[text] for text in kept)
+    assert set(embedded) == changed | set(_vectors(f"comment:{comment['id']}"))
+    assert len(embedded) == len(set(embedded))
+
+
+def test_req04_an_a2a_task_that_gains_a_message_embeds_only_the_new_message(
+        core, redis_client, archive_api, checkout, embedded):
+    task = core.a2a_task(['Requesting review of the ocelot migration.'])
+    index_once()
+    key = f"a2a:{task['id']}"
+    before = _vectors(key)
+    embedded.clear()
+    task['messages'].append({**task['messages'][0], 'messageId': 'msg-second', 'entryId': '1-0',
+                             'parts': [{'kind': 'text', 'text': 'The ocelot migration is approved.'}]})
+    core.put('a2a', task)
+    index_once()
+    after = _vectors(key)
+    assert set(before) < set(after)
+    assert all(after[text] == vector for text, vector in before.items())
+    assert set(embedded) == set(after) - set(before)
+
+
+def test_req03_an_edited_record_is_embedded_again_through_the_indexer(core, redis_client, archive_api, checkout):
+    """Row 34: a record edited at its owner gets its new text's vector when
+    the indexer follows it, not the old text's."""
+    item = core.work_item('Check the heron pond', 'The heron pond freezes in January.')
+    index_once()
+    [old] = search('heron pond freezes')
+    item['description'] = 'Invoices are exported as CSV on the first of the month.'
+    core.put('work_items', item)
+    index_once()
+    assert search('heron pond freezes') == []
+    [new] = search('invoices exported')
+    assert new.text != old.text
+    assert not np.allclose(embedding.unpack(old.embedding), embedding.unpack(new.embedding), atol=1e-3)
+    fresh = embedding.unpack(embedding.embed_units([new.text])[0])
+    assert np.allclose(embedding.unpack(new.embedding), fresh, atol=1e-4)
+
+
+# --- Row 35: the model directory must hold MODEL, by its marker -------------------
+
+def test_the_fetch_scripts_pin_is_the_model_embedding_py_embeds_with():
+    script = (Path(__file__).resolve().parents[1] / 'scripts' / 'fetch-embedding-model.sh').read_text()
+    repo = re.search(r"^repo='([^']+)'$", script, re.M).group(1)
+    revision = re.search(r"^revision='([^']+)'$", script, re.M).group(1)
+    assert (repo, revision) == (embedding.MODEL.name, embedding.MODEL.revision)
+    # And the marker it writes is the one the model directory is checked against.
+    assert 'echo "$repo@$revision" > "$dest/MODEL"' in script
+    assert embedding.pinned() == f'{repo}@{revision}'
+
+
+def _model_dir_with_marker(tmp_path, marker):
+    """The real model's files, under a directory whose marker is ``marker``
+    (None: no marker)."""
+    real = embedding.settings.MEMORY_EMBED_MODEL_DIR
+    directory = tmp_path / 'model'
+    directory.mkdir()
+    for name in embedding.MODEL_FILES:
+        (directory / name).symlink_to(Path(real) / name)
+    if marker is not None:
+        (directory / embedding.MARKER).write_text(marker + '\n')
+    return str(directory)
+
+
+def test_a_model_directory_without_its_marker_is_unavailable(settings, tmp_path):
+    settings.MEMORY_EMBED_MODEL_DIR = _model_dir_with_marker(tmp_path, None)
+    with pytest.raises(embedding.ModelUnavailable, match='missing MODEL'):
+        embedding.model()
+
+
+def test_a_model_directory_whose_marker_names_another_model_is_unavailable_and_recorded_as_a_failure(
+        core, redis_client, archive_api, checkout, settings, tmp_path):
+    model_dir = settings.MEMORY_EMBED_MODEL_DIR
+    settings.MEMORY_EMBED_MODEL_DIR = _model_dir_with_marker(
+        tmp_path, f'{embedding.MODEL.name}@0000000000000000000000000000000000000000')
+    with pytest.raises(embedding.ModelUnavailable, match='never downloads'):
+        embedding.model()
+    item = core.work_item('Check the egret marsh')
+    index_once()
+    failure = IndexFailure.objects.get(source_key=f"work_item:{item['id']}")
+    assert 'ModelUnavailable' in failure.reason and embedding.pinned() in failure.reason
+    assert search('egret marsh') == []
+    settings.MEMORY_EMBED_MODEL_DIR = model_dir
+    index_once()
+    assert not IndexFailure.objects.exists() and search('egret marsh')

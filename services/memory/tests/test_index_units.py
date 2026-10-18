@@ -225,11 +225,13 @@ def test_req04_migration_0003_removes_core_units_indexed_before_they_named_their
         call_command('migrate', 'index', verbosity=0)
 
 
-def test_migration_0004_empties_the_index_so_every_unit_is_written_again_with_its_embedding():
+def test_migration_0004_empties_the_index_so_every_unit_is_written_again_with_its_embedding(
+        core, redis_client, archive_api, checkout):
     """Track 5: a unit indexed before embeddings has none, and the CHECK
     refuses one without, so migration 0004 empties the index as a rebuild
     does (Corpus Indexing REQ-03), and every class reads "not indexed yet"
-    until the indexer has read it again."""
+    until the indexer has read it again, writing each unit with its
+    embedding."""
     from django.core.management import call_command
 
     from index.models import IndexCursor, IndexSource, IndexState
@@ -249,3 +251,13 @@ def test_migration_0004_empties_the_index_so_every_unit_is_written_again_with_it
     assert not IndexUnit.objects.exists() and not IndexSource.objects.exists()
     assert not IndexCursor.objects.exists() and not IndexState.objects.exists()
     assert 'platform: not indexed yet' in index_status()['reasons']
+
+    from index import embedding
+    core.work_item('Calibrate the narwhal sensor', 'The narwhal sensor drifts in cold rooms.')
+    index_once()
+    written = units()
+    assert {u.source_class for u in written} == {'platform_document', 'work_item'}
+    assert 'platform:p' not in {u.source_key for u in written}
+    for unit in written:
+        assert embedding.unpack(unit.embedding).shape == (1, MODEL.dim), unit.source_key
+    assert 'platform: not indexed yet' not in index_status()['reasons']
