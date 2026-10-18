@@ -46,7 +46,11 @@ through the pull.
 
    This is a filesystem copy of two volumes, not a database migration —
    nothing about the schema or the data it holds changes.
-4. **Start the stack back up** under the new name.
+4. **Start the stack back up** under the new name. The first start warns
+   that `core_postgres-data` and `core_artifact-data` "already exist but were
+   not created by Docker Compose", because step 3's `docker run` created them.
+   That is expected: Compose uses them as they are. Ignore the suggestion to
+   mark them `external: true`; the compose file is right as shipped.
 
 ## The old volumes stay
 
