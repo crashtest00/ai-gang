@@ -26,6 +26,7 @@ from django.db import connection, transaction
 from django.db.models import F
 from django.utils import timezone
 
+from . import embedding
 from .models import (
     CLASS_COMMENT, CLASS_DELIVERY, CLASS_LIBRARY, CLASS_PLATFORM, CLASS_SPECIFICATION, CLASS_WORK_ITEM,
     SCOPE_PLATFORM, SCOPE_PROJECT, IndexCursor, IndexFailure, IndexSource, IndexUnit, SpecificationLink,
@@ -51,13 +52,21 @@ def replace_units(source_key: str, source_class: str, stamp: dict, units: Iterab
                   work_item_id=None) -> int:
     """Replace a source's units with ``units`` (each ``reference``, ``text``
     and optionally ``written_at``/``current``), record what they were built
-    from, and clear the source's failure, in one transaction."""
+    from, and clear the source's failure, in one transaction.
+
+    Every unit's text is embedded here, before the transaction, so a unit
+    whose text changes is embedded again with it and a rebuild embeds every
+    unit afresh (REQ-03). A model that cannot run raises, and the caller
+    records the source's failure (REQ-09)."""
+    units = list(units)
+    vectors = embedding.embed_units([unit['text'] for unit in units])
     now = timezone.now()
     scope = scope_for(source_class)
     rows = [IndexUnit(source_class=source_class, scope=scope, source_key=source_key, work_item_id=work_item_id,
                       reference=unit['reference'], text=unit['text'], position=position,
-                      current=unit.get('current', True), written_at=unit.get('written_at'), indexed_at=now)
-            for position, unit in enumerate(units)]
+                      current=unit.get('current', True), written_at=unit.get('written_at'), indexed_at=now,
+                      embedding=vector)
+            for position, (unit, vector) in enumerate(zip(units, vectors))]
     with transaction.atomic():
         IndexUnit.objects.filter(source_key=source_key).delete()
         IndexUnit.objects.bulk_create(rows)

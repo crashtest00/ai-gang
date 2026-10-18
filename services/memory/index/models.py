@@ -11,8 +11,10 @@ non-empty ``fields`` naming the fields of Core's read its text came from,
 ties the scope to the class (REQ-08: `platform` only on the platform
 corpus, `project` on every one of the seven classes), and
 ``index_unit_text_not_empty`` refuses an empty passage. ``search`` is a
-generated ``tsvector`` over the text (``SEARCH``), with a GIN index: the index structure
-is PostgreSQL full-text search (see ``index/__init__.py``).
+generated ``tsvector`` over the text (``SEARCH``), with a GIN index, and
+``embedding`` is the text's vectors from the local embedding model
+(``index.embedding``); ``index_unit_embedding_whole_vectors`` refuses a unit
+without one. Retrieval fuses the two rankings (see ``index/__init__.py``).
 
 **Everything else is bookkeeping about the index itself**, never a copy of
 a source record (REQ-03): what each source was last indexed from
@@ -30,6 +32,13 @@ from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVector, SearchVectorField
 from django.db import models
 from django.db.models import Case, F, Func, Q, Value, When
+from django.db.models.functions import Length, Mod
+from django.db.models.lookups import Exact, GreaterThan
+
+from .embedding import MODEL
+
+# One vector's packed size: the model's width in float32.
+EMBEDDING_BYTES = MODEL.dim * 4
 
 # --- Source classes (REQ-01) and the platform corpus (REQ-08) ---------------
 
@@ -98,6 +107,11 @@ class IndexUnit(models.Model):
     written_at = models.DateTimeField(null=True, blank=True)
     indexed_at = models.DateTimeField()
     search = models.GeneratedField(expression=SEARCH, output_field=SearchVectorField(), db_persist=True)
+    # The unit's text embedded by the local model (index.embedding): one
+    # L2-normalised float32 vector per window of the text, packed. Derived
+    # like ``search``, written with the unit (index.store.replace_units), and
+    # rebuilt with it (REQ-03).
+    embedding = models.BinaryField()
 
     class Meta:
         db_table = 'index_unit'
@@ -116,6 +130,10 @@ class IndexUnit(models.Model):
                        | Q(scope=SCOPE_PLATFORM, source_class=CLASS_PLATFORM)),
                 name='index_unit_scope_matches_class'),
             models.CheckConstraint(check=~Q(text=''), name='index_unit_text_not_empty'),
+            # Every unit has an embedding of whole vectors of the model's width.
+            models.CheckConstraint(
+                check=Q(GreaterThan(Length('embedding'), 0)) & Q(Exact(Mod(Length('embedding'), EMBEDDING_BYTES), 0)),
+                name='index_unit_embedding_whole_vectors'),
             # REQ-02: each class's reference carries what resolves it.
             models.CheckConstraint(
                 check=(~Q(source_class__in=(CLASS_LIBRARY, CLASS_SPECIFICATION))

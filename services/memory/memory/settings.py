@@ -134,6 +134,14 @@ MEMORY_INDEX_RETRY_SECONDS = _seconds('MEMORY_INDEX_RETRY_SECONDS', 300)
 # entries first (REQ-04).
 MEMORY_INDEX_CONSUMER = os.environ.get('MEMORY_INDEX_CONSUMER', '')
 
+# The local embedding model's files (index.embedding): the image bakes them
+# in here at build time (scripts/fetch-embedding-model.sh). Memory never
+# downloads them; a missing model is an error. A host test run points this at
+# the directory run_tests.sh names. MEMORY_EMBED_THREADS caps ONNX Runtime's
+# threads per process; 0 lets it use every core.
+MEMORY_EMBED_MODEL_DIR = os.environ.get('MEMORY_EMBED_MODEL_DIR', '/opt/memory-embedding-model')
+MEMORY_EMBED_THREADS = int(os.environ.get('MEMORY_EMBED_THREADS') or 0)
+
 # --- Knowledge retrieval (knowledge-retrieval.md) -----------------------------
 # memory-api answers a question from the index in Memory's own database. At
 # query time it reads each result's current source status from Core
