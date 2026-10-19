@@ -241,11 +241,14 @@ function buildWorkItemReferences(issue) {
 const SECTION_BEGIN = '<<<BEGIN RETRIEVED REFERENCE MATERIAL>>>';
 const SECTION_END = '<<<END RETRIEVED REFERENCE MATERIAL>>>';
 
-// Break up any run of three angle brackets so the section's delimiters cannot
-// be reproduced by text printed inside it. Inserting spaces cannot create a
-// new run, so the output never holds three in a row.
+// Break up any run of three or more angle brackets so the section's delimiters
+// cannot be reproduced by text printed inside it. The whole run is replaced by
+// its brackets separated by spaces, and inserting spaces cannot create a new
+// run, so the output never holds three in a row.
 function neutralise(text) {
-  return String(text).replace(/<<</g, '< < <').replace(/>>>/g, '> > >');
+  return String(text)
+    .replace(/<{3,}/g, run => run.split('').join(' '))
+    .replace(/>{3,}/g, run => run.split('').join(' '));
 }
 
 function oneLine(value) {
