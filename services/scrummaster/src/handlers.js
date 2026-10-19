@@ -29,7 +29,16 @@ const { buildEnvelope, KIND } = require('./envelope');
 // referenced id to appear somewhere in history, not to be the latest), but
 // worth knowing about if the in-memory history ever looks one message longer
 // than what an agent actually received.
-async function dispatchTask(issue, agent, { dispatchId, promptFactory }) {
+//
+// `memoryRecord` is what the caller's retrieval produced
+// (dispatchContext.retrieveForDispatch's `record`). It is carried in the
+// dispatch message's `metadata`, which Core archives whole, so the query and
+// the passages placed in the prompt are recoverable from the archived dispatch
+// (Dispatch Context Assembly REQ-08). Retrieval is awaited by the caller
+// BEFORE this function runs: nothing between the taskStore read below and the
+// Task's registration or reopening may await, or two consumers dispatching one
+// work item could both read it as new.
+async function dispatchTask(issue, agent, { dispatchId, promptFactory, memoryRecord }) {
   const contextId = taskStore.contextFor(issue);
   const existing = taskStore.getTaskById(issue.key);
   const messageId = newMessageId();
@@ -46,6 +55,7 @@ async function dispatchTask(issue, agent, { dispatchId, promptFactory }) {
     role: 'client',
     parts: [buildTextPart(prompt)],
     referenceMessageId,
+    metadata: memoryRecord ? { memoryRetrieval: memoryRecord } : undefined,
   });
 
   if (existing) {
