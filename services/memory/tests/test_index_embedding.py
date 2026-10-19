@@ -8,8 +8,11 @@ The model is read from the directory run_tests.sh names
 no test here downloads anything."""
 
 import dataclasses
+import os
 import re
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -251,3 +254,66 @@ def test_a_model_directory_whose_marker_names_another_model_is_unavailable_and_r
     settings.MEMORY_EMBED_MODEL_DIR = model_dir
     index_once()
     assert not IndexFailure.objects.exists() and search('egret marsh')
+
+
+MEMORY_DIR = Path(__file__).resolve().parent.parent
+# Where ONNX Runtime's 1DS telemetry keeps its device ID and offline event
+# store, created as soon as onnxruntime is imported with telemetry on.
+ORT_TELEMETRY_STORE = Path('.cache', 'Microsoft', 'DeveloperTools', '.onnxruntime')
+
+
+def _fresh_process(tmp_path: Path, name: str, code: str) -> Path:
+    """Runs ``code`` in a new Python process whose home is empty and whose
+    environment does not carry ORT_DISABLE_TELEMETRY, so only Memory's code
+    can switch the telemetry off. Returns that process's home."""
+    home = tmp_path / name
+    (home / 'tmp').mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k not in ('ORT_DISABLE_TELEMETRY', 'XDG_CACHE_HOME')}
+    env.update(HOME=str(home), TMPDIR=str(home / 'tmp'), DJANGO_SETTINGS_MODULE='memory.settings')
+    proc = subprocess.run([sys.executable, '-c', code], cwd=MEMORY_DIR, env=env, capture_output=True, text=True,
+                          timeout=300)
+    assert proc.returncode == 0, proc.stderr
+    return home
+
+
+def test_embedding_in_a_fresh_process_starts_no_onnx_runtime_telemetry(tmp_path):
+    """REQ-06 / Knowledge Retrieval REQ-08: ONNX Runtime's native telemetry
+    uploads to mobile.events.data.microsoft.com from a thread a Python socket
+    hook cannot see (test_loading_the_model_opens_no_network_connection), so
+    this watches its on-disk side effect instead, which appears at import
+    whenever the upload is armed. The control proves the probe sees it."""
+    control = _fresh_process(tmp_path, 'control', 'import onnxruntime')
+    assert (control / ORT_TELEMETRY_STORE / 'deviceid').exists(), (
+        'ONNX Runtime no longer writes its telemetry store where this test looks; re-derive the probe')
+
+    memory = _fresh_process(tmp_path, 'memory', (
+        'import django; django.setup()\n'
+        'from index import embedding\n'
+        "assert embedding.embed_units(['The kingfisher perch was repainted.'])\n"
+        "assert embedding.embed_query('Who repainted the perch?').shape == (embedding.MODEL.dim,)\n"))
+    assert not (memory / '.cache').exists(), sorted(str(p) for p in (memory / '.cache').rglob('*'))
+    assert list((memory / 'tmp').iterdir()) == []
+
+
+def test_the_image_switches_onnx_runtime_telemetry_off_for_every_process():
+    dockerfile = (MEMORY_DIR / 'Dockerfile').read_text()
+    env_block = dockerfile[dockerfile.index('\nENV '):dockerfile.index('\nEXPOSE')]
+    assert 'ORT_DISABLE_TELEMETRY=1' in env_block
+
+
+def test_a_memory_process_that_imports_onnx_runtime_before_index_embedding_starts_no_telemetry(tmp_path):
+    """The opt-out works only if set before a process's first import of
+    onnxruntime. In every Memory process Django's setup arms it before any
+    app code can import onnxruntime, twice over: memory.settings sets it, and
+    the index app's models import index.embedding, which sets it too. So a
+    process that only sets Django up and then imports onnxruntime directly
+    arms nothing. (Removing either guard alone keeps this passing; removing
+    both fails it.)"""
+    home = _fresh_process(tmp_path, 'settings-first', 'import django; django.setup()\nimport onnxruntime\n')
+    assert not (home / '.cache').exists(), sorted(str(p) for p in (home / '.cache').rglob('*'))
+    assert list((home / 'tmp').iterdir()) == []
+
+
+def test_the_suite_runner_switches_onnx_runtime_telemetry_off_before_its_preflight_imports_it():
+    runner = (MEMORY_DIR / 'run_tests.sh').read_text()
+    assert runner.index('export ORT_DISABLE_TELEMETRY=1') < runner.index('import django, psycopg2')

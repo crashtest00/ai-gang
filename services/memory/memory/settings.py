@@ -14,6 +14,15 @@ from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Nothing leaves the deployment (corpus-indexing.md REQ-06,
+# knowledge-retrieval.md REQ-08). ONNX Runtime, which index.embedding uses,
+# uploads usage telemetry from a native thread unless ORT_DISABLE_TELEMETRY=1
+# is in the environment when it is first imported. Settings load before any
+# app code in every Memory process (manage.py, gunicorn, management
+# commands), so it is set here; index.embedding sets it too, for any process
+# that imports it without Django, and the image's ENV sets it for all.
+os.environ['ORT_DISABLE_TELEMETRY'] = '1'
+
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-memory-dev-key-do-not-use-in-production')
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes')
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',') if h.strip()]

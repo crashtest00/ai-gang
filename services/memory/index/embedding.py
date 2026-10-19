@@ -4,7 +4,11 @@ Retrieval REQ-08; build brief §1b and I-08).
 Each unit's text is embedded when it is written (``index.store``) and each
 question when it is asked (``retrieval.ranking``), by a small sentence
 embedding model run in this process with ONNX Runtime. Nothing is sent
-anywhere: the model's files are read from ``settings.MEMORY_EMBED_MODEL_DIR``,
+anywhere. ONNX Runtime's own usage telemetry, which would otherwise upload
+to ``mobile.events.data.microsoft.com`` from a native thread, is switched off
+by ``ORT_DISABLE_TELEMETRY=1``, set below before onnxruntime is first imported
+and in the image's environment. The model's files are read from
+``settings.MEMORY_EMBED_MODEL_DIR``,
 which Memory's image fills at build time (``scripts/fetch-embedding-model.sh``,
 the same script the test setup runs). This module never downloads. A missing
 or incomplete model directory, or one whose ``MODEL`` marker names another
@@ -34,6 +38,17 @@ from typing import Sequence
 
 import numpy as np
 from django.conf import settings
+
+# ONNX Runtime's Linux wheel carries Microsoft's 1DS telemetry: from the
+# moment onnxruntime is imported it writes a device ID under
+# ~/.cache/Microsoft/DeveloperTools/.onnxruntime/ and, a few seconds later,
+# a native thread resolves and posts to mobile.events.data.microsoft.com
+# (Corpus Indexing REQ-06, Knowledge Retrieval REQ-08). Its opt-out is this
+# environment variable, read when onnxruntime is imported; calling
+# onnxruntime.disable_telemetry_events() after the import does not stop the
+# upload. This module is Memory's only importer of onnxruntime, so setting
+# it here, at import, covers every process; the Dockerfile sets it too.
+os.environ['ORT_DISABLE_TELEMETRY'] = '1'
 
 
 @dataclass(frozen=True)
