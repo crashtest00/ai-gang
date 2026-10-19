@@ -10,6 +10,7 @@ const { createClient: createRedisClient } = require('redis');
 
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '../config/agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '../config/projects.json');
+process.env.MEMORY_API_URL = '';
 
 const redis = require('./redis');
 const registry = require('./registry');
