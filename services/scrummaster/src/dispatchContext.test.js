@@ -234,6 +234,40 @@ for (const f of FAILURES) {
   }
 }
 
+test('REQ-05: an oversized memory-api answer (20 x 1 MB multi-line passages) cannot stall the dispatch', async (t) => {
+  const c = CASES[0];
+  const { published } = standIn(t, c);
+  t.mock.method(console, 'error', () => {});
+  const big = Array.from({ length: 1024 }, (_, i) => `line ${i} ${'x'.repeat(1000)}`).join('\n');
+  await startMemory(t, () => answer(Array.from({ length: 20 }, (_, i) => passage(i + 1, { text: big }))));
+  const started = Date.now();
+
+  await drive(c);
+
+  assert.ok(Date.now() - started < 3000, 'retrieval stayed within the declared latency bound');
+  assert.equal(published.length, 1);
+  const { prompt, metadata } = sent(published);
+  assert.equal(prompt, BASELINE[c.name], 'authored fields intact, no section');
+  assert.equal(metadata.memoryRetrieval.status, 'error');
+});
+
+test('REQ-05/04: a many-passage answer with oversized text is bounded by the section, not by its size', async (t) => {
+  const c = CASES[0];
+  const { published } = standIn(t, c);
+  const big = `${'y'.repeat(100)}\n`.repeat(40000); // 4 MB, under the body limit
+  await startMemory(t, () => answer([passage(1, { text: big }), passage(2)]));
+  const started = Date.now();
+
+  await drive(c);
+
+  assert.ok(Date.now() - started < 3000);
+  const { prompt, metadata } = sent(published);
+  assert.equal(metadata.memoryRetrieval.status, 'placed');
+  assert.deepEqual(metadata.memoryRetrieval.placedUnitIds, ['unit-2']);
+  assert.equal(metadata.memoryRetrieval.omittedCount, 1);
+  assert.ok(prompt.length < BASELINE[c.name].length + 8000);
+});
+
 test('REQ-05/I-20: retrievals queued behind a single worker past the timeout time out, and every dispatch still happens', async (t) => {
   process.env.MEMORY_RETRIEVAL_TIMEOUT_MS = '350';
   const items = ['wi-case-queued-1', 'wi-case-queued-2', 'wi-case-queued-3']
