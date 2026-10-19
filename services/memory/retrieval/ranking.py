@@ -337,13 +337,14 @@ def _units(ids: list[int], scope: Optional[str]) -> dict:
 
 
 def rank(question: str, *, scope: Optional[str] = None, limit: int = 10,
-         params: Params = Params()) -> list[Candidate]:
+         params: Params = Params(), lexical_only: bool = False) -> list[Candidate]:
     """The units most relevant to ``question``, best first, at most
     ``limit``. ``scope`` is ``project``, ``platform`` or None for both; the
-    caller has validated it."""
+    caller has validated it. ``lexical_only`` skips the embedding ranking,
+    for when the model is unavailable (``embedding.ModelUnavailable``)."""
     depth = max(FUSION_DEPTH, limit)
     found, present = _lexical(question, scope, params)
-    similar = _similar(question, scope, depth)
+    similar = [] if lexical_only else _similar(question, scope, depth)
     top_similarity = max((sim for _, sim, _ in similar), default=None)
     lexical_answers = bool(_floored(found, present, params))
     if not lexical_answers and (top_similarity is None or top_similarity < params.embedding_cutoff):
