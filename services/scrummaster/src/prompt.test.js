@@ -279,3 +279,30 @@ test('pipeline_failure retry prompt keeps same branch/PR only for a still-open P
   assert.match(prompt, /already merged[\s\S]*origin\/dev[\s\S]*`completed`[\s\S]*a2a-submit/);
   assert.match(prompt, /Build log: http:\/\/j\/1/);
 });
+
+// Dispatch Context Assembly REQ-01/REQ-02: each builder takes what dispatch
+// retrieved, renders it after the references block, and with nothing retrieved
+// renders exactly what it did before. The dispatch paths are exercised end to
+// end in dispatchContext.test.js; this pins the builders' own contract.
+const RETRIEVED = {
+  notice: 'n', incomplete: false, incompleteReasons: [], withheldCount: 0, omittedCount: 0, returnedCount: 1, boundChars: 6000,
+  passages: [{ rank: 1, scope: 'project', class: 'comment', source: { owner: 'core', read: '/x' }, writtenAtKnown: true,
+    writtenAt: '2026-01-01T00:00:00+00:00', ageSeconds: 5, sourceStatus: null, text: 'prior fact' }],
+};
+
+test('each builder renders the retrieved section after the references block, and nothing when none was retrieved', () => {
+  const issue = baseIssue({ description: 'd' });
+  const builds = {
+    task: (r) => buildTaskPrompt(issue, AGENT, { task: TASK, message: MESSAGE, retrieved: r }),
+    unblock: (r) => buildUnblockPrompt(issue, AGENT, TASK, MESSAGE, null, r),
+    retry: (r) => buildRetryPrompt(issue, AGENT, { kind: 'human_rework' }, TASK, MESSAGE, r),
+  };
+  for (const [name, build] of Object.entries(builds)) {
+    const without = build(undefined);
+    assert.equal(build(null), without, `${name}: null retrieved changes nothing`);
+    assert.equal(build({ ...RETRIEVED, passages: [] }), without, `${name}: no passages changes nothing`);
+    const withSection = build(RETRIEVED);
+    assert.ok(withSection.startsWith(without), `${name}: the section is purely additive, after the references block`);
+    assert.match(withSection.slice(without.length), /\| prior fact/);
+  }
+});
