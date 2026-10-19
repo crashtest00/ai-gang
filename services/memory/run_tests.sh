@@ -24,6 +24,9 @@ export PGDATABASE="${PGDATABASE:-memory}"
 # here and never download it; the one-time setup below fetches it.
 export MEMORY_EMBED_MODEL_DIR="${MEMORY_EMBED_MODEL_DIR:-/tmp/aigang-memory-embedding-model/gte-modernbert-base-e7f32e3}"
 export HF_HUB_OFFLINE=1
+# ONNX Runtime uploads usage telemetry unless this is set when it is imported,
+# including by the preflight below (index/embedding.py; REQ-06, REQ-08).
+export ORT_DISABLE_TELEMETRY=1
 
 EX_PREFLIGHT=78
 if [ ! -x .venv/bin/python ] \

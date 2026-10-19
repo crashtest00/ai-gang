@@ -299,3 +299,21 @@ def test_the_image_switches_onnx_runtime_telemetry_off_for_every_process():
     dockerfile = (MEMORY_DIR / 'Dockerfile').read_text()
     env_block = dockerfile[dockerfile.index('\nENV '):dockerfile.index('\nEXPOSE')]
     assert 'ORT_DISABLE_TELEMETRY=1' in env_block
+
+
+def test_a_memory_process_that_imports_onnx_runtime_before_index_embedding_starts_no_telemetry(tmp_path):
+    """The opt-out works only if set before a process's first import of
+    onnxruntime. In every Memory process Django's setup arms it before any
+    app code can import onnxruntime, twice over: memory.settings sets it, and
+    the index app's models import index.embedding, which sets it too. So a
+    process that only sets Django up and then imports onnxruntime directly
+    arms nothing. (Removing either guard alone keeps this passing; removing
+    both fails it.)"""
+    home = _fresh_process(tmp_path, 'settings-first', 'import django; django.setup()\nimport onnxruntime\n')
+    assert not (home / '.cache').exists(), sorted(str(p) for p in (home / '.cache').rglob('*'))
+    assert list((home / 'tmp').iterdir()) == []
+
+
+def test_the_suite_runner_switches_onnx_runtime_telemetry_off_before_its_preflight_imports_it():
+    runner = (MEMORY_DIR / 'run_tests.sh').read_text()
+    assert runner.index('export ORT_DISABLE_TELEMETRY=1') < runner.index('import django, psycopg2')
