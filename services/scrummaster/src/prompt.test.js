@@ -257,3 +257,25 @@ test('the specification shows both lead-ins and no third one', () => {
   const shown = SPEC.match(/The following clarifications have been provided[^\n]*/g) || [];
   assert.deepStrictEqual([...new Set(shown)].sort(), [...new Set(Object.values(LEAD_INS))].sort());
 });
+
+// BF-005: rework fires only after review, when the delivered PR has merged,
+// so the prompt must not tell the agent to push to it; it must say to open a
+// new PR and report `completed`, or the new PR is never claimed.
+test('human_rework retry prompt directs a new PR from origin/dev reported completed, not the same branch/PR', () => {
+  const prompt = buildRetryPrompt(baseIssue(), AGENT, { kind: 'human_rework' }, TASK, MESSAGE);
+  assert.match(prompt, /completed/);
+  assert.match(prompt, /origin\/dev/);
+  assert.match(prompt, /a2a-submit/);
+  assert.doesNotMatch(prompt, /same branch\/PR/);
+});
+
+// The evidence has only build_url/build_number, so a PR-build failure and a
+// post-merge dev-build failure cannot be told apart: the prompt covers both.
+test('pipeline_failure retry prompt keeps same branch/PR only for a still-open PR and covers the merged case', () => {
+  const prompt = buildRetryPrompt(
+    baseIssue(), AGENT,
+    { kind: 'pipeline_failure', build_url: 'http://j/1', build_number: '7' }, TASK, MESSAGE);
+  assert.match(prompt, /If it is still open: push the fix to the same branch\/PR/);
+  assert.match(prompt, /already merged[\s\S]*origin\/dev[\s\S]*`completed`[\s\S]*a2a-submit/);
+  assert.match(prompt, /Build log: http:\/\/j\/1/);
+});
