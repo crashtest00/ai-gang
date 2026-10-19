@@ -37,6 +37,15 @@ const DEFAULT_TIMEOUT_MS = 10000;
 const REQUEST_LIMIT = 20;
 const QUERY_MAX_CHARS = 1200;
 const FIELD_MAX_CHARS = 400;
+// The work done on an answer is bounded independently of its size (REQ-05).
+// A body larger than this is refused at the HTTP layer (an `error`); within it,
+// only the first REQUEST_LIMIT passages are considered and every string that is
+// printed is cut to PRINT_CAP_CHARS. Rendering never shortens a string, so a
+// string longer than the section bound can never fit it: the cut changes no
+// outcome, it only stops the fit from rendering megabytes to learn that.
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const PRINT_CAP_CHARS = SECTION_BOUND_CHARS + 1;
+const REASONS_CAP = 20;
 
 const DEFAULT_MEMORY_API_URL = 'http://memory:9200';
 
@@ -91,7 +100,7 @@ async function postWithDeadline(client, url, body, ms) {
     }, ms);
   });
   try {
-    const call = Promise.resolve(client.post(url, body, { timeout: ms, signal: controller.signal }));
+    const call = Promise.resolve(client.post(url, body, { timeout: ms, signal: controller.signal, maxContentLength: MAX_BODY_BYTES }));
     call.catch(() => {}); // a call that loses the race must not become an unhandled rejection
     return await Promise.race([call, deadline]);
   } finally {
@@ -99,11 +108,33 @@ async function postWithDeadline(client, url, body, ms) {
   }
 }
 
+function cap(value) {
+  return typeof value === 'string' && value.length > PRINT_CAP_CHARS ? value.slice(0, PRINT_CAP_CHARS) : value;
+}
+
+// A passage whose printed strings are cut to PRINT_CAP_CHARS; a well-formed one
+// is returned unchanged in content.
+function boundPassage(p) {
+  if (!p || typeof p !== 'object') return p; // malformed: the render guard reports it
+  const out = { ...p };
+  for (const key of ['text', 'scope', 'class', 'writtenAt', 'rank']) out[key] = cap(p[key]);
+  if (p.source && typeof p.source === 'object') {
+    out.source = { ...p.source };
+    for (const key of ['owner', 'read', 'record']) out.source[key] = cap(p.source[key]);
+  }
+  if (p.sourceStatus !== undefined && p.sourceStatus !== null) {
+    const json = JSON.stringify(p.sourceStatus);
+    if (json && json.length > PRINT_CAP_CHARS) out.sourceStatus = json.slice(0, PRINT_CAP_CHARS);
+  }
+  return out;
+}
+
 function shape(response) {
+  const reasons = response.incompleteReasons || [];
   return {
-    notice: response.notice,
+    notice: cap(response.notice),
     incomplete: !!response.incomplete,
-    incompleteReasons: response.incompleteReasons || [],
+    incompleteReasons: Array.isArray(reasons) ? reasons.slice(0, REASONS_CAP).map(cap) : reasons,
     withheldCount: Array.isArray(response.withheld) ? response.withheld.length : 0,
   };
 }
@@ -112,16 +143,16 @@ function shape(response) {
 // section still fits the bound with it, and left out (counted, and stated in
 // the prompt) when it does not. The work item's own fields are rendered by the
 // builders around this section and are never part of this fit.
-function fit(passages, base) {
+function fit(passages, base, returnedCount = passages.length) {
   const placed = [];
   for (const passage of passages) {
     const trial = [...placed, passage];
-    const candidate = { ...base, passages: trial, returnedCount: passages.length,
-      omittedCount: passages.length - trial.length, boundChars: SECTION_BOUND_CHARS };
+    const candidate = { ...base, passages: trial, returnedCount,
+      omittedCount: returnedCount - trial.length, boundChars: SECTION_BOUND_CHARS };
     if (buildRetrievedSection(candidate).join('\n').length <= SECTION_BOUND_CHARS) placed.push(passage);
   }
-  return { ...base, passages: placed, returnedCount: passages.length,
-    omittedCount: passages.length - placed.length, boundChars: SECTION_BOUND_CHARS };
+  return { ...base, passages: placed, returnedCount,
+    omittedCount: returnedCount - placed.length, boundChars: SECTION_BOUND_CHARS };
 }
 
 function failure(status, reason, startedAt, extra = {}) {
@@ -171,7 +202,7 @@ async function retrieveForDispatch(issue, { client = axios } = {}) {
       return { retrieved: null, record: { status: 'empty', ...common, placedUnitIds: [], omittedCount: 0 } };
     }
 
-    const retrieved = fit(response.passages, answer);
+    const retrieved = fit(response.passages.slice(0, REQUEST_LIMIT).map(boundPassage), answer, response.passages.length);
     buildRetrievedSection(retrieved); // the section handlers.js will render must render here first
     return {
       retrieved,
