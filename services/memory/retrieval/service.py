@@ -26,7 +26,6 @@ from . import ranking, sources
 from .models import QueryLog
 
 log = logging.getLogger(__name__)
-_warned = False
 MODEL_UNAVAILABLE_REASON = 'embedding model unavailable'
 
 DEFAULT_LIMIT = 10
@@ -109,11 +108,8 @@ def answer(request: dict, *, core: Optional[sources.CoreReads] = None) -> dict:
                                   params=params)
     except ModelUnavailable as err:
         # Answered from the full-text ranking alone and flagged incomplete
-        # (REQ-07); the failure is logged once per process.
-        global _warned
-        if not _warned:
-            _warned = True
-            log.warning('embedding model unavailable; retrieval answers from full-text ranking only: %s', err)
+        # (REQ-07); every such query is logged.
+        log.warning('embedding model unavailable; retrieval answers from full-text ranking only: %s', err)
         model_unavailable = True
         candidates = ranking.rank(parsed['question'], scope=parsed['scope'], limit=parsed['limit'] * 2,
                                   params=params, lexical_only=True)

@@ -12,9 +12,12 @@ and in the image's environment. The model's files are read from
 which Memory's image fills at build time (``scripts/fetch-embedding-model.sh``,
 the same script the test setup runs). This module never downloads. A missing
 or incomplete model directory, or one whose ``MODEL`` marker names another
-model than ``MODEL``, is ``ModelUnavailable``, an error, so a unit
-that cannot be embedded is recorded as an indexing failure (REQ-09) and a
-question that cannot be embedded fails, rather than either fetching weights.
+model than ``MODEL``, is ``ModelUnavailable``, and so is any other failure
+to load or run the model (a missing runtime library, a corrupt tokenizer or
+``model.onnx``, an error at inference). A unit that cannot be embedded is
+recorded as an indexing failure (REQ-09) and retried; a question that cannot
+be embedded is answered by retrieval from the full-text ranking alone,
+flagged incomplete (``retrieval.service``). Neither fetches weights.
 
 **Units longer than the model's input.** The model reads at most
 ``MODEL.max_tokens`` tokens (8,192, with its two special tokens). A unit is
@@ -92,8 +95,8 @@ def pinned() -> str:
 
 
 class ModelUnavailable(RuntimeError):
-    """The model's files are not where the image puts them. Memory never
-    fetches them (I-08)."""
+    """The model's files are not where the image puts them, or it cannot be
+    loaded or run. Memory never fetches them (I-08)."""
 
 
 class _Model:
@@ -111,24 +114,36 @@ class _Model:
                 f'{directory!r} holds the embedding model {marker!r}, not {pinned()!r}, the model this code '
                 'embeds with. Memory never downloads it: the image bakes it in at build time, and a host test '
                 'run fetches it once with scripts/fetch-embedding-model.sh')
-        import onnxruntime
-        from tokenizers import Tokenizer
+        try:
+            import onnxruntime
+            from tokenizers import Tokenizer
 
-        self.tokenizer = Tokenizer.from_file(os.path.join(directory, 'tokenizer.json'))
-        self.tokenizer.no_truncation()
-        self.tokenizer.no_padding()
-        self.cls = self.tokenizer.token_to_id('[CLS]')
-        self.sep = self.tokenizer.token_to_id('[SEP]')
-        options = onnxruntime.SessionOptions()
-        threads = int(getattr(settings, 'MEMORY_EMBED_THREADS', 0) or 0)
-        if threads:
-            options.intra_op_num_threads = threads
-        self.session = onnxruntime.InferenceSession(os.path.join(directory, 'model.onnx'), options,
-                                                    providers=['CPUExecutionProvider'])
-        self.inputs = {i.name for i in self.session.get_inputs()}
+            self.tokenizer = Tokenizer.from_file(os.path.join(directory, 'tokenizer.json'))
+            self.tokenizer.no_truncation()
+            self.tokenizer.no_padding()
+            self.cls = self.tokenizer.token_to_id('[CLS]')
+            self.sep = self.tokenizer.token_to_id('[SEP]')
+            options = onnxruntime.SessionOptions()
+            threads = int(getattr(settings, 'MEMORY_EMBED_THREADS', 0) or 0)
+            if threads:
+                options.intra_op_num_threads = threads
+            self.session = onnxruntime.InferenceSession(os.path.join(directory, 'model.onnx'), options,
+                                                        providers=['CPUExecutionProvider'])
+            self.inputs = {i.name for i in self.session.get_inputs()}
+        except Exception as err:  # noqa: BLE001 - any failure to load is "the model is unavailable"
+            raise ModelUnavailable(
+                f'the embedding model {MODEL.name} in {directory!r} cannot be loaded '
+                f'({type(err).__name__}: {err}). Memory never downloads it: reinstall the image, or on a host '
+                'run scripts/fetch-embedding-model.sh') from err
+
+    def token_ids(self, text: str) -> list[int]:
+        try:
+            return self.tokenizer.encode(text, add_special_tokens=False).ids
+        except Exception as err:  # noqa: BLE001 - the tokenizer failing is the model failing
+            raise ModelUnavailable(f'the embedding model tokenizer failed ({type(err).__name__}: {err})') from err
 
     def windows(self, text: str) -> list[list[int]]:
-        ids = self.tokenizer.encode(text, add_special_tokens=False).ids
+        ids = self.token_ids(text)
         size = MODEL.max_tokens - 2
         step = size - min(WINDOW_OVERLAP, size // 2)
         starts = range(0, len(ids) - (size - step), step) if len(ids) > size else [0]
@@ -148,7 +163,11 @@ class _Model:
             feed = {'input_ids': ids, 'attention_mask': mask}
             if 'token_type_ids' in self.inputs:
                 feed['token_type_ids'] = np.zeros_like(ids)
-            hidden = self.session.run(None, feed)[0]
+            try:
+                hidden = self.session.run(None, feed)[0]
+            except Exception as err:  # noqa: BLE001 - a model that cannot run is unavailable
+                raise ModelUnavailable(
+                    f'the embedding model {MODEL.name} failed at inference ({type(err).__name__}: {err})') from err
             pooled = hidden[:, 0]  # CLS pooling, as MODEL is trained for
             norms = np.linalg.norm(pooled, axis=1, keepdims=True)
             out[batch] = pooled / np.maximum(norms, 1e-12)
@@ -186,7 +205,7 @@ def embed_query(question: str) -> np.ndarray:
     """The question's normalised vector. A question longer than the model's
     input is read to the limit."""
     m = model()
-    ids = m.tokenizer.encode(MODEL.query_prefix + question, add_special_tokens=False).ids[:MODEL.max_tokens - 2]
+    ids = m.token_ids(MODEL.query_prefix + question)[:MODEL.max_tokens - 2]
     return m.encode([[m.cls] + ids + [m.sep]])[0]
 
 

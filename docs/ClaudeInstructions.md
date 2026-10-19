@@ -544,7 +544,9 @@ classes it has not reached as "not indexed yet". The measured cost is about
 20,000 units take about 6.5 hours (`services/memory/index/__init__.py`).
 And building Memory's image downloads the pinned embedding model (about
 150 MB) from huggingface.co (`services/memory/scripts/fetch-embedding-model.sh`),
-so the build host needs that access; nothing is downloaded at runtime.
+so the build host needs that access; nothing is downloaded at runtime. If the model is missing or broken, retrieval degrades to
+full-text search with `incomplete` set and the reason "embedding model unavailable", and
+the indexer records indexing failures until it is restored.
 
 **Size the host's inotify watch limit.** The copier watches every directory
 on the harness volume — one per project, plus one or more per session the

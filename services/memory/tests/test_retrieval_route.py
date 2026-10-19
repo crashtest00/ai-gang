@@ -5,6 +5,7 @@ REQ-01 … REQ-07 and the Acceptance steps track 3 handed to this track
 
 import hashlib
 import json
+import os
 import subprocess
 import urllib.parse
 import urllib.request
@@ -602,8 +603,6 @@ def test_ac10_dropping_the_index_and_rebuilding_returns_the_same_passages(client
 
 @pytest.fixture
 def no_model(indexed, settings, tmp_path, monkeypatch):
-    from retrieval import service
-    monkeypatch.setattr(service, '_warned', False, raising=False)
     settings.MEMORY_EMBED_MODEL_DIR = str(tmp_path / 'no-model')
 
 
@@ -636,3 +635,57 @@ def test_row36_a_healthy_model_is_not_flagged_and_logs_no_model_warning(client, 
     assert status == 200 and body['passages']
     assert 'embedding model unavailable' not in body['incompleteReasons']
     assert not any('embedding model unavailable' in r.getMessage() for r in caplog.records)
+
+
+@pytest.fixture
+def corrupt_model(indexed, settings, tmp_path):
+    """A directory with the right marker and every file, but a model.onnx that is garbage."""
+    import shutil
+    from index import embedding
+    real = settings.MEMORY_EMBED_MODEL_DIR
+    broken = tmp_path / 'broken-model'
+    broken.mkdir()
+    (broken / 'MODEL').write_text(embedding.pinned())
+    shutil.copy(os.path.join(real, 'tokenizer.json'), broken / 'tokenizer.json')
+    (broken / 'model.onnx').write_bytes(b'not an onnx model \x00\x01\x02')
+    embedding._loaded.clear()
+    settings.MEMORY_EMBED_MODEL_DIR = str(broken)
+    yield
+    embedding._loaded.clear()
+
+
+def _degraded(client, caplog):
+    with caplog.at_level('WARNING'):
+        status, body = ask(client, 'How often does the quokka gateway retry?')
+    assert status == 200
+    assert body['passages'] and body['passages'][0]['class'] == 'specification'
+    assert body['incomplete'] is True
+    assert 'embedding model unavailable' in body['incompleteReasons']
+    assert QueryLog.objects.get(pk=body['queryId']).index_incomplete is True
+    return body
+
+
+def test_row45_a_corrupt_model_file_degrades_to_full_text_flagged_incomplete(client, corrupt_model, caplog):
+    _degraded(client, caplog)
+    assert any(r.levelname == 'WARNING' and 'embedding model unavailable' in r.getMessage()
+               for r in caplog.records)
+
+
+def test_row45_a_model_that_fails_at_inference_degrades_to_full_text_flagged_incomplete(
+        client, indexed, caplog, monkeypatch):
+    from index import embedding
+
+    def boom(*args, **kwargs):
+        raise RuntimeError('onnx runtime exploded')
+
+    monkeypatch.setattr(embedding.model().session, 'run', boom)
+    _degraded(client, caplog)
+    assert any('failed at inference' in r.getMessage() for r in caplog.records)
+
+
+def test_row45_every_degraded_query_is_logged_not_only_the_first(client, corrupt_model, caplog):
+    for _ in range(2):
+        caplog.clear()
+        _degraded(client, caplog)
+        assert sum('embedding model unavailable' in r.getMessage() and r.levelname == 'WARNING'
+                   for r in caplog.records) == 1
