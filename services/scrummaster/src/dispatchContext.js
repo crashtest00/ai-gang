@@ -124,9 +124,9 @@ function fit(passages, base) {
     omittedCount: passages.length - placed.length, boundChars: SECTION_BOUND_CHARS };
 }
 
-function failure(status, reason, startedAt) {
+function failure(status, reason, startedAt, extra = {}) {
   console.error(`[retrieval] No retrieved context for this dispatch (${status}): ${reason}`);
-  return { retrieved: null, record: { status, reason, elapsedMs: Date.now() - startedAt } };
+  return { retrieved: null, record: { status, reason, ...extra, elapsedMs: Date.now() - startedAt } };
 }
 
 async function retrieveForDispatch(issue, { client = axios } = {}) {
@@ -151,31 +151,41 @@ async function retrieveForDispatch(issue, { client = axios } = {}) {
     return failure('error', 'memory-api answered with a body that has no passages list', startedAt);
   }
 
-  const answer = shape(response);
-  const common = {
-    queryId: response.queryId === undefined ? null : response.queryId,
-    incomplete: answer.incomplete,
-    incompleteReasons: answer.incompleteReasons,
-    withheldCount: answer.withheldCount,
-    returnedCount: response.passages.length,
-    elapsedMs: Date.now() - startedAt,
-  };
-  if (response.passages.length === 0) {
-    console.log(`[retrieval] Memory returned nothing for this dispatch (query ${common.queryId})`);
-    return { retrieved: null, record: { status: 'empty', ...common, placedUnitIds: [], omittedCount: 0 } };
-  }
+  // Shaping, fitting and rendering the answer run inside this guard: a body
+  // that has a passages list but malformed contents (a null passage, a
+  // non-list incompleteReasons) is a retrieval error like any other, so the
+  // dispatch proceeds with its own fields alone (REQ-05).
+  const queryId = response.queryId === undefined ? null : response.queryId;
+  try {
+    const answer = shape(response);
+    const common = {
+      queryId,
+      incomplete: answer.incomplete,
+      incompleteReasons: answer.incompleteReasons,
+      withheldCount: answer.withheldCount,
+      returnedCount: response.passages.length,
+      elapsedMs: Date.now() - startedAt,
+    };
+    if (response.passages.length === 0) {
+      console.log(`[retrieval] Memory returned nothing for this dispatch (query ${common.queryId})`);
+      return { retrieved: null, record: { status: 'empty', ...common, placedUnitIds: [], omittedCount: 0 } };
+    }
 
-  const retrieved = fit(response.passages, answer);
-  return {
-    retrieved,
-    record: {
-      status: 'placed',
-      ...common,
-      placedUnitIds: retrieved.passages.map(p => p.unitId),
-      omittedCount: retrieved.omittedCount,
-      boundChars: SECTION_BOUND_CHARS,
-    },
-  };
+    const retrieved = fit(response.passages, answer);
+    buildRetrievedSection(retrieved); // the section handlers.js will render must render here first
+    return {
+      retrieved,
+      record: {
+        status: 'placed',
+        ...common,
+        placedUnitIds: retrieved.passages.map(p => p.unitId),
+        omittedCount: retrieved.omittedCount,
+        boundChars: SECTION_BOUND_CHARS,
+      },
+    };
+  } catch (err) {
+    return failure('error', `memory-api answered with a malformed body: ${err.message}`, startedAt, { queryId });
+  }
 }
 
 module.exports = { retrieveForDispatch };
