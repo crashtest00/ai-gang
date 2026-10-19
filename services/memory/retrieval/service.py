@@ -12,16 +12,22 @@ query-log row, a table the index never reads.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from django.db import transaction
 from django.utils import timezone
 
+from index.embedding import ModelUnavailable
 from index.models import SCOPES
 from index.status import index_status
 
 from . import ranking, sources
 from .models import QueryLog
+
+log = logging.getLogger(__name__)
+_warned = False
+MODEL_UNAVAILABLE_REASON = 'embedding model unavailable'
 
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 50
@@ -97,7 +103,20 @@ def answer(request: dict, *, core: Optional[sources.CoreReads] = None) -> dict:
     params = parsed['params']
     # Ranked with room to spare: a withheld passage must not leave the
     # result short of passages that exist.
-    candidates = ranking.rank(parsed['question'], scope=parsed['scope'], limit=parsed['limit'] * 2, params=params)
+    model_unavailable = False
+    try:
+        candidates = ranking.rank(parsed['question'], scope=parsed['scope'], limit=parsed['limit'] * 2,
+                                  params=params)
+    except ModelUnavailable as err:
+        # Answered from the full-text ranking alone and flagged incomplete
+        # (REQ-07); the failure is logged once per process.
+        global _warned
+        if not _warned:
+            _warned = True
+            log.warning('embedding model unavailable; retrieval answers from full-text ranking only: %s', err)
+        model_unavailable = True
+        candidates = ranking.rank(parsed['question'], scope=parsed['scope'], limit=parsed['limit'] * 2,
+                                  params=params, lexical_only=True)
 
     passages, withheld = [], []
     for candidate in candidates:
@@ -116,7 +135,8 @@ def answer(request: dict, *, core: Optional[sources.CoreReads] = None) -> dict:
             continue
         passages.append(_passage(len(passages) + 1, candidate, status, now))
 
-    incomplete = bool(lag['incomplete'])
+    incomplete = bool(lag['incomplete']) or model_unavailable
+    reasons = list(lag['reasons']) + ([MODEL_UNAVAILABLE_REASON] if model_unavailable else [])
     body = {
         'question': parsed['question'],
         'scope': parsed['scope'],
@@ -124,7 +144,7 @@ def answer(request: dict, *, core: Optional[sources.CoreReads] = None) -> dict:
         'passages': passages,
         'withheld': withheld,
         'incomplete': incomplete,
-        'incompleteReasons': lag['reasons'],
+        'incompleteReasons': reasons,
         # REQ-07: an empty result means "nothing relevant" only when the
         # index was not behind and no passage was withheld as not current.
         'nothingRelevant': not passages and not incomplete and not withheld,

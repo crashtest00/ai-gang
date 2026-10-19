@@ -596,3 +596,43 @@ def test_ac10_dropping_the_index_and_rebuilding_returns_the_same_passages(client
     assert passages(client, FACT_QUESTIONS[0][0]) == []
     call_command('rebuild_index')
     assert _answers(client) == before
+
+
+# --- row 36 (answer 2.2): an unavailable embedding model degrades to full-text, flagged incomplete ----
+
+@pytest.fixture
+def no_model(indexed, settings, tmp_path, monkeypatch):
+    from retrieval import service
+    monkeypatch.setattr(service, '_warned', False, raising=False)
+    settings.MEMORY_EMBED_MODEL_DIR = str(tmp_path / 'no-model')
+
+
+def test_row36_a_missing_model_answers_a_lexical_question_from_full_text_flagged_incomplete(
+        client, no_model, caplog):
+    with caplog.at_level('WARNING'):
+        status, body = ask(client, 'How often does the quokka gateway retry?')
+    assert status == 200
+    assert body['passages'] and body['passages'][0]['class'] == 'specification'
+    assert body['incomplete'] is True
+    assert 'embedding model unavailable' in body['incompleteReasons']
+    assert body['nothingRelevant'] is False
+    assert any('embedding model unavailable' in r.getMessage() and r.levelname == 'WARNING'
+               for r in caplog.records)
+    assert QueryLog.objects.get(pk=body['queryId']).index_incomplete is True
+
+
+def test_row36_a_missing_model_never_reports_nothing_relevant_for_an_unanswerable_question(client, no_model):
+    status, body = ask(client, 'zzqxv blorptangle unmatched')
+    assert status == 200
+    assert body['passages'] == []
+    assert body['incomplete'] is True and body['nothingRelevant'] is False
+    assert 'embedding model unavailable' in body['incompleteReasons']
+    assert QueryLog.objects.get(pk=body['queryId']).index_incomplete is True
+
+
+def test_row36_a_healthy_model_is_not_flagged_and_logs_no_model_warning(client, indexed, caplog):
+    with caplog.at_level('WARNING'):
+        status, body = ask(client, 'How often does the quokka gateway retry?')
+    assert status == 200 and body['passages']
+    assert 'embedding model unavailable' not in body['incompleteReasons']
+    assert not any('embedding model unavailable' in r.getMessage() for r in caplog.records)
