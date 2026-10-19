@@ -127,6 +127,9 @@ function buildUnblockPrompt(issue, agent, task, message, blockedMarker) {
 // owner after a pipeline failure or human-requested rework.
 // evidence: { kind: 'pipeline_failure', build_url, build_number } or
 // { kind: 'human_rework' }.
+const NEW_PR_STEPS =
+  'Branch from origin/dev, open a new pull request with the fix, and report `completed` with that PR through a2a-submit so the new PR is claimed for this work item.';
+
 function buildRetryPrompt(issue, agent, evidence, task, message) {
   const lines = [];
   lines.push(`## ROLE`);
@@ -141,13 +144,19 @@ function buildRetryPrompt(issue, agent, evidence, task, message) {
 
   lines.push(`## RESUME POINT`);
   if (evidence?.kind === 'pipeline_failure') {
-    lines.push(`The project pipeline failed on your pull request for this ticket.`);
+    // The evidence carries only build_url and build_number (gateway.js's
+    // handlePipelineRetry, from core's pipeline_retry), so it cannot say
+    // whether the failed build was a PR build (the PR is still open) or the
+    // post-merge dev build (the PR has merged). The prompt states both cases.
+    lines.push(`The project pipeline failed for this ticket's pull request.`);
     if (evidence.build_url) lines.push(`Build log: ${evidence.build_url}`);
     if (evidence.build_number) lines.push(`Build number: ${evidence.build_number}`);
-    lines.push(`Diagnose the failure, fix it, and push the fix to the same branch/PR.`);
+    lines.push(`Diagnose the failure and fix it. First check whether your pull request is still open.`);
+    lines.push(`- If it is still open: push the fix to the same branch/PR.`);
+    lines.push(`- If it has already merged (the failure is on the post-merge dev build): there is no open PR to push to. ${NEW_PR_STEPS}`);
   } else {
-    lines.push(`A human reviewer requested rework after reviewing this ticket on beta.`);
-    lines.push(`Read the comment thread below for the specific rework requested, address it, and push the fix to the same branch/PR.`);
+    lines.push(`A human reviewer requested rework after reviewing this ticket on beta. The pull request you delivered has already merged.`);
+    lines.push(`Read the comment thread below for the specific rework requested and address it. ${NEW_PR_STEPS}`);
   }
   lines.push('');
 
