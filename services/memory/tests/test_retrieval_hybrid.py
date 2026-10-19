@@ -114,3 +114,30 @@ def test_a_replaced_unit_is_ranked_by_its_new_embedding_not_a_kept_one(client, e
     assert 's4' not in found[:1]
     assert by_unit[passages(client, 'When are the lighthouse lamps cleaned?')[0]['unitId']] == 's4'
 
+
+
+def _s4_is_embedding_only(unit_id):
+    """The precondition of the two tests below, so neither passes vacuously:
+    the unit shares no word with the question (full-text search does not
+    find it, floor or no floor) and its similarity clears the cutoff."""
+    found, _ = ranking._lexical(PARAPHRASE, None, ranking.Params())
+    assert unit_id not in {c.unit_id for c in found}
+    sims = {u: sim for u, sim, _ in ranking._similar(PARAPHRASE, None, 50)}
+    assert sims[unit_id] >= ranking.EMBEDDING_CUTOFF
+
+
+def test_req06_a_unit_matching_only_by_embedding_outside_the_declared_scope_is_not_returned(client, evaluated):
+    s4 = next(u for u, key in evaluated.items() if key == 's4')
+    _s4_is_embedding_only(s4)
+    assert IndexUnit.objects.get(pk=s4).scope == 'project'
+    assert s4 in {p['unitId'] for p in passages(client, PARAPHRASE, limit=50)}                # control
+    assert s4 in {p['unitId'] for p in passages(client, PARAPHRASE, scope='project', limit=50)}
+    assert s4 not in {p['unitId'] for p in passages(client, PARAPHRASE, scope='platform', limit=50)}
+
+
+def test_req04_a_unit_matching_only_by_embedding_that_is_not_current_is_not_returned(client, evaluated):
+    s4 = next(u for u, key in evaluated.items() if key == 's4')
+    _s4_is_embedding_only(s4)
+    assert s4 in {p['unitId'] for p in passages(client, PARAPHRASE, limit=50)}                # control
+    IndexUnit.objects.filter(pk=s4).update(current=False)
+    assert s4 not in {p['unitId'] for p in passages(client, PARAPHRASE, limit=50)}

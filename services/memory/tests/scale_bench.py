@@ -130,6 +130,7 @@ def test_scale(client, redis_client, closed_core):  # noqa: F811
     finally:
         service.ranking.rank = real
 
+    median_extra_ms = statistics.median(latency) - statistics.median(baseline)
     out = {
         'model': f'{embedding.MODEL.name}@{embedding.MODEL.revision}',
         'embedded_units': embedded, 'embedded_chars_mean': round(chars / embedded),
@@ -141,6 +142,10 @@ def test_scale(client, redis_client, closed_core):  # noqa: F811
                                             'p95': round(_p95(baseline), 1)},
         'ranker_halves_ms': {k: {'median': round(statistics.median(v), 1), 'p95': round(_p95(v), 1)}
                              for k, v in halves.items()},
+        'median_extra_over_full_text_ms': round(median_extra_ms, 1),
         'peak_rss_mb': round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
     }
     print('SCALE BENCH', json.dumps(out, indent=1))
+
+    # Gate 6 (build brief): the hybrid median is at most 0.5 s above full-text search alone.
+    assert median_extra_ms <= 500, f"hybrid median is {median_extra_ms:.0f} ms above full-text search alone (budget 500 ms)"

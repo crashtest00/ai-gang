@@ -536,6 +536,16 @@ all five long-running containers (`memory-copier`, `memory-api`,
 `memory-extraction`, `memory-extractor` and `memory-indexer`) are running —
 the `memory` line of `scripts/startup/confirm-health.sh`.
 
+**Two costs of the embedding index.** Upgrading to the release that adds it runs
+Memory index migration `0004_unit_embedding`, which empties the index; the
+indexer then re-embeds every unit, and until it has, retrieval reports the
+classes it has not reached as "not indexed yet". The measured cost is about
+1.2 s per unit (1.24 s over 2,000 units on a 4-vCPU host with no GPU), so
+20,000 units take about 6.5 hours (`services/memory/index/__init__.py`).
+And building Memory's image downloads the pinned embedding model (about
+150 MB) from huggingface.co (`services/memory/scripts/fetch-embedding-model.sh`),
+so the build host needs that access; nothing is downloaded at runtime.
+
 **Size the host's inotify watch limit.** The copier watches every directory
 on the harness volume — one per project, plus one or more per session the
 harness still keeps — and falls back to its 30-minute reconciling pass for
