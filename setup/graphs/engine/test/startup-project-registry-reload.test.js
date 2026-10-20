@@ -102,7 +102,7 @@ function stubDocker(dir, { restartCreatesGroup = true, groupsReplyPauseSeconds =
 }
 
 // A temporary checkout holding only what these two steps read: the
-// configuration, the project directory and its Dockerfile, and the two
+// configuration, the project directory and its Dockerfile, and the three
 // service directories `docker compose` is run from.
 function makeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-registry-reload-'));
@@ -111,6 +111,8 @@ function makeRoot() {
   fs.writeFileSync(path.join(root, 'projects', PROJECT, 'Dockerfile'), 'FROM node:22-alpine\n');
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
+  // Step 9 also starts Memory's indexer from here (held back by step 6).
+  fs.mkdirSync(path.join(root, 'services', 'memory'), { recursive: true });
   // The validator the steps read their decisions back through lives in
   // the real checkout, so it is linked rather than copied.
   fs.mkdirSync(path.join(root, 'setup', 'graphs', 'engine', 'lib'), { recursive: true });
