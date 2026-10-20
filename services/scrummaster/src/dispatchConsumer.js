@@ -34,6 +34,7 @@ const canonicalWorkItems = require('./canonicalWorkItems');
 const taskStore = require('./a2a/taskStore');
 const handlers = require('./handlers');
 const { buildTaskPrompt, buildUnblockPrompt, buildRetryPrompt } = require('./prompt');
+const dispatchContext = require('./dispatchContext');
 
 const consumers = [];
 
@@ -127,6 +128,11 @@ async function maybeDispatch(workItemId, envelope) {
   }
 
   const issueLike = await issueLikeFor(full);
+  // Retrieved before the Task is read, and before dispatchTask is called: the
+  // awaited retrieval must not sit between reading whether the work item has a
+  // Task and dispatchTask registering or reopening it, or two consumers
+  // dispatching one work item could both read it as new (I-07).
+  const { retrieved, record: memoryRecord } = await dispatchContext.retrieveForDispatch(issueLike);
   const isRefinement = full.assignee_agent_id === 'refinement-agent';
   const existingTask = taskStore.getTaskById(issueLike.key);
 
@@ -137,20 +143,20 @@ async function maybeDispatch(workItemId, envelope) {
     // this is the story's first dispatch or a redispatch after its required
     // fields were filled in.
     const allowedAgents = registry.getEffectiveAgents(full.project);
-    promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { allowedAgents, task, message });
+    promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { allowedAgents, task, message, retrieved });
   } else if (!existingTask) {
     // A fresh dispatch: the first time this item has ever been assigned a
     // Task.
-    promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { task, message });
+    promptFactory = (task, message) => buildTaskPrompt(issueLike, agent, { task, message, retrieved });
   } else {
     // A dev-agent item reaching 'ready' again after already having a Task
     // (e.g. a dependency-blocked subtask unblocked, then re-readied) —
     // resume via the BLOCKED-marker search.
     const blockedMarker = await handlers.findBlockedMarker(issueLike.key);
-    promptFactory = (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker);
+    promptFactory = (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker, retrieved);
   }
 
-  await handlers.dispatchTask(issueLike, agent, { dispatchId: envelope.messageId, promptFactory });
+  await handlers.dispatchTask(issueLike, agent, { dispatchId: envelope.messageId, promptFactory, memoryRecord });
 
   // Post-dispatch, the work item must stop reading as merely waiting to be
   // picked up: an agent now has it, and the only place an operator can see
@@ -193,9 +199,11 @@ async function maybeRedispatchForRework(workItemId, envelope) {
   if (!agent) return;
 
   const issueLike = await issueLikeFor(full);
+  const { retrieved, record: memoryRecord } = await dispatchContext.retrieveForDispatch(issueLike);
   await handlers.dispatchTask(issueLike, agent, {
     dispatchId: envelope.messageId,
-    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, { kind: 'human_rework' }, task, message),
+    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, { kind: 'human_rework' }, task, message, retrieved),
+    memoryRecord,
   });
 }
 
@@ -213,9 +221,11 @@ async function handleBlockedClearedSideEffect(workItemId, envelope) {
 
   const issueLike = await issueLikeFor(full);
   const blockedMarker = await handlers.findBlockedMarker(issueLike.key);
+  const { retrieved, record: memoryRecord } = await dispatchContext.retrieveForDispatch(issueLike);
   await handlers.dispatchTask(issueLike, agent, {
     dispatchId: envelope.messageId,
-    promptFactory: (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker),
+    promptFactory: (task, message) => buildUnblockPrompt(issueLike, agent, task, message, blockedMarker, retrieved),
+    memoryRecord,
   });
 }
 

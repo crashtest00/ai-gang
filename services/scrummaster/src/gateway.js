@@ -7,6 +7,7 @@ const streams = require('./streams');
 const idempotency = require('./idempotency');
 const dependencies = require('./dependencies');
 const canonicalWorkItems = require('./canonicalWorkItems');
+const dispatchContext = require('./dispatchContext');
 const assignment = require('./assignment');
 const taskStore = require('./a2a/taskStore');
 const schema = require('./a2a/schema');
@@ -431,8 +432,10 @@ async function redispatchImplementationOwner(workItemId, evidence) {
 
   const { handlers, dispatchConsumer, buildRetryPrompt } = dispatchModules();
   const issueLike = await dispatchConsumer.issueLikeFor(full);
+  const { retrieved, record: memoryRecord } = await dispatchContext.retrieveForDispatch(issueLike);
   await handlers.dispatchTask(issueLike, agent, {
-    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, evidence, task, message),
+    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, evidence, task, message, retrieved),
+    memoryRecord,
   });
   return { workItemId, agentId: agent.id };
 }

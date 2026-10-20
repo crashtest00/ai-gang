@@ -219,11 +219,16 @@ def index_session(session_id: str) -> None:
         payload = {'read': SESSIONS, 'sessionId': session_id}
         if path == main['archive_path']:
             def index_main(path=path, key=key):
+                # Stamped by the units themselves, not the archive copy's
+                # digest: an active session's copy grows with every record
+                # its running turn writes, while its units (the turns up to
+                # the last end record) stay as they were, and are not
+                # written again (REQ-04's freshness bound).
                 upto = None if over else end_line
-                stamp = {'digest': entry_digest(main), 'upto': upto}
+                units = _session_file_units(session_id, project, path, main_data, upto, None)
+                stamp = {'units': _digest(units), 'upto': upto}
                 if store.stamp_of(key) != stamp:
-                    store.replace_units(key, CLASS_SESSION, stamp, _session_file_units(
-                        session_id, project, path, main_data, upto, None))
+                    store.replace_units(key, CLASS_SESSION, stamp, units)
             _guarded(key, CLASS_SESSION, payload, index_main)
         elif harness.is_subagent_transcript(path):
             _guarded(key, CLASS_SESSION, payload, lambda e=entry, k=key: _index_subagent(
@@ -406,21 +411,44 @@ def follow_platform(*, force: bool = False) -> int:
         documents = platform.documents(root, commit)
         written = _platform_written_times(root, commit)
     except platform.PlatformUnavailable as err:
-        store.record_failure(key, CLASS_PLATFORM, str(err), {'read': PLATFORM})
+        _platform_failed(key, str(err))
         return 0
     count = 0
+    try:
+        with transaction.atomic():
+            # Each document's units replace its own, so a passage whose text
+            # is unchanged at the new commit keeps its embedding
+            # (store.replace_units); a document gone at this commit goes.
+            keys = set()
+            for path, text in documents:
+                keys.add(f'platform:{path}')
+                count += store.replace_units(f'platform:{path}', CLASS_PLATFORM, {'commit': commit},
+                                             _cuts_with_lines(text, {'commit': commit, 'path': path},
+                                                              written.get(path, written[None])))
+            IndexUnit.objects.filter(source_class=CLASS_PLATFORM).exclude(source_key__in=keys).delete()
+            IndexSource.objects.filter(source_class=CLASS_PLATFORM).exclude(source_key__in=keys).delete()
+            IndexState.objects.filter(pk=1).update(platform_commit=commit)
+            IndexFailure.objects.filter(source_key=key).delete()
+            IndexCursor.objects.get_or_create(name=PLATFORM)
+            IndexCursor.objects.filter(name=PLATFORM).update(caught_up=True, last_round_at=timezone.now())
+    except Exception as err:  # noqa: BLE001 - REQ-09: e.g. the embedding model cannot run; recorded, retried
+        log.exception('indexing the platform corpus failed')
+        _platform_failed(key, f'{type(err).__name__}: {err}')
+        return 0
+    return count
+
+
+def _platform_failed(key: str, reason: str) -> None:
+    """REQ-09: the platform corpus is one record, keyed by its checkout, while
+    its units are keyed by document. A failure removes them all, so no
+    passage of an earlier commit is served while it stands, and forgets the
+    commit they were built from, so the next start or retry reads the
+    checkout again."""
     with transaction.atomic():
         IndexUnit.objects.filter(source_class=CLASS_PLATFORM).delete()
         IndexSource.objects.filter(source_class=CLASS_PLATFORM).delete()
-        for path, text in documents:
-            count += store.replace_units(f'platform:{path}', CLASS_PLATFORM, {'commit': commit},
-                                         _cuts_with_lines(text, {'commit': commit, 'path': path},
-                                                          written.get(path, written[None])))
-        IndexState.objects.filter(pk=1).update(platform_commit=commit)
-        IndexFailure.objects.filter(source_key=key).delete()
-        IndexCursor.objects.get_or_create(name=PLATFORM)
-        IndexCursor.objects.filter(name=PLATFORM).update(caught_up=True, last_round_at=timezone.now())
-    return count
+        IndexState.objects.filter(pk=1).update(platform_commit='')
+        store.record_failure(key, CLASS_PLATFORM, reason, {'read': PLATFORM})
 
 
 def _platform_written_times(root: str, commit: str) -> dict:
