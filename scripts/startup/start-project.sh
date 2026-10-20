@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Step 9 — build and start the project container, then reload the
-# services that read the project list at startup.
+# Step 9 — build and start the project container, reload the services
+# that read the project list at startup, then start Memory's indexer.
 #
 # The container's own entrypoint starts the Redis subscriber under pm2 on
 # every start, so there is no post-start command for anyone to run.
@@ -28,6 +28,12 @@
 #
 # The outbox relay is deliberately not restarted: it takes each row's
 # project from the row itself and never reads the project list.
+#
+# Last, the step starts `memory-indexer`, which start-memory.sh (step 6)
+# held back. Its first pass embeds the platform corpus, which is CPU-heavy,
+# so it starts only once the project container is built and running. Its
+# image was built at step 6 (it shares `aigang-memory` with the other Memory
+# services), so no --build here. Step 10 still requires it to be running.
 
 set -euo pipefail
 STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,5 +77,12 @@ wait_until 30 workitem_commands_consumed "$PROJECT_NAME" \
   || die "the core service is not consuming '$PROJECT_NAME' after the reload — no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME")"
 
 log "the core service is consuming commands for '$PROJECT_NAME'"
+
+log "starting Memory's indexer, held back since step 6 so it would not compete with the project container's build"
+compose_in services/memory up -d memory-indexer || die "Memory's indexer did not start"
+
+wait_until 30 memory_indexer_running \
+  || { status service memory unhealthy; die "memory-indexer is not running after it was started"; }
+log "memory-indexer is running"
 
 end_step start-project

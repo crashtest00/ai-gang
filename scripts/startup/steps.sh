@@ -20,10 +20,10 @@ STEPS=(
   "start-core|Build and start the core service and apply its database migrations"
   "create-admin|Create the Django admin account from .env"
   "start-scrummaster|Build and start ScrumMaster"
-  "start-memory|Create the shared harness volume, then build and start Memory"
+  "start-memory|Create the shared harness volume, then build and start Memory without its indexer"
   "initialize-project|Initialize the configured project from the configuration"
   "install-project-dockerfile|Install the project container's Dockerfile from its stack's template"
-  "start-project|Build and start the project container, then reload the services that read the project list at startup"
+  "start-project|Build and start the project container, reload the services that read the project list at startup, then start Memory's indexer"
   "confirm-health|Confirm every service is healthy and record the admin address"
 )
 

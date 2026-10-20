@@ -102,10 +102,10 @@ what the container builds the agent's own instructions from.
 | 3 | `scripts/startup/start-core.sh` | Build and start the core service and apply its database migrations |
 | 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
 | 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
-| 6 | `scripts/startup/start-memory.sh` | Create the shared harness volume, then build and start Memory |
+| 6 | `scripts/startup/start-memory.sh` | Create the shared harness volume, then build and start Memory without its indexer |
 | 7 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
 | 8 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
-| 9 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
+| 9 | `scripts/startup/start-project.sh` | Build and start the project container, reload the services that read the project list at startup, then start Memory's indexer |
 | 10 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
 
 Before the first of them, the entrypoint has already run
