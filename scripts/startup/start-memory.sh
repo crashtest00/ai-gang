@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# Step 6 — create the shared harness volume, then build and start Memory.
+# Step 6 — create the shared harness volume, then build and start Memory
+# without its indexer.
+#
+# `memory-indexer` is deliberately not started here. It begins embedding the
+# platform corpus at once with a local model, which is CPU-heavy, and step 9
+# builds the project container while that would still be running; on a small
+# host the build starves. start-project.sh (step 9) starts the indexer after
+# the project container is up. Everything else in Memory starts here, and the
+# `up` names those services, so the indexer is never brought up as a
+# dependency or by accident.
 #
 # Every project container that runs an agent mounts its own subdirectory of
 # one shared named volume, `aigang-harness`, at the agent harness's
@@ -30,11 +39,14 @@ docker volume create "$AIGANG_HARNESS_VOLUME" >/dev/null \
   || die "could not create the shared harness volume '$AIGANG_HARNESS_VOLUME'"
 log "shared harness volume '$AIGANG_HARNESS_VOLUME' exists"
 
-compose_in services/memory up -d --build || die "Memory did not start"
+# Every service in services/memory/docker-compose.yml except memory-indexer.
+compose_in services/memory up -d --build \
+  memory-postgres migrate memory-copier memory-api memory-extraction memory-extractor \
+  || die "Memory did not start"
 
 for _ in $(seq 1 60); do
-  if memory_running && docker exec memory-api curl -fsS http://localhost:9200/health >/dev/null 2>&1; then
-    log "Memory is answering /health and its five long-running containers are running"
+  if memory_running --without-indexer && docker exec memory-api curl -fsS http://localhost:9200/health >/dev/null 2>&1; then
+    log "Memory is answering /health and its four other long-running containers are running; memory-indexer is held until step 9, after the project container is up"
     status service memory healthy
     end_step start-memory
     exit 0
@@ -43,4 +55,4 @@ for _ in $(seq 1 60); do
 done
 
 status service memory unhealthy
-die "Memory did not come up within 120s (memory-api answering /health, all five long-running containers running)"
+die "Memory did not come up within 120s (memory-api answering /health, the four long-running containers other than memory-indexer running)"

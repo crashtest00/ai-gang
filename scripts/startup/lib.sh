@@ -224,13 +224,28 @@ AIGANG_HARNESS_VOLUME=aigang-harness
 # the copier, which keeps the archive; the API, which serves it and answers
 # retrieval; the extraction dispatcher; the extractor, which parses files for
 # it; and the indexer, which keeps the corpus index. (`migrate` is one-shot
-# and `memory-postgres` is the database; neither is checked here.) Used by
-# start-memory.sh and confirm-health.sh's `memory` check alike.
+# and `memory-postgres` is the database; neither is checked here.)
+#
+# `memory_running` alone checks all five; confirm-health.sh's `memory` check
+# calls it that way. `memory_running --without-indexer` checks the first four
+# only: start-memory.sh (step 6) holds the indexer back until step 9 has the
+# project container up, because its embedding work starves the host while the
+# project image builds, so step 6 cannot wait for it. Nothing else uses the
+# flag.
 memory_running() {
-  local name
-  for name in memory-copier memory-api memory-extraction memory-extractor memory-indexer; do
+  local name names=(memory-copier memory-api memory-extraction memory-extractor)
+  if [[ "${1:-}" != "--without-indexer" ]]; then
+    names+=(memory-indexer)
+  fi
+  for name in "${names[@]}"; do
     [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] || return 1
   done
+}
+
+# True when the indexer container is running. Used by start-project.sh
+# (step 9) after it starts the indexer.
+memory_indexer_running() {
+  [[ "$(docker inspect -f '{{.State.Running}}' memory-indexer 2>/dev/null)" == "true" ]]
 }
 
 # `docker compose` run exactly where an operator would run it: from the
