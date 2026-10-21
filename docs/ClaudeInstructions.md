@@ -544,7 +544,10 @@ classes it has not reached as "not indexed yet". The measured cost is about
 20,000 units take about 6.5 hours (`services/memory/index/__init__.py`).
 And building Memory's image downloads the pinned embedding model (about
 150 MB) from huggingface.co (`services/memory/scripts/fetch-embedding-model.sh`),
-so the build host needs that access; nothing is downloaded at runtime. If the model is missing or broken, retrieval degrades to
+so the build host needs that access; nothing is downloaded at runtime. The
+compose file runs `memory-indexer` capped at 2 threads and 2 CPUs
+(`MEMORY_EMBED_THREADS=2`, `cpus: "2"`) so the first full embedding cannot
+saturate a small host; `memory-api` is uncapped, for query embedding latency. If the model is missing or broken, retrieval degrades to
 full-text search with `incomplete` set and the reason "embedding model unavailable", and
 the indexer records indexing failures until it is restored.
 

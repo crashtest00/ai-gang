@@ -93,6 +93,15 @@ def test_compose_runs_the_dispatcher_from_memorys_image_sharing_only_the_spool()
     assert 'ports:' not in dispatcher
 
 
+def test_compose_caps_the_indexer_at_two_threads_and_two_cpus_and_leaves_the_api_uncapped():
+    indexer = _service('memory-indexer')
+    assert re.search(r'^      - MEMORY_EMBED_THREADS=2$', indexer, re.M)
+    assert re.search(r'^    cpus: "2"$', indexer, re.M)
+    api = _service('memory-api')
+    assert 'MEMORY_EMBED_THREADS' not in api
+    assert 'cpus:' not in api
+
+
 def test_the_extractor_image_carries_its_parser_and_nothing_that_reaches_out():
     dockerfile = (MEMORY_DIR / 'extractor' / 'Dockerfile').read_text()
     requirements = (MEMORY_DIR / 'extractor' / 'requirements.txt').read_text()
