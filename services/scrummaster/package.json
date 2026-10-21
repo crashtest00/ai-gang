@@ -1,7 +1,7 @@
 {
   "name": "scrummaster",
   "version": "1.0.0",
-  "description": "AI Gang ScrumMaster — deterministic routing service between Jira and agent containers",
+  "description": "AI Gang ScrumMaster — deterministic routing service between core's canonical work-item events and agent containers",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

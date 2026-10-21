@@ -12,10 +12,17 @@
  * always durably reported back on the gateway stream.
  *
  * Required env vars:
- *   PROJECT_NAME          — matches the Jira project name (e.g. "hello-world")
+ *   PROJECT_NAME          — matches the canonical project name recorded on the
+ *                           work items in `core` (e.g. "hello-world"), which is
+ *                           what a task envelope's `project` carries and what
+ *                           makeTaskHandler below compares it against. Not a
+ *                           Jira project name: no part of a dispatch reads one
  *   REDIS_HOST            — hostname of the Redis container
  *   REDIS_PORT            — Redis port (default 6379)
- *   ANTHROPIC_API_KEY     — required by Claude Code
+ *   ANTHROPIC_API_KEY     — required by Claude Code when the platform's
+ *                           authMethod is "api-key"
+ *   CLAUDE_CODE_OAUTH_TOKEN — required instead when it is "oauth-token"
+ *                           (a token from `claude setup-token`)
  *
  * Optional env vars:
  *   AGENT_CHANNEL_SUFFIX   — scope this container to one agent role (e.g.
@@ -39,6 +46,16 @@
  * completes before being picked up (same behavior as the previous in-memory
  * queue, now backed by pending Streams entries instead of process memory).
  *
+ * Each dispatch runs from a per-dispatch snapshot of everything an agent reads
+ * during its session — the commons, the per-role definitions and the two role
+ * handbooks (see setup/dispatch-snapshot.js) — with every mount path the
+ * session is given for one of them rewritten onto that snapshot, so no file an
+ * agent reads can change under it. The whole dispatch context is in the
+ * session's environment rather than only in its prompt — seven variables:
+ * PROJECT_NAME, REDIS_HOST, A2A_TASK_ID, A2A_CONTEXT_ID, A2A_LAST_MESSAGE_ID,
+ * AIGANG_COMMONS_DIR and AIGANG_COMMONS_VERSION — with the snapshot's `tools/`
+ * first on PATH, so a tool is invoked by name.
+ *
  * A kind=TASK envelope's `payload` is a canonical A2A Message ({ kind:
  * "message", messageId, taskId, contextId, role, parts, ... }). This
  * subscriber only needs the
@@ -48,8 +65,16 @@
 
 const { createClient } = require('redis');
 const { execFile } = require('child_process');
-const { buildEnvelope, KIND } = require('./lib/envelope');
-const { ensureGroup, createConsumer, publish: streamsPublish } = require('./lib/streams');
+const { buildEnvelope, KIND } = require('./commons/tools/envelope');
+const { ensureGroup, createConsumer, publish: streamsPublish } = require('./commons/tools/streams');
+const {
+  createSnapshot,
+  installSkills,
+  sessionEnv,
+  rewriteAgentPaths,
+  removeSnapshot,
+  pruneSnapshotRoot,
+} = require('./dispatch-snapshot');
 
 const PROJECT_NAME = process.env.PROJECT_NAME;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
@@ -109,8 +134,10 @@ async function publishTaskStatus(client, envelope, statusPayload) {
     contextId: envelope.contextId,
     correlationId: envelope.messageId,
     payload: {
-      // taskId is the Jira issue key itself (one
-      // Task per ticket for its whole lifecycle).
+      // taskId is the work item's own canonical id in both modes (one
+      // Task per work item for its whole lifecycle). `ticket_key` is a
+      // generic field name that stays; it carries that canonical id, never
+      // a Jira issue key (V5.1 REQ-06).
       ticket_key: envelope.taskId,
       agent_name: AGENT_DISPLAY_NAME,
       ...statusPayload,
@@ -130,7 +157,39 @@ function runClaude(envelope) {
       return;
     }
 
+    // Snapshot the mount for this dispatch before spawning the session, so a
+    // `git pull` on the host cannot change a tool, a skill, a role definition
+    // or a handbook under the running session, and stamp the session with the
+    // snapshot's content hash. See setup/dispatch-snapshot.js.
+    let snapshot;
+    try {
+      snapshot = createSnapshot();
+      installSkills(snapshot);
+    } catch (snapshotErr) {
+      if (snapshot) {
+        try { removeSnapshot(snapshot); } catch { /* best effort */ }
+      }
+      console.error(`[subscriber] Commons snapshot failed for ${envelope.taskId}: ${snapshotErr.message}`);
+      resolve({ success: false, reason: 'commons_snapshot_failed', diagnostic: snapshotErr.message });
+      return;
+    }
+
+    // ScrumMaster's prompt opens with the role definition's path, a fixed
+    // `/agent-docs/agents/<role>.md` from its own config, and the definition it
+    // points at names its handbook the same way. Both are snapshotted, so both
+    // paths are rewritten onto this dispatch's snapshot — the definition and
+    // the handbook inside `createSnapshot`, the prompt here — and the session
+    // is given no path into the live mount for either (Agent Commons REQ-02,
+    // Amendment 1).
+    const sessionPrompt = rewriteAgentPaths(prompt, snapshot);
+
     console.log(`[subscriber] Starting Claude for ticket ${envelope.taskId}`);
+    console.log(`[subscriber] Commons snapshot ${snapshot.commonsDir} version ${snapshot.version} for ${envelope.taskId}`);
+    console.log(
+      `[subscriber] Snapshot ${snapshot.dispatchDir} carries ${snapshot.entries.join(', ')}; `
+      + `mount paths rewritten in the prompt: ${sessionPrompt === prompt ? 'none' : 'yes'}, `
+      + `in ${snapshot.rewritten.length} snapshotted document(s)${snapshot.rewritten.length ? ` (${snapshot.rewritten.join(', ')})` : ''}`
+    );
 
     // Pass the prompt via stdin to avoid shell escaping issues with complex prompts
     const child = execFile(
@@ -143,10 +202,26 @@ function runClaude(envelope) {
           REDIS_HOST,
           A2A_TASK_ID: envelope.taskId,
           A2A_CONTEXT_ID: envelope.contextId,
+          // The A2A message id of the dispatch message this session is
+          // replying to. A kind=TASK envelope's `payload` *is* the canonical
+          // A2A Message (see the header contract above), so the id is
+          // payload.messageId — not envelope.messageId, which is the
+          // transport id envelope.js mints for the stream entry.
+          A2A_LAST_MESSAGE_ID: envelope.payload?.messageId,
+          // PATH (snapshot tools first), AIGANG_COMMONS_DIR and
+          // AIGANG_COMMONS_VERSION. Spread last so its PATH wins.
+          ...sessionEnv(snapshot),
         },
         timeout: 30 * 60 * 1000, // 30 minute timeout per task
       },
       (err, _stdout, stderr) => {
+        // The session has ended: the snapshot and any per-session state a tool
+        // kept beside it go with it.
+        try {
+          removeSnapshot(snapshot);
+        } catch (cleanupErr) {
+          console.error(`[subscriber] Could not remove snapshot ${snapshot.dispatchDir}: ${cleanupErr.message}`);
+        }
         // Bounded, best-effort diagnostic — not a guarantee that no secret
         // ever appears in agent stderr output; this truncates but does not
         // scrub.
@@ -163,7 +238,7 @@ function runClaude(envelope) {
     );
 
     // Write the prompt to Claude's stdin, then close stdin to signal end of input
-    child.stdin.write(prompt);
+    child.stdin.write(sessionPrompt);
     child.stdin.end();
   });
 }
@@ -204,6 +279,20 @@ async function main() {
   client.on('error', err => console.error('[subscriber] Redis error:', err));
   await client.connect();
   console.log(`[subscriber] Connected to ${REDIS_URL} for project ${PROJECT_NAME}`);
+
+  // Anything left in the snapshot root belongs to a process that no longer
+  // exists: a subscriber that was killed rather than shut down never reaches
+  // removeSnapshot, and pm2 restarts it. Swept once, here, before the first
+  // consumer starts — dispatches are serial, so from the next line on a
+  // directory in there may be the running session's (see pruneSnapshotRoot).
+  try {
+    const pruned = pruneSnapshotRoot();
+    if (pruned.length) {
+      console.log(`[subscriber] Removed ${pruned.length} commons snapshot(s) left behind by an earlier process`);
+    }
+  } catch (pruneErr) {
+    console.error(`[subscriber] Could not sweep the snapshot root: ${pruneErr.message}`);
+  }
 
   const handler = makeTaskHandler(client);
   const consumerName = process.env.HOSTNAME || `${PROJECT_NAME}-container`;

@@ -20,6 +20,7 @@ const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const CONTRACT = path.join(REPO_ROOT, 'scripts', 'startup', 'env-contract.sh');
 const VALIDATE_ENV = path.join(REPO_ROOT, 'scripts', 'startup', 'validate-env.sh');
 const ENV_TEMPLATE = path.join(REPO_ROOT, '.env.template');
+const DERIVE_ENV = path.join(REPO_ROOT, 'scripts', 'startup', 'derive-env.sh');
 
 function readContract() {
   const result = spawnSync('bash', [CONTRACT], { encoding: 'utf8', timeout: 15000 });
@@ -28,8 +29,13 @@ function readContract() {
     .trim()
     .split('\n')
     .map((line) => {
-      const [kind, name, ...rest] = line.split(' ');
-      return { kind, name, default: rest.join(' ') };
+      // REQUIRED <NAME>, OPTIONAL <NAME> <default>, and
+      // REQUIRED_IN_METHOD <method> <NAME>, whose variable is the third field.
+      const [kind, second, ...rest] = line.split(' ');
+      if (kind === 'REQUIRED_IN_METHOD') {
+        return { kind, method: second, name: rest[0], default: rest.slice(1).join(' ') };
+      }
+      return { kind, name: second, default: rest.join(' ') };
     });
 }
 
@@ -43,16 +49,33 @@ function templateValue(name) {
 // A .env holding a valid value for every contract variable.
 const FILLED = {
   ANTHROPIC_API_KEY: 'sk-ant-test-not-a-real-key',
+  CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat-test-not-a-real-token',
   GH_TOKEN: 'github_pat_test_not_a_real_token',
   AIGANG_ADMIN_USER: 'operator',
   AIGANG_ADMIN_EMAIL: 'operator@example.invalid',
   AIGANG_ADMIN_PASSWORD: 'a-test-only-password',
   PGPASSWORD: 'a-test-only-pg-password',
   DJANGO_SECRET_KEY: 'a-test-only-django-key',
+  MEMORY_PGPASSWORD: 'a-test-only-memory-pg-password',
+  MEMORY_DJANGO_SECRET_KEY: 'a-test-only-memory-django-key',
 };
 
-function makeRoot(envOverrides = {}, { omit = [] } = {}) {
+// The platform configuration validate-env.sh reads the method from, through
+// load_decisions and validate-config.sh. That script runs the validator out of
+// $AIGANG_ROOT/setup, so the fixture root links the real one.
+function writeConfig(root, authMethod) {
+  fs.writeFileSync(path.join(root, 'ai-gang.config.json'), JSON.stringify({
+    schemaVersion: 2,
+    authMethod,
+    project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
+    repository: { url: 'https://github.com/an-org/a-repo.git' },
+  }));
+  fs.symlinkSync(path.join(REPO_ROOT, 'setup'), path.join(root, 'setup'));
+}
+
+function makeRoot(envOverrides = {}, { omit = [], authMethod = 'api-key' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-startup-env-'));
+  writeConfig(root, authMethod);
   const values = { ...FILLED, ...envOverrides };
   const lines = Object.entries(values)
     .filter(([name]) => !omit.includes(name))
@@ -76,13 +99,17 @@ function runValidateEnv(root) {
 
 // ---- the contract, .env.template, and each other ----
 
-test('the contract is well formed: REQUIRED or OPTIONAL, one variable each', () => {
+test('the contract is well formed: REQUIRED, REQUIRED_IN_METHOD or OPTIONAL, one variable each', () => {
   const entries = readContract();
   assert.ok(entries.length > 0);
   for (const entry of entries) {
-    assert.ok(['REQUIRED', 'OPTIONAL'].includes(entry.kind), `bad kind: ${entry.kind}`);
+    assert.ok(['REQUIRED', 'REQUIRED_IN_METHOD', 'OPTIONAL'].includes(entry.kind), `bad kind: ${entry.kind}`);
     assert.match(entry.name, /^[A-Z][A-Z0-9_]*$/);
     if (entry.kind === 'OPTIONAL') assert.notEqual(entry.default, '');
+    if (entry.kind === 'REQUIRED_IN_METHOD') {
+      assert.ok(['api-key', 'oauth-token'].includes(entry.method), `bad method: ${entry.method}`);
+      assert.equal(entry.default, '', 'a REQUIRED_IN_METHOD line is exactly three fields');
+    }
   }
   const names = entries.map((e) => e.name);
   assert.equal(new Set(names).size, names.length, 'a variable is listed twice');
@@ -98,13 +125,25 @@ test('every contract variable is declared in .env.template', () => {
   }
 });
 
-test('every REQUIRED variable ships empty in .env.template, so an unfilled copy fails', () => {
-  for (const entry of readContract().filter((e) => e.kind === 'REQUIRED')) {
+test('every REQUIRED and REQUIRED_IN_METHOD variable ships empty in .env.template, so an unfilled copy fails', () => {
+  for (const entry of readContract().filter((e) => e.kind === 'REQUIRED' || e.kind === 'REQUIRED_IN_METHOD')) {
     assert.equal(
       templateValue(entry.name),
       '',
-      `${entry.name} is REQUIRED and must ship empty in .env.template`
+      `${entry.name} is ${entry.kind} and must ship empty in .env.template`
     );
+  }
+});
+
+test('the contract carries exactly the two method-conditional credentials, and neither is unconditionally REQUIRED', () => {
+  const entries = readContract();
+  const lines = spawnSync('bash', [CONTRACT], { encoding: 'utf8', timeout: 15000 }).stdout.split('\n');
+  assert.deepEqual(lines.filter((l) => l.startsWith('REQUIRED_IN_METHOD ')), [
+    'REQUIRED_IN_METHOD api-key ANTHROPIC_API_KEY',
+    'REQUIRED_IN_METHOD oauth-token CLAUDE_CODE_OAUTH_TOKEN',
+  ]);
+  for (const name of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+    assert.equal(entries.some((e) => e.kind === 'REQUIRED' && e.name === name), false, `${name} must not be REQUIRED`);
   }
 });
 
@@ -114,6 +153,141 @@ test("every OPTIONAL variable's default matches what .env.template ships", () =>
       templateValue(entry.name),
       entry.default,
       `${entry.name}'s .env.template value and its contract default disagree`
+    );
+  }
+});
+
+// ---- the variables the contract deliberately does not list ----
+
+// Every variable derive-env.sh copies out of the platform .env by name, rather
+// than through the contract's env_value: the `env_file_get "$AIGANG_ENV_FILE"
+// <NAME>` calls, plus the loops over JIRA_FIELD_ID_VARS and, since V5.1's Jira
+// client, JIRA_CREDENTIAL_VARS. Read out of the script so this is the real set,
+// not a restated copy of it.
+function copiedThroughVariables() {
+  const text = fs.readFileSync(DERIVE_ENV, 'utf8');
+  const names = new Set();
+  for (const m of text.matchAll(/env_file_get "\$AIGANG_ENV_FILE" ([A-Z][A-Z0-9_]*)/g)) {
+    names.add(m[1]);
+  }
+  for (const arrayName of ['JIRA_FIELD_ID_VARS', 'JIRA_CREDENTIAL_VARS']) {
+    const list = text.match(new RegExp(`${arrayName}=\\(([^)]*)\\)`));
+    assert.ok(list, `${arrayName} is no longer an array literal in derive-env.sh`);
+    for (const name of list[1].match(/[A-Z][A-Z0-9_]*/g) || []) names.add(name);
+  }
+  assert.ok(names.size > 1, 'found no copied-through variables, so this check would be vacuous');
+  return [...names].sort();
+}
+
+test('the copied-through variables are out of the contract on purpose and declared blank in .env.template', () => {
+  // env-contract.sh's header scopes "the single list" to the variables startup
+  // requires or defaults, and says these are defined at the place that copies
+  // them instead. That is what this pins: startup neither requires nor
+  // defaults them, so they have no contract entry — and .env.template still
+  // declares each one, blank, so an operator can see it exists (V5.0 audit row
+  // 87).
+  const contractNames = new Set(readContract().map((e) => e.name));
+  for (const name of copiedThroughVariables()) {
+    assert.ok(
+      !contractNames.has(name),
+      `${name} is copied through by derive-env.sh and is now also in the contract — ` +
+      'either give it a REQUIRED/OPTIONAL entry and stop copying it by name, or keep it out of both'
+    );
+    assert.equal(
+      templateValue(name),
+      '',
+      `${name} is copied through by derive-env.sh and must ship declared-but-empty in .env.template`
+    );
+  }
+});
+
+test('a copied-through variable is omitted from the derived .env when the platform .env leaves it blank', () => {
+  // The property that makes a contract entry wrong for these: unset is a
+  // meaningful state, not a missing value to default.
+  const text = fs.readFileSync(DERIVE_ENV, 'utf8');
+  assert.match(text, /if webhook_secret="\$\(env_file_get "\$AIGANG_ENV_FILE" WEBHOOK_SECRET\)" && \[\[ -n "\$webhook_secret" \]\]; then/);
+  assert.match(text, /if jira_value="\$\(env_file_get "\$AIGANG_ENV_FILE" "\$jira_var"\)" && \[\[ -n "\$jira_value" \]\]; then/);
+});
+
+// ---- the reverse direction: .env.template -> the contract ----
+
+// Every name .env.template assigns, in source order — the set the two
+// checks above build out of the contract and derive-env.sh only ever walk
+// forward from, never back over. Read out of the file itself, same as
+// templateValue reads a single one, so this is the real set too.
+function templateAssignedVariables() {
+  const text = fs.readFileSync(ENV_TEMPLATE, 'utf8');
+  const names = new Set();
+  for (const m of text.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)) names.add(m[1]);
+  return [...names].sort();
+}
+
+// Declared in .env.template but read by neither env-contract.sh nor
+// derive-env.sh — confirmed by grepping scripts/startup/ for each name and
+// finding it nowhere. Each belongs to a phase .env.template's own "PLATFORM
+// STARTUP" section says an operator adds later — Jira, Cloudflare, Jenkins,
+// the Beta VM — and reads instead through that phase's own script, named
+// below. A name does not belong on this list because it is inconvenient;
+// it belongs here only once its one real reader is confirmed, the same way
+// copiedThroughVariables() above is read out of derive-env.sh rather than
+// asserted.
+// JIRA_URL, JIRA_EMAIL and JIRA_TOKEN left this map in V5.1: derive-env.sh now
+// copies all three into services/core/.env for workitems/jira_client.py, so
+// copiedThroughVariables() accounts for them and a later-phase entry would be
+// the wrong answer as well as a duplicate one.
+const DECLARED_FOR_A_LATER_PHASE = new Map([
+  ['GITHUB_TOKEN', 'scripts/init-jenkins.sh'],
+  ['JENKINS_GITHUB_USER', 'scripts/init-project.sh'],
+  ['CF_API_KEY', 'scripts/spike-cloudflare-tunnel-api.sh'],
+  ['CF_ZONE_ID', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['CF_ACCOUNT_ID', 'scripts/spike-cloudflare-tunnel-api.sh'],
+  ['HQ_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['JENKINS_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['PREVIEW_SUBDOMAIN', 'scripts/setup-cloudflare-tunnel.sh'],
+  ['BETA_DOMAIN', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_HOST', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_ADMIN_USER', 'scripts/setup-beta-vm.sh'],
+  ['BETA_VM_TRAEFIK_PORT', 'scripts/setup-beta-vm.sh'],
+  ['HQ_URL', 'scripts/init-project.sh'],
+  ['JENKINS_URL', 'scripts/init-jenkins.sh'],
+  ['JENKINS_ADMIN_PASSWORD', 'scripts/init-jenkins.sh'],
+  ['PREVIEW_DOMAIN', 'scripts/setup-beta-vm.sh'],
+]);
+
+test('every .env.template variable is accounted for: contract, copied-through, or a named later-phase reader', () => {
+  // The two tests above start from the contract and from derive-env.sh and
+  // check outward to .env.template; nothing starts from .env.template and
+  // checks back. A variable added there — a REQUIRED/OPTIONAL-shaped one
+  // that never reached env-contract.sh, or a new JIRA_*_FIELD_ID that never
+  // reached JIRA_FIELD_ID_VARS — would ship invisible to every check above,
+  // read by nothing, silently inert. This closes that direction: every
+  // assignment must land in the contract, in derive-env.sh's copied-through
+  // set, or on the later-phase list, whose own reader is confirmed absent
+  // from scripts/startup/ below. There is nowhere left for one to hide.
+  const contractNames = new Set(readContract().map((e) => e.name));
+  const copiedThrough = new Set(copiedThroughVariables());
+  const startupDir = path.join(REPO_ROOT, 'scripts', 'startup');
+  const startupText = fs.readdirSync(startupDir)
+    .filter((f) => f.endsWith('.sh'))
+    .map((f) => fs.readFileSync(path.join(startupDir, f), 'utf8'))
+    .join('\n');
+  for (const name of templateAssignedVariables()) {
+    if (contractNames.has(name) || copiedThrough.has(name)) continue;
+    assert.ok(
+      DECLARED_FOR_A_LATER_PHASE.has(name),
+      `${name} is in .env.template but in none of: the contract, derive-env.sh's copied-through ` +
+      'set, or the later-phase list — give it a REQUIRED/OPTIONAL contract entry, wire it into ' +
+      'derive-env.sh, or add it to DECLARED_FOR_A_LATER_PHASE with the script that reads it'
+    );
+    const reader = DECLARED_FOR_A_LATER_PHASE.get(name);
+    assert.ok(
+      new RegExp(`\\b${name}\\b`).test(fs.readFileSync(path.join(REPO_ROOT, reader), 'utf8')),
+      `${name} is declared read by ${reader}, but that file no longer mentions it`
+    );
+    assert.ok(
+      !new RegExp(`\\b${name}\\b`).test(startupText),
+      `${name} is declared as a later-phase variable but scripts/startup/ reads it too — ` +
+      'give it a contract entry or wire it into derive-env.sh instead'
     );
   }
 });
@@ -158,6 +332,63 @@ test('a required variable still holding the template value is refused as a place
   assert.match(result.stderr, /AIGANG_ADMIN_EMAIL is still at its \.env\.template placeholder/);
 });
 
+// ---- the method-conditional credential ----
+
+const METHODS = [
+  { authMethod: 'api-key', credential: 'ANTHROPIC_API_KEY', other: 'CLAUDE_CODE_OAUTH_TOKEN' },
+  { authMethod: 'oauth-token', credential: 'CLAUDE_CODE_OAUTH_TOKEN', other: 'ANTHROPIC_API_KEY' },
+];
+
+for (const { authMethod, credential, other } of METHODS) {
+  test(`${authMethod}: a .env missing ${credential} is refused by name`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [credential], authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`required variable ${credential} is missing or empty`));
+  });
+
+  test(`${authMethod}: a .env with ${credential} left empty is refused by name`, () => {
+    const result = runValidateEnv(makeRoot({ [credential]: '' }, { authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`required variable ${credential} is missing or empty`));
+  });
+
+  test(`${authMethod}: a .env carrying only the other method's credential is refused the same way`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [credential], authMethod }));
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(credential), result.stderr);
+    assert.equal(result.stderr.includes(`variable ${other}`), false, 'the other credential is not demanded');
+  });
+
+  test(`${authMethod}: ${credential} alone is enough`, () => {
+    const result = runValidateEnv(makeRoot({}, { omit: [other], authMethod }));
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  test(`${authMethod}: a .env carrying both credentials is accepted, with no warning`, () => {
+    const result = runValidateEnv(makeRoot({}, { authMethod }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(/warn|WARN/.test(`${result.stdout}${result.stderr}`), false, `${result.stdout}${result.stderr}`);
+  });
+
+  test(`${authMethod}: ${credential} still at its .env.template value is refused as a placeholder`, () => {
+    const root = makeRoot({ [credential]: 'paste-it-here' }, { authMethod });
+    fs.writeFileSync(
+      path.join(root, '.env.template'),
+      fs.readFileSync(ENV_TEMPLATE, 'utf8').replace(new RegExp(`^${credential}=$`, 'm'), `${credential}=paste-it-here`)
+    );
+    const result = runValidateEnv(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`${credential} is still at its \\.env\\.template placeholder`));
+  });
+}
+
+test('validate-env.sh cannot read a method from a configuration that is not valid, and stops', () => {
+  const root = makeRoot();
+  fs.writeFileSync(path.join(root, 'ai-gang.config.json'), '{}');
+  const result = runValidateEnv(root);
+  assert.notEqual(result.status, 0);
+});
+
 test('optional variables may be absent entirely', () => {
   const root = makeRoot();
   const result = runValidateEnv(root);
@@ -174,8 +405,8 @@ test('a missing .env is reported, naming the file', () => {
 });
 
 test('no secret value is echoed by a passing or failing run', () => {
-  const secrets = [FILLED.ANTHROPIC_API_KEY, FILLED.GH_TOKEN, FILLED.AIGANG_ADMIN_PASSWORD,
-    FILLED.PGPASSWORD, FILLED.DJANGO_SECRET_KEY];
+  const secrets = [FILLED.ANTHROPIC_API_KEY, FILLED.CLAUDE_CODE_OAUTH_TOKEN, FILLED.GH_TOKEN, FILLED.AIGANG_ADMIN_PASSWORD,
+    FILLED.PGPASSWORD, FILLED.DJANGO_SECRET_KEY, FILLED.MEMORY_PGPASSWORD, FILLED.MEMORY_DJANGO_SECRET_KEY];
   for (const root of [makeRoot(), makeRoot({}, { omit: ['GH_TOKEN'] })]) {
     const result = runValidateEnv(root);
     const output = `${result.stdout}${result.stderr}`;

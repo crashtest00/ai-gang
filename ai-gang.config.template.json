@@ -1,5 +1,6 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "authMethod": "CHANGE-ME-authentication-method",
   "project": {
     "name": "CHANGE-ME-project-name",
     "type": "CHANGE-ME-deployment-target",

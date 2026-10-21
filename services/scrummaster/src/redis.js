@@ -25,11 +25,22 @@ function getClient() {
 // Claim a one-time dedup key. Returns true the first time a given key is
 // seen within ttlSeconds, false on every subsequent call — used for
 // domain-level dedup (e.g. "have I already dispatched a retry for this
-// (ticket, build) pair") that is independent of any single envelope's
+// (work item, build) pair") that is independent of any single envelope's
 // messageId. See idempotency.js for the envelope-messageId-keyed variant.
+//
+// Deleted at v5.1 once its only caller, handlePipelineRetry's redispatch,
+// was reduced to logging the message — and returned with that caller
+// (V5.2 Canonical Delivery State REQ-01). The key it derives is now built
+// from the CANONICAL workItemId core resolved, never from a tracker key,
+// which is what v5.1's REQ-05 forbade and what made the helper go away.
 async function acquireOnce(key, ttlSeconds) {
   const result = await getClient().set(key, '1', { NX: true, EX: ttlSeconds });
   return result === 'OK';
 }
 
-module.exports = { connect, getClient, acquireOnce };
+// Give back a key acquireOnce claimed, so the work it guarded can run again.
+async function releaseOnce(key) {
+  await getClient().del(key);
+}
+
+module.exports = { connect, getClient, acquireOnce, releaseOnce };

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# preview-deploy.sh <project> <sha> <issue-key>
+# preview-deploy.sh <project> <sha> <work-item-id>
 #
 # Stands up an isolated, disposable preview container for a release
 # candidate, reusing the image deploy.sh already built for this SHA — no
 # rebuild. Labelled for Traefik routing (rc-<sha>.<PREVIEW_DOMAIN>) and with
-# the Release ticket's key so preview-teardown-by-issue.sh can find it later
-# even without knowing the SHA (e.g. a Release abandoned before its own
-# comment recorded the SHA anywhere ScrumMaster can see).
+# the Release's canonical work-item id so preview-teardown-by-work-item.sh
+# can find it later even without knowing the SHA (e.g. a Release abandoned
+# before its own comment recorded the SHA anywhere ScrumMaster can see).
 
 set -euo pipefail
 PROJECT="$1"
 SHA="$2"
-ISSUE_KEY="$3"
+WORK_ITEM_ID="$3"
 
 : "${PREVIEW_DOMAIN:?PREVIEW_DOMAIN must be set in the beta-deploy environment}"
 
@@ -29,7 +29,7 @@ docker run -d --name "$CONTAINER" \
   --network beta \
   --env-file "/home/beta-deploy/secrets/$PROJECT.env" \
   --label preview=true \
-  --label "issue=$ISSUE_KEY" \
+  --label "work_item=$WORK_ITEM_ID" \
   --label "traefik.enable=true" \
   --label "traefik.http.routers.$CONTAINER.rule=Host(\`$HOST\`)" \
   --label "traefik.http.services.$CONTAINER.loadbalancer.server.port=8080" \

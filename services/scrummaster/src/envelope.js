@@ -10,11 +10,11 @@ const SCHEMA_VERSION = '1';
 const KIND = Object.freeze({
   TASK: 'task',
   TASK_STATUS: 'task_status',
-  JIRA_OPERATION: 'jira_operation',
+  GATEWAY_OPERATION: 'gateway_operation',
   WEBHOOK_EVENT: 'webhook_event',
   // A command into, or an outbound change/rejection event out of, the
-  // Internal Work-Item Service's canonical work-item store. Added for V2
-  // rather than reusing WEBHOOK_EVENT/JIRA_OPERATION — neither name
+  // core service's canonical work-item store. Added for V2
+  // rather than reusing WEBHOOK_EVENT/GATEWAY_OPERATION — neither name
   // describes a canonical work-item command/event, and this envelope
   // format (not a new one) is what's meant to be reused here.
   WORK_ITEM_COMMAND: 'work_item_command',
@@ -23,7 +23,7 @@ const KIND = Object.freeze({
   // (librarian/README.md, workitems/envelope.py's Kind class). Not a task:
   // TASK_KINDS below deliberately does not include either, so neither
   // requires taskId/contextId. Added here (V4 audit Pass 2 row 34) to
-  // match setup/lib/envelope.js, the container-side copy of this file,
+  // match setup/commons/tools/envelope.js, the container-side copy of this file,
   // which already carries them (PR #21) — this module consumes neither
   // kind; they exist here only so the two copies' schemas stay identical,
   // per this file's own contract with that copy.

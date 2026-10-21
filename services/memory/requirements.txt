@@ -1,0 +1,22 @@
+# Memory — Django + PostgreSQL, packaged like services/core/ (Durable Agent
+# Session Record §4). File-change events use Linux inotify through ctypes
+# (archive/watcher.py), so there is no watcher package.
+Django>=5.0,<5.1
+psycopg2-binary>=2.9,<3.0
+gunicorn>=22.0,<27.0
+# memory-extraction reads Core's artifact.uploaded events from Redis.
+redis>=5.0,<6.0
+# The local embedding model (index/embedding.py): ONNX Runtime on CPU and the
+# model's tokenizer; no PyTorch. The weights are not a package: the image
+# bakes them in at build time (scripts/fetch-embedding-model.sh).
+onnxruntime>=1.20,<2.0
+tokenizers>=0.20,<1.0
+numpy>=2.0,<3.0
+
+# Test tooling.
+pytest>=8.0
+pytest-django>=4.8,<5.0
+# The extractor's PDF parser, for the suite, which runs the extractor
+# process on the host; the extractor's own image installs it from
+# extractor/requirements.txt, which pins the same version.
+pypdf>=6.0,<7.0

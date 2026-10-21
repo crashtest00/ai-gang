@@ -12,11 +12,12 @@
 # later, explicitly-requested operation — never offered as part of the
 # default interactive flow above):
 #   4. Prompts for a Jira project key
-#   5. Runs create-jira-fields.sh (idempotent — creates missing fields, skips existing)
+#   5. Runs create-jira-fields.sh and create-release-fields.sh (both
+#      idempotent — create missing fields, skip existing)
 #   6. Registers the Jira webhook
 #   7. Creates the Jira project (company-managed Kanban)
 #   8. Creates the AI Gang Kanban workflow (idempotent) and assigns it to the project
-#   9. Adds all JIRA_*_FIELD_ID fields from services/scrummaster/.env to
+#   9. Adds all JIRA_*_FIELD_ID fields from the platform .env to
 #      every screen in the new project (Stories, Tasks, Subtasks)
 #
 # Usage:
@@ -24,7 +25,7 @@
 #   ./scripts/init-project.sh --config <file.json> [--connect-jira]
 #
 # --config <file>: read the project name, deployment target, and stack
-# profile from a UTF-8 JSON file (schemaVersion 1; a "project" object with
+# profile from a UTF-8 JSON file (schemaVersion 2; a "project" object with
 # nonempty string fields "name", "type", "stack" — see
 # setup/graphs/engine/lib/config/) instead of the interactive prompts and
 # --deployment flag below. The file is validated — and any invalid input
@@ -80,7 +81,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 HQ_ENV="${HQ_ENV:-$HOME/ai-gang/.env}"
-SM_ENV="$REPO_ROOT/services/scrummaster/.env"
+# canonical-delivery-state.md REQ-10, "The field ids reach `core`" —
+# get_field_ids below reads the ids back out of the platform .env, where
+# create-jira-fields.sh and create-release-fields.sh now write them and
+# scripts/startup/derive-env.sh's JIRA_FIELD_ID_VARS loop reads them
+# (OQ-09; v5.1 BUGFIXES BF-03).
+FIELD_ID_ENV="$HQ_ENV"
 # Overridable so tests can point this at a temp directory instead of the
 # real projects/ tree — see setup/graphs/engine/test/config-init-cli.test.js.
 PROJECTS_DIR="${AIGANG_PROJECTS_DIR:-$REPO_ROOT/projects}"
@@ -103,6 +109,63 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# --- Authentication method ---
+# The method is a platform-wide decision, so it comes from the platform
+# configuration — ai-gang.config.json at the checkout root, or the file
+# AIGANG_CONFIG_FILE names (platform startup sets it) — in every mode this
+# script runs in, and never from a project's own --config file. It selects
+# which credential the project's .env receives. With no valid platform
+# configuration nothing is created: this runs ahead of every prompt and
+# every write.
+PLATFORM_CONFIG_FILE="${AIGANG_CONFIG_FILE:-$REPO_ROOT/ai-gang.config.json}"
+if [[ ! -f "$PLATFORM_CONFIG_FILE" ]]; then
+  echo "Error: no platform configuration at $PLATFORM_CONFIG_FILE — copy ai-gang.config.template.json to ai-gang.config.json and fill it in." >&2
+  exit 1
+fi
+if ! command -v node &> /dev/null; then
+  echo "Error: this script reads the platform configuration with 'node', but it was not found on PATH." >&2
+  exit 1
+fi
+PLATFORM_STDERR_FILE=$(mktemp)
+if ! PLATFORM_OUTPUT=$(node "$REPO_ROOT/setup/graphs/engine/lib/config/cli.js" --platform "$PLATFORM_CONFIG_FILE" 2>"$PLATFORM_STDERR_FILE"); then
+  echo "Error: $PLATFORM_CONFIG_FILE is not a valid platform configuration:" >&2
+  cat "$PLATFORM_STDERR_FILE" >&2
+  rm -f "$PLATFORM_STDERR_FILE"
+  exit 1
+fi
+rm -f "$PLATFORM_STDERR_FILE"
+AUTH_METHOD=""
+while IFS='=' read -r platform_key platform_val; do
+  [[ "$platform_key" == "AUTH_METHOD" ]] && AUTH_METHOD="$platform_val"
+done <<< "$PLATFORM_OUTPUT"
+unset platform_key platform_val
+# The credential's name is the one scripts/startup/env-contract.sh declares
+# for the method; it is written nowhere else.
+CREDENTIAL_VAR="$(bash "$SCRIPT_DIR/startup/env-contract.sh" | awk -v m="$AUTH_METHOD" '$1 == "REQUIRED_IN_METHOD" && $2 == m { print $3 }')"
+if [[ -z "$AUTH_METHOD" || -z "$CREDENTIAL_VAR" ]]; then
+  echo "Error: could not determine the credential for the authentication method in $PLATFORM_CONFIG_FILE." >&2
+  exit 1
+fi
+
+# --- Shared harness volume ---
+# Every project container mounts its own subdirectory of one shared named
+# volume at the agent harness's `projects/` directory, so the sessions its
+# agents write survive a recreate and Memory can copy them (Durable Agent
+# Session Record REQ-01). Memory's platform-startup step creates the volume
+# (scripts/startup/start-memory.sh); this script never does — a project
+# generated without it would start against a volume nobody copies from.
+# Like the platform configuration above, this runs ahead of every prompt
+# and every write.
+HARNESS_VOLUME=aigang-harness
+if ! command -v docker &> /dev/null; then
+  echo "Error: this script checks for Memory's shared harness volume with 'docker', but it was not found on PATH." >&2
+  exit 1
+fi
+if ! docker volume inspect "$HARNESS_VOLUME" > /dev/null 2>&1; then
+  echo "Error: the shared harness volume '$HARNESS_VOLUME' does not exist. Start Memory first — platform startup's start-memory step (scripts/startup/start-memory.sh), or docs/ClaudeInstructions.md \"2.6 Memory\" by hand — then re-run this script." >&2
+  exit 1
+fi
 
 CONFIG_PROJECT_NAME=""
 CONFIG_PROJECT_TYPE=""
@@ -217,7 +280,7 @@ read_env_value() {
   printf '%s' "$value"
 }
 
-for env_var in ANTHROPIC_API_KEY GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
+for env_var in "$CREDENTIAL_VAR" GH_TOKEN JIRA_URL JIRA_EMAIL JIRA_TOKEN HQ_URL JENKINS_GITHUB_USER; do
   if [[ -z "${!env_var:-}" ]]; then
     printf -v "$env_var" '%s' "$(read_env_value "$HQ_ENV" "$env_var" || true)"
   fi
@@ -230,81 +293,75 @@ if [[ "$CONNECT_JIRA" == "true" ]]; then
   : "${JIRA_TOKEN:?JIRA_TOKEN is not set. Check $HQ_ENV}"
   : "${HQ_URL:?HQ_URL is not set. Check $HQ_ENV (e.g. http://1.2.3.4:9000)}"
 
-  # Ensure all Jira custom fields exist and IDs are written to services/scrummaster/.env.
-  # create-jira-fields.sh is idempotent — skips fields that already exist.
-  # Running it here also picks up any new fields added in a later version of the script.
+  # Ensure all Jira custom fields exist and IDs are written to the platform
+  # .env, where scripts/startup/derive-env.sh reads them
+  # (canonical-delivery-state.md REQ-10). BOTH provisioning scripts run:
+  # create-release-fields.sh's five ids are as much a part of
+  # JIRA_FIELD_ID_VARS as the nine story-schema ones, and connect_jira
+  # refuses until all fourteen are set. Both are idempotent — they skip a
+  # field that already exists — so running them here also picks up any
+  # field a later version of either script adds.
   echo "Checking Jira custom fields..."
   HQ_ENV="$HQ_ENV" bash "$SCRIPT_DIR/create-jira-fields.sh"
+  HQ_ENV="$HQ_ENV" bash "$SCRIPT_DIR/create-release-fields.sh"
   echo ""
 fi
 
 # Register the Jira webhook if not already present.
-# Uses the legacy /rest/webhooks/1.0/webhook endpoint (works with basic auth).
-# The WEBHOOK_SECRET is embedded as a URL query param — the only way to pass it
-# via this API — and ScrumMaster validates it from req.query.secret.
-ensure_webhook() {
-  echo "Checking Jira webhook..."
-
-  # Auto-generate WEBHOOK_SECRET in services/scrummaster/.env if missing
-  local secret
-  secret=$(grep -E '^WEBHOOK_SECRET=.+' "$SM_ENV" | cut -d= -f2 || true)
-  if [[ -z "$secret" ]]; then
-    secret=$(openssl rand -hex 32)
-    if grep -q '^WEBHOOK_SECRET=' "$SM_ENV"; then
-      sed -i "s|^WEBHOOK_SECRET=.*|WEBHOOK_SECRET=$secret|" "$SM_ENV"
-    else
-      echo "WEBHOOK_SECRET=$secret" >> "$SM_ENV"
-    fi
-    echo "  Generated WEBHOOK_SECRET and saved to services/scrummaster/.env"
-  fi
-
-  local webhook_url="${HQ_URL}/webhook/jira?secret=${secret}"
-
-  # Check if a webhook for this URL already exists
-  local existing
-  existing=$(curl -s -u "$AUTH" -H "Accept: application/json" \
-    "$JIRA_URL/rest/webhooks/1.0/webhook" \
-    | jq -r --arg url "$webhook_url" '.[] | select(.url == $url) | .self' 2>/dev/null || true)
-
-  if [[ -n "$existing" ]]; then
-    echo "  Webhook already registered — skipping."
-    return
-  fi
-
-  # Register the webhook
-  local result
-  result=$(curl -s -u "$AUTH" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json" \
-    -X POST "$JIRA_URL/rest/webhooks/1.0/webhook" \
-    -d "$(jq -n \
-      --arg url "$webhook_url" \
-      '{
-        name: "AI Gang",
-        url: $url,
-        events: ["jira:issue_created", "jira:issue_updated"],
-        filters: {},
-        excludeBody: false
-      }')")
-
-  if echo "$result" | jq -e '.self' > /dev/null 2>&1; then
-    echo "  Webhook registered: $webhook_url"
-  else
-    local reason
-    reason=$(echo "$result" | jq -r '.messages[0].arguments[0] // .errorMessages[0] // "unknown error"')
-    echo "  Warning: webhook auto-registration failed ($reason)."
-    echo "  Register manually in Jira Settings → System → Webhooks:"
-    echo "    URL:    $webhook_url"
-    echo "    Events: jira:issue_created, jira:issue_updated"
-    echo "  Note: Jira Cloud requires HTTPS. Point a domain at this server and set HQ_URL accordingly."
-  fi
-}
-
+#
+# BUGFIXES.md BF-02: this used to be ensure_webhook(), a bash function that
+# built a Jira REST URL, POSTed to it with curl, and parsed the JSON
+# response — a shell script speaking the Jira REST API, which BF-02 holds
+# is itself the defect (point 1: "repointing its two wrong strings would
+# leave that defect standing"). Registration now happens inside the core
+# service's own Python Jira integration, beside workitems/jira_interpret.py
+# (whose docstring already claims Jira protocol handling "lives entirely
+# here ... never in ScrumMaster or any other Streams client") — the
+# workitems.management.commands.ensure_jira_webhook management command.
+#
+# This script's remaining role here is exactly point 5's provisioning
+# exception: gather the platform .env's JIRA_URL/JIRA_EMAIL/JIRA_TOKEN (and
+# HQ_URL) and hand them to the service for the life of one call, never
+# constructing the Jira URL or parsing Jira's response itself. Values go in
+# via an env-file `docker exec --env-file` reads, not the command line —
+# an argument sits in the host process table for as long as the call
+# lasts; a file scripts/startup/create-admin.sh already uses this same
+# pattern for AIGANG_ADMIN_* — so a credential is never readable there.
+# WEBHOOK_SECRET is deliberately NOT gathered or passed here: it is the
+# core service's own credential (workitems/views.py already authenticates
+# incoming webhooks against it), read from that service's own environment,
+# not handed over by this script.
 if [[ "$CONNECT_JIRA" == "true" ]]; then
   API="$JIRA_URL/rest/api/3"
   AUTH="$JIRA_EMAIL:$JIRA_TOKEN"
 
-  ensure_webhook
+  echo "Checking Jira webhook..."
+  webhook_env_file="$(mktemp)"
+  trap 'rm -f "$webhook_env_file"' EXIT
+  chmod 600 "$webhook_env_file"
+  {
+    printf 'JIRA_URL=%s\n' "$JIRA_URL"
+    printf 'JIRA_EMAIL=%s\n' "$JIRA_EMAIL"
+    printf 'JIRA_TOKEN=%s\n' "$JIRA_TOKEN"
+    printf 'HQ_URL=%s\n' "$HQ_URL"
+  } > "$webhook_env_file"
+
+  if ! docker exec --env-file "$webhook_env_file" core-api python manage.py ensure_jira_webhook; then
+    echo "  Warning: webhook registration did not complete — see the command's own output above."
+    echo "  Register manually in Jira Settings → System → Webhooks:"
+    echo "    URL:    ${HQ_URL}/webhooks/jira?secret=<services/core/.env's WEBHOOK_SECRET>"
+    # Every entry in ensure_jira_webhook.py's WEBHOOK_EVENTS, which
+    # canonical-delivery-state.md REQ-09/REQ-11 extended with
+    # comment_created and issuelink_created: a registration missing
+    # either leaves `core` blind to a Jira comment or a Blocks link.
+    # services/core/tests/test_ensure_jira_webhook_command.py asserts
+    # this line against that list, so the two cannot drift.
+    echo "    Events: jira:issue_created, jira:issue_updated, comment_created, issuelink_created"
+    echo "  Note: Jira Cloud requires HTTPS. Point a domain at this server and set HQ_URL accordingly."
+  fi
+
+  rm -f "$webhook_env_file"
+  trap - EXIT
   echo ""
 fi
 
@@ -343,9 +400,9 @@ derive_key() {
   echo "$key"
 }
 
-# Collect all JIRA_*_FIELD_ID values from services/scrummaster/.env
+# Collect all JIRA_*_FIELD_ID values from the platform .env
 get_field_ids() {
-  grep -E '^JIRA_[A-Z_]+_FIELD_ID=customfield_' "$SM_ENV" | cut -d= -f2
+  grep -E '^JIRA_[A-Z_]+_FIELD_ID=customfield_' "$FIELD_ID_ENV" | cut -d= -f2
 }
 
 # Get all screen IDs associated with a Jira project
@@ -407,8 +464,9 @@ STATUS_SHOVEL_READY=""
 STATUS_IN_PROGRESS=""
 STATUS_IN_REVIEW=""
 STATUS_DONE=""
+STATUS_ABANDONED=""
 
-# Ensure the 5 workflow statuses exist globally; populate STATUS_* vars
+# Ensure the 6 workflow statuses exist globally; populate STATUS_* vars
 ensure_workflow_statuses() {
   local search
   search=$(jira_get "/statuses/search")
@@ -418,17 +476,20 @@ ensure_workflow_statuses() {
   STATUS_IN_PROGRESS=$( echo "$search" | jq -r '.values[] | select(.name=="In Progress")   | .id')
   STATUS_IN_REVIEW=$(   echo "$search" | jq -r '.values[] | select(.name=="In Review")     | .id')
   STATUS_DONE=$(        echo "$search" | jq -r '.values[] | select(.name=="Done")          | .id')
+  STATUS_ABANDONED=$(   echo "$search" | jq -r '.values[] | select(.name=="Abandoned")     | .id')
 
   # Create any missing statuses
   local to_create='[]'
   [[ -z "$STATUS_SHOVEL_READY" ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"Shovel Ready","statusCategory":"IN_PROGRESS"}]')
   [[ -z "$STATUS_IN_REVIEW"    ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"In Review","statusCategory":"IN_PROGRESS"}]')
+  [[ -z "$STATUS_ABANDONED"    ]] && to_create=$(echo "$to_create" | jq '. + [{"name":"Abandoned","statusCategory":"DONE"}]')
 
   if [[ "$to_create" != "[]" ]]; then
     local created
     created=$(jira_post "/statuses" "$to_create")
     [[ -z "$STATUS_SHOVEL_READY" ]] && STATUS_SHOVEL_READY=$(echo "$created" | jq -r '.[] | select(.name=="Shovel Ready") | .id')
     [[ -z "$STATUS_IN_REVIEW"    ]] && STATUS_IN_REVIEW=$(   echo "$created" | jq -r '.[] | select(.name=="In Review")    | .id')
+    [[ -z "$STATUS_ABANDONED"    ]] && STATUS_ABANDONED=$(   echo "$created" | jq -r '.[] | select(.name=="Abandoned")    | .id')
     echo "    Created missing statuses."
   fi
 }
@@ -445,17 +506,19 @@ ensure_ai_gang_workflow() {
     --arg ip "$STATUS_IN_PROGRESS" \
     --arg ir "$STATUS_IN_REVIEW" \
     --arg dn "$STATUS_DONE" \
+    --arg ab "$STATUS_ABANDONED" \
     '{
       name: $name,
-      description: "AI Gang: Backlog → Shovel Ready → In Progress → In Review → Done",
-      statuses: [{id:$bs},{id:$sr},{id:$ip},{id:$ir},{id:$dn}],
+      description: "AI Gang: Backlog → Shovel Ready → In Progress → In Review → Done (or Abandoned)",
+      statuses: [{id:$bs},{id:$sr},{id:$ip},{id:$ir},{id:$dn},{id:$ab}],
       transitions: [
         {name:"Create",       to:$bs, type:"initial", from:[]},
         {name:"Backlog",      to:$bs, type:"global",  from:[]},
         {name:"Shovel Ready", to:$sr, type:"global",  from:[]},
         {name:"Start",        to:$ip, type:"global",  from:[]},
         {name:"In Review",    to:$ir, type:"global",  from:[]},
-        {name:"Done",         to:$dn, type:"global",  from:[]}
+        {name:"Abandon",      to:$ab, type:"global",  from:[]},
+        {name:"Done",         to:$dn, type:"directed", from:[$bs,$sr,$ip,$ir]}
       ]
     }')")
 
@@ -549,7 +612,7 @@ setup_project_workflow() {
   echo ""
   echo "Configuring project workflow..."
   ensure_workflow_statuses
-  echo "    Backlog($STATUS_BACKLOG) → Shovel Ready($STATUS_SHOVEL_READY) → In Progress($STATUS_IN_PROGRESS) → In Review($STATUS_IN_REVIEW) → Done($STATUS_DONE)"
+  echo "    Backlog($STATUS_BACKLOG) → Shovel Ready($STATUS_SHOVEL_READY) → In Progress($STATUS_IN_PROGRESS) → In Review($STATUS_IN_REVIEW) → Done($STATUS_DONE); Abandoned($STATUS_ABANDONED) from any status"
   ensure_ai_gang_workflow && assign_workflow_to_project
 }
 
@@ -706,6 +769,21 @@ if [[ -n "$DESKTOP_FRAMEWORK" ]]; then
 fi
 bash "$SCRIPT_DIR/init-repo.sh" "${INIT_REPO_ARGS[@]}"
 
+# --- This project's subdirectory of the shared harness volume ---
+# Created whether or not docker-compose.yml already exists, so a volume
+# deleted and re-created empty gets it back on a re-run. Docker refuses to
+# start a container whose volume subpath is missing, and with a subpath
+# mount it is this directory, not the image, that carries the ownership of
+# what the harness writes: uid 1000, the `aigang` user the project images
+# create (REQ-01). Made with Memory's own image, which is present wherever
+# Memory's stack has been brought up.
+if ! docker run --rm --user 0:0 --entrypoint sh -v "$HARNESS_VOLUME:/harness" aigang-memory \
+    -c 'mkdir -p "/harness/$1" && chown 1000:1000 "/harness/$1"' sh "$PROJECT_NAME" > /dev/null; then
+  echo "Error: could not create $PROJECT_NAME's subdirectory of the shared harness volume '$HARNESS_VOLUME' (with Memory's image, aigang-memory — start Memory first)." >&2
+  exit 1
+fi
+echo "Harness volume: $HARNESS_VOLUME/$PROJECT_NAME (owned by uid 1000)"
+
 # --- Generate project files ---
 if [[ ! -f "$PROJECT_DIR/docker-compose.yml" ]]; then
   cat > "$PROJECT_DIR/docker-compose.yml" <<COMPOSE
@@ -719,6 +797,14 @@ services:
     volumes:
       - ./src:/workspace
       - ../../setup:/agent-docs:ro
+      # The agent harness's session folder, and nothing else of its
+      # configuration: this project's subdirectory of the shared harness
+      # volume, which Memory copies every session from.
+      - type: volume
+        source: harness
+        target: /home/aigang/.claude/projects
+        volume:
+          subpath: ${PROJECT_NAME}
     command: sh -c "gh auth setup-git && tail -f /dev/null"
     restart: unless-stopped
     networks:
@@ -727,12 +813,17 @@ services:
 networks:
   ai-gang:
     external: true
+
+volumes:
+  harness:
+    external: true
+    name: ${HARNESS_VOLUME}
 COMPOSE
   echo "Created: $PROJECT_DIR/docker-compose.yml"
 fi
 
 if [[ ! -f "$PROJECT_DIR/.env" ]]; then
-  # This file holds the Anthropic key and the GitHub PAT, so it is
+  # This file holds the Claude credential and the GitHub PAT, so it is
   # readable only by its owner — the same rule the platform's own derived
   # environment files follow. Created 0600 rather than chmod-ed
   # afterwards, so it is never briefly world-readable.
@@ -740,15 +831,15 @@ if [[ ! -f "$PROJECT_DIR/.env" ]]; then
     cat > "$PROJECT_DIR/.env" <<ENVFILE
 PROJECT_NAME=${PROJECT_NAME}
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+${CREDENTIAL_VAR}=${!CREDENTIAL_VAR:-}
 GITHUB_URL=${GITHUB_URL:-}
 GH_TOKEN=${GH_TOKEN:-}
 ENVFILE
   )
   chmod 600 "$PROJECT_DIR/.env"
   echo "Created: $PROJECT_DIR/.env"
-  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    echo "  ** ANTHROPIC_API_KEY not found in $HQ_ENV — fill it in before building."
+  if [[ -z "${!CREDENTIAL_VAR:-}" ]]; then
+    echo "  ** $CREDENTIAL_VAR not found in $HQ_ENV — fill it in before building."
   fi
   if [[ -z "${GH_TOKEN:-}" ]]; then
     echo "  ** GH_TOKEN is blank — fill it in before the first agent run."

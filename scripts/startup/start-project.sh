@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# Step 8 — build and start the project container, then reload the
-# services that read the project list at startup.
+# Step 9 — build and start the project container, reload the services
+# that read the project list at startup, then start Memory's indexer.
 #
 # The container's own entrypoint starts the Redis subscriber under pm2 on
 # every start, so there is no post-start command for anyone to run.
 #
 # The reload at the end is the rest of this step. Two services read
 # services/scrummaster/config/projects.json once, when they start, and
-# both were started before step 6 registered the configured project in
+# both were started before step 7 registered the configured project in
 # it:
 #
 #   - ScrumMaster creates each configured project's streams and consumer
 #     groups from that file at startup;
 #
-#   - the work-item service does the same from the same file — its
+#   - the core service does the same from the same file — its
 #     consumers process creates each project's command and webhook
-#     consumer groups as it starts, and its API process caches the
+#     consumer groups, and one `core-a2a-archive` consumer per gateway
+#     and agent-channel stream, as it starts, and its API process caches the
 #     project list the first time it is asked for it, which step 3's own
 #     health check already did.
 #
@@ -27,6 +28,12 @@
 #
 # The outbox relay is deliberately not restarted: it takes each row's
 # project from the row itself and never reads the project list.
+#
+# Last, the step starts `memory-indexer`, which start-memory.sh (step 6)
+# held back. Its first pass embeds the platform corpus, which is CPU-heavy,
+# so it starts only once the project container is built and running. Its
+# image was built at step 6 (it shares `aigang-memory` with the other Memory
+# services), so no --build here. Step 10 still requires it to be running.
 
 set -euo pipefail
 STARTUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,16 +66,23 @@ done
 log "reloading ScrumMaster's project registry so it consumes '$PROJECT_NAME'"
 compose_in services/scrummaster restart scrummaster || die "could not restart ScrumMaster"
 
-log "reloading the work-item service's project registry so it consumes '$PROJECT_NAME'"
-compose_in services/work-item-service restart api consumers \
-  || die "could not restart the work-item service's API and consumers"
+log "reloading the core service's project registry so it consumes '$PROJECT_NAME'"
+compose_in services/core restart api consumers \
+  || die "could not restart the core service's API and consumers"
 
 wait_until 45 workitem_api_healthy \
-  || { status service work-item-service unhealthy; die "the work-item service did not answer /health again after its project registry was reloaded"; }
+  || { status service core-api unhealthy; die "the core service did not answer /health again after its project registry was reloaded"; }
 
 wait_until 30 workitem_commands_consumed "$PROJECT_NAME" \
-  || die "the work-item service is not consuming '$PROJECT_NAME' after the reload — no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME")"
+  || die "the core service is not consuming '$PROJECT_NAME' after the reload — no '$WORKITEM_COMMAND_GROUP' consumer group on $(workitem_command_stream "$PROJECT_NAME")"
 
-log "the work-item service is consuming commands for '$PROJECT_NAME'"
+log "the core service is consuming commands for '$PROJECT_NAME'"
+
+log "starting Memory's indexer, held back since step 6 so it would not compete with the project container's build"
+compose_in services/memory up -d memory-indexer || die "Memory's indexer did not start"
+
+wait_until 30 memory_indexer_running \
+  || { status service memory unhealthy; die "memory-indexer is not running after it was started"; }
+log "memory-indexer is running"
 
 end_step start-project

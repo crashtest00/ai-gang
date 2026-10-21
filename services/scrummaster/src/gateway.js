@@ -1,24 +1,32 @@
 'use strict';
 
 const crypto = require('crypto');
-const jira = require('./jira');
 const redis = require('./redis');
 const registry = require('./registry');
 const streams = require('./streams');
 const idempotency = require('./idempotency');
 const dependencies = require('./dependencies');
 const canonicalWorkItems = require('./canonicalWorkItems');
+const dispatchContext = require('./dispatchContext');
 const assignment = require('./assignment');
 const taskStore = require('./a2a/taskStore');
 const schema = require('./a2a/schema');
 const { buildEnvelope, KIND, fromStreamFields } = require('./envelope');
-const { buildTaskPrompt } = require('./prompt');
-const { redispatchImplementationOwner, dispatchTask, reportAssignmentFailure: reportJiraAssignmentFailure } = require('./handlers');
+// Required lazily inside the one function that needs them: handlers.js and
+// dispatchConsumer.js are loaded by index.js alongside this module, and
+// dispatchConsumer requires handlers, so requiring either at the top here
+// would add a second edge to that graph for the sake of one call site.
+function dispatchModules() {
+  return {
+    handlers: require('./handlers'),
+    dispatchConsumer: require('./dispatchConsumer'),
+    buildRetryPrompt: require('./prompt').buildRetryPrompt,
+  };
+}
 
 // One durable consumer per project's gateway stream (aigang:gateway:{project},
-// group "scrummaster") — replaces the single `PSUBSCRIBE jira-gateway:*`
-// subscriber. Project identity comes from which stream a consumer is bound
-// to, never from message content.
+// group "scrummaster"). Project identity comes from which stream a consumer is
+// bound to, never from message content.
 const consumers = [];
 
 // A container's subscriber can only report whether the agent process exited
@@ -44,7 +52,15 @@ const consumers = [];
 // successor that names this messageId as its own referenceMessageId is
 // still rejected outright by taskStore's lineage check instead of reading it
 // as merely unresolved (accepted-but-not-yet-applied) and deferring forever.
-function markDeadLetteredSubmissionFailed(envelope) {
+//
+// From v6.0 the hook also tells core what it recorded (Durable A2A Message
+// Record REQ-04): `'updated'` — the message already had an outcome in
+// taskStore — publishes the outcome `failed`; `'recorded'` or `'unknown-task'`
+// — no Task this process holds had recorded the message — publishes the
+// verdict `refused`, `dead_lettered`. The consumer calls the hook with the
+// envelope, reason and attempt count only, so it is given the stream's
+// project by `gatewayConsumerOptions` below.
+async function markDeadLetteredSubmissionFailed(envelope, projectName) {
   const taskId = envelope && envelope.taskId;
   const messageId = envelope && envelope.payload && envelope.payload.message && envelope.payload.message.messageId;
   if (!taskId || !messageId) return;
@@ -57,6 +73,10 @@ function markDeadLetteredSubmissionFailed(envelope) {
       `recording its failure directly so a successor referencing it as its own predecessor is not deferred forever`
     );
   }
+  const verdict = result === 'updated'
+    ? { outcome: 'failed' }
+    : { verdict: 'refused', reason: 'dead_lettered' };
+  await publishVerdictLogged(projectName, { taskId, messageId, sourceMessageId: envelope.messageId, ...verdict });
 }
 
 // The exact handler/onDeadLetter wiring one project's gateway stream
@@ -67,8 +87,47 @@ function markDeadLetteredSubmissionFailed(envelope) {
 function gatewayConsumerOptions(projectName) {
   return {
     handler: envelope => handleGatewayEnvelope(envelope, projectName),
-    onDeadLetter: markDeadLetteredSubmissionFailed,
+    onDeadLetter: envelope => markDeadLetteredSubmissionFailed(envelope, projectName),
   };
+}
+
+// ScrumMaster's verdict on one A2A submission, or an outcome update for it
+// (Durable A2A Message Record REQ-04), as a `recordA2AVerdict` command on the
+// project's existing command stream: no new stream and no new envelope kind.
+// `fields` carries `taskId`, `messageId` (the A2A message's own),
+// `sourceMessageId` (the gateway envelope's), and either `verdict` (with
+// `reason`, and `finishedState`, for a refusal) or `outcome`.
+//
+// Published without a `dedupeKey`, as `postComment` publishes
+// `appendComment`: a `dedupeKey` is claimed before the XADD, so a publish
+// whose XADD failed after its claim would be discarded on the retry and never
+// reach core. A repeated command is harmless instead — core stores a
+// redelivery once, and a re-publication changes no verdict or outcome.
+async function publishVerdict(projectName, fields) {
+  await canonicalWorkItems.publishCommand(projectName, {
+    command: 'recordA2AVerdict',
+    actor: 'scrummaster',
+    ...fields,
+  });
+}
+
+// Every verdict publication but `applied` is caught and logged, never raised:
+// an outcome follows the projection, so raising would run the projection
+// again on the redelivery; a refusal is acknowledged on its first delivery
+// deliberately (reportTaskAlreadyFinished), and raising would retry it into a
+// dead letter recorded against the Task. A lost refusal or outcome leaves the
+// message without a verdict, or reading `pending`, in core; nothing here
+// changes because of it.
+async function publishVerdictLogged(projectName, fields) {
+  try {
+    await publishVerdict(projectName, fields);
+  } catch (err) {
+    const what = fields.verdict ? `verdict "${fields.verdict}"` : `outcome "${fields.outcome}"`;
+    console.error(
+      `[gateway] Could not publish the ${what} for message ${fields.messageId} of task ${fields.taskId} ` +
+      `to core: ${err.message} — core's record of it will lack this update`
+    );
+  }
 }
 
 async function startGatewaySubscriber() {
@@ -125,7 +184,11 @@ async function handleGatewayEnvelope(envelope, projectName) {
 //    content.
 //  - operation=materializeDecomposition: dependency handling's own
 //    structured-data contract.
-//  - type=pipeline_retry: Jenkins-originated, not agent-authored A2A content.
+//  - type=beta_deployed: Jenkins-originated, relayed to core (V5.2 Canonical
+//    Delivery State REQ-01). ScrumMaster decides nothing about it.
+//  - type=pipeline_retry: Jenkins-originated too, in two shapes on one
+//    stream — Jenkins' own, which is relayed to core, and core's own, which
+//    carries the canonical workItemId and is the one this service acts on.
 //  - everything else: agent-authored A2A content — comment, reassign,
 //    create_subtask, blocked, and completed (with an optional pull-request
 //    Artifact) all arrive here as one canonical
@@ -141,42 +204,74 @@ async function dispatchGatewayOperation(envelope, projectName) {
     return handleMaterializeDecomposition(msg, projectName);
   }
 
+  if (msg.type === 'beta_deployed') {
+    return relayToCore('recordBetaDeployment', msg, envelope, projectName);
+  }
+
   if (msg.type === 'pipeline_retry') {
-    return handlePipelineRetry(msg, projectName);
+    return handlePipelineRetry(msg, envelope, projectName);
   }
 
   return handleA2ASubmission(envelope, projectName);
 }
 
-// Materialize a Refinement Agent decomposition, mode-aware:
-// dependencies.js's routeMaterialization sends a Jira-mode project through
-// the exact existing Jira-subtask-and-dependency-link path unchanged, and a
-// local-mode project to the Internal Work-Item Service instead. Validation and
-// no-progress failures already post an explanatory Jira comment inside
-// dependencies.js's Jira-mode path — retrying an unmodified invalid/stalled
-// decomposition can't succeed, so those are re-thrown as permanent to
-// dead-letter immediately rather than burning retry attempts. Any other
-// failure (e.g. a transient Jira API error) is left to the normal
-// retry/dead-letter path.
-async function handleMaterializeDecomposition(msg, projectName) {
+// Relay one Jenkins-originated gateway payload to core as a canonical
+// command (V5.2 Canonical Delivery State REQ-01). Jenkins is not an agent and
+// its payload is not an A2A message; ScrumMaster makes no decision about it
+// and resolves nothing — core resolves the promoted pull requests, applies
+// the deployment or the failure, and publishes what this service has to act
+// on.
+//
+// The relay carries THIS envelope's messageId as the command's
+// `sourceMessageId`, not the command envelope's own: `publishCommand` mints a
+// fresh messageId on every relay, and REQ-01's and REQ-05's deduplication
+// keys have to survive a re-relay of the same Jenkins message.
+//
+// **It must not drop the event on a failure.** A refused or failed relay is
+// logged at error level naming the entry's messageId and then RAISES rather
+// than returning, so `handleGatewayEnvelope`'s `idempotency.once` records no
+// completion for that messageId: the gateway entry stays pending and the
+// stream's existing retry and dead-letter redeliver it. (`once` claims
+// nothing before running its function — it reads the recorded outcome and
+// writes one only after the function resolves — so a raise leaves no claim
+// to release, and the redelivery runs the handler again.)
+async function relayToCore(command, msg, envelope, projectName) {
+  const { type, ...fields } = msg;
   try {
-    const result = await dependencies.routeMaterialization(
-      { parentId: msg.parentJiraIssueKey, subtasks: msg.subtasks },
-      projectName
-    );
-    console.log(`[gateway] Materialized decomposition under ${msg.parentJiraIssueKey}`);
-    return result;
+    await canonicalWorkItems.publishCommand(projectName, {
+      command,
+      actor: 'jenkins',
+      type,
+      sourceMessageId: envelope.messageId,
+      ...fields,
+    });
   } catch (err) {
-    if (
-      err instanceof dependencies.MaterializationValidationError ||
-      err instanceof dependencies.MaterializationNoProgressError
-    ) {
-      const permanent = new Error(err.message);
-      permanent.permanent = true;
-      throw permanent;
-    }
+    console.error(
+      `[gateway] Could not relay ${type} entry ${envelope.messageId} on ${projectName} to core as ` +
+      `${command}: ${err.message} — the entry stays pending and will be redelivered`
+    );
     throw err;
   }
+  console.log(`[gateway] Relayed ${type} entry ${envelope.messageId} to core as ${command}`);
+  return { relayed: command, sourceMessageId: envelope.messageId };
+}
+
+// Forward a Refinement Agent decomposition to core, in every mode:
+// dependencies.js's routeMaterialization publishes one canonical
+// materializeDecomposition command, and core's own materializer validates the
+// proposed owners and applies the plan. A rejected or stalled decomposition is
+// reported by core on the parent work item and dead-lettered there — this
+// gateway sees no such failure, because it makes no decision about the plan.
+// A failure raised here is a failure to publish, which the normal
+// retry/dead-letter path handles, except one already flagged permanent, which
+// dead-letters immediately rather than burning retry attempts.
+async function handleMaterializeDecomposition(msg, projectName) {
+  const result = await dependencies.routeMaterialization(
+    { parentId: msg.parentWorkItemId, subtasks: msg.subtasks },
+    projectName
+  );
+  console.log(`[gateway] Forwarded decomposition under ${msg.parentWorkItemId}`);
+  return result;
 }
 
 // Handle a terminal Task outcome reported by a project container's
@@ -185,7 +280,7 @@ async function handleMaterializeDecomposition(msg, projectName) {
 // summary. A 'failed' status (retry exhaustion, timeout, or an invalid
 // message) has no such comment, so ScrumMaster must post one itself and
 // surface the ticket as needing attention rather than leaving it silently
-// stuck "In Progress". Also mirrors the outcome into the A2A Task record
+// stuck `in-progress`. Also mirrors the outcome into the A2A Task record
 // where one exists — best-effort: a process restart or a race with the
 // agent's own completion report can mean there's nothing (or an
 // already-terminal record) to update, which is not itself an error.
@@ -236,16 +331,10 @@ async function handleTaskStatus(envelope, projectName) {
     if (diagnostic) comment += `\n\nDiagnostic: ${diagnostic}`;
     comment += `\nTicket: ${key}`;
 
-    const mode = await canonicalWorkItems.getMode(projectName);
-    if (mode.mode === 'jira') {
-      await jira.postComment(key, comment);
-      await jira.setBlockedField(key, true);
-    } else {
-      await canonicalWorkItems.publishCommand(projectName, {
-        command: 'transitionStatus', actor: label, workItemId: key, status: 'failed',
-      });
-      await postComment(key, { projectName, mode, messageId: envelope.messageId }, label, comment, null);
-    }
+    await canonicalWorkItems.publishCommand(projectName, {
+      command: 'transitionStatus', actor: label, workItemId: key, status: 'failed',
+    });
+    await postComment(key, { projectName, messageId: envelope.messageId }, label, comment, null);
     console.error(`[gateway] Task ${taskId} failed — ${key} blocked, reason: ${reason}`);
     return { taskId, status };
   }
@@ -254,49 +343,116 @@ async function handleTaskStatus(envelope, projectName) {
   return null;
 }
 
-// Handle a pipeline-failure retry request from Jenkins. The message
-// identifies the ticket and the failed build but never
-// asserts an agent owner — ScrumMaster looks up the ticket's own preserved
-// Agent field and redispatches that agent. Deduplicated per (ticket, build) —
-// a domain-level dedupe independent of this message's own messageId, since
-// Jenkins could in principle fire two distinct messages for the same failure.
-async function handlePipelineRetry(msg, _projectName) {
-  const { ticket_key, build_url, build_number } = msg;
+// Handle a pipeline-failure retry. TWO messages share this type and this
+// stream (V5.2 Canonical Delivery State REQ-01), and they are told apart by
+// one field:
+//
+//  - **Jenkins'**, which carries the promoted pull requests and no canonical
+//    id, because the Jira-key regex that used to name a ticket is gone. It is
+//    relayed to core as `recordPipelineFailure`; ScrumMaster takes no action
+//    on it itself and looks nothing up.
+//  - **core's**, which carries the canonical `workItemId` core resolved from
+//    those pull requests. Only this one names a work item, and this is the
+//    one this service acts on: it redispatches the owner the canonical record
+//    names, deduplicated per (work item, build) as it was before v5.1.
+//
+// v5.1 reduced this handler to logging the message, because it could not use
+// a tracker key to find anything and nothing supplied it with a canonical id.
+// It now has one.
+async function handlePipelineRetry(msg, envelope, projectName) {
+  const { workItemId, build_url, build_number } = msg;
 
-  if (!ticket_key) {
-    console.warn('[gateway] pipeline_retry message missing ticket_key — dropping');
+  if (!workItemId) {
+    return relayToCore('recordPipelineFailure', msg, envelope, projectName);
+  }
+
+  // A domain-level dedupe independent of this message's own messageId: core
+  // publishes one retry per resolved work item, and two distinct failures of
+  // the same build must not dispatch the owner twice. Keyed on the CANONICAL
+  // id, never on a tracker key — which is the whole reason v5.1 deleted the
+  // helper this calls.
+  const dedupeKey = `retry-dispatch:${workItemId}:${build_url || build_number || 'unknown'}`;
+  const acquired = await redis.acquireOnce(dedupeKey, 3600);
+  if (!acquired) {
+    console.log(`[gateway] Duplicate pipeline_retry for ${workItemId} (build ${build_number || build_url}) — skipping`);
+    return { workItemId, skipped: true };
+  }
+
+  // If the redispatch throws, give the key back. Otherwise the redelivery is
+  // skipped as a duplicate and nobody is dispatched for the next hour.
+  try {
+    await redispatchImplementationOwner(workItemId, {
+      kind: 'pipeline_failure',
+      build_url: build_url || null,
+      build_number: build_number || null,
+    });
+  } catch (err) {
+    await redis.releaseOnce(dedupeKey);
+    throw err;
+  }
+  return { workItemId, skipped: false };
+}
+
+// Redispatch the owner the canonical record names, following
+// dispatchConsumer.js's canonical pattern (the owner from
+// `assignee_agent_id`, the agent from the registry, the prompt from
+// `buildRetryPrompt`'s evidence). `e39e9ab`'s Jira-reading
+// `redispatchImplementationOwner`, which read the owner off a live tracker
+// issue fetch, does not return.
+//
+// A work item with no assignee, or an assignee the registry does not know, is
+// logged at error level as unresolved, naming the workItemId and the message,
+// and dispatches no one — the same shape an unresolved reference takes in
+// core (REQ-02).
+async function redispatchImplementationOwner(workItemId, evidence) {
+  const full = await canonicalWorkItems.getWorkItem(workItemId, { full: true });
+  if (!full) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — no canonical work item by that id, ` +
+      `so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
+    return null;
+  }
+  if (!full.assignee_agent_id) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — the work item has no assignee, ` +
+      `so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
     return null;
   }
 
-  const dedupeKey = `retry-dispatch:${ticket_key}:${build_url || build_number || 'unknown'}`;
-  const acquired = await redis.acquireOnce(dedupeKey, 3600);
-  if (!acquired) {
-    console.log(`[gateway] Duplicate pipeline_retry for ${ticket_key} (build ${build_number || build_url}) — skipping`);
-    return { ticket_key, skipped: true };
+  const agent = registry.getAgent(full.assignee_agent_id);
+  if (!agent) {
+    console.error(
+      `[gateway] Unresolved pipeline_retry for ${workItemId} — its assignee "${full.assignee_agent_id}" ` +
+      `is not a registered agent id, so no agent was redispatched (evidence: ${JSON.stringify(evidence)})`
+    );
+    return null;
   }
 
-  await redispatchImplementationOwner(ticket_key, {
-    kind: 'pipeline_failure',
-    build_url: build_url || null,
-    build_number: build_number || null,
+  const { handlers, dispatchConsumer, buildRetryPrompt } = dispatchModules();
+  const issueLike = await dispatchConsumer.issueLikeFor(full);
+  const { retrieved, record: memoryRecord } = await dispatchContext.retrieveForDispatch(issueLike);
+  await handlers.dispatchTask(issueLike, agent, {
+    promptFactory: (task, message) => buildRetryPrompt(issueLike, agent, evidence, task, message, retrieved),
+    memoryRecord,
   });
-  return { ticket_key, skipped: false };
+  return { workItemId, agentId: agent.id };
 }
 
 // Apply an incoming agent submission to the stored A2A Task, then translate
-// the resulting state/message/artifacts into the canonical-state side
-// effects the legacy per-type gateway operations used to perform directly
-// against Jira (comment, set_blocked, set_agent_field, create_subtask,
-// open_pr). Mode-aware: a Jira-mode project
-// keeps the exact existing Jira-write behavior; a local-mode project routes
-// the same decisions through the Internal Work-Item Service's Streams
-// command channel instead — the same split dependencies.js's
-// routeMaterialization already established for decomposition. `jiraIssueKey`
-// below is the Task's stable external-facing key regardless of mode: in
-// Jira mode it's the real Jira issue key, in local mode it's the canonical
-// work item id (handlers.js's dispatchTask stores `issue.key` under this
-// name in both cases — dispatch deliberately has no local-mode-specific
-// code path).
+// the resulting state/message/artifacts into canonical-state side effects
+// (comment, needs-clarification, assign, create_subtask, open_pr), routed
+// through core's Streams command channel. There is no mode branch from v5.1:
+// ScrumMaster publishes the same canonical commands in every mode, and for a
+// project in Jira mode core's write gate refuses each gated one and
+// dead-letters it as WRITE_GATE_REJECTED.
+//
+// The Task's own id is the work item's canonical id, in every mode
+// (handlers.js's dispatchTask registers it as `issue.key`, which
+// dispatchConsumer.js's issueLikeFromCanonical sets from the canonical
+// record), so `record.id` below is the work item every side effect applies
+// to.
 async function handleA2ASubmission(envelope, projectName) {
   const msg = envelope.payload || {};
   const errors = [];
@@ -313,27 +469,47 @@ async function handleA2ASubmission(envelope, projectName) {
       errors.push(err.message);
     }
   }
+  // Durable A2A Message Record REQ-04: each exit below publishes
+  // ScrumMaster's verdict on this submission to core.
+  const refuse = (reason, extra = {}) => publishVerdictLogged(projectName, {
+    taskId: envelope.taskId,
+    messageId: msg.message.messageId,
+    sourceMessageId: envelope.messageId,
+    verdict: 'refused',
+    reason,
+    ...extra,
+  });
+
   if (errors.length > 0) {
     console.warn(`[gateway] Rejected invalid A2A submission for task ${envelope.taskId}:`, errors.join('; '));
+    // Only a message core can key — by its Task and its own messageId — is
+    // given a verdict; core stores nothing for any other.
+    if (typeof envelope.taskId === 'string' && envelope.taskId &&
+        typeof msg.message?.messageId === 'string' && msg.message.messageId) {
+      await refuse('invalid');
+    }
     return null;
   }
 
   const taskId = envelope.taskId;
   const record = taskStore.getTaskById(taskId);
   if (!record) {
-    console.warn(`[gateway] Unknown task ${taskId} on jira-gateway:${projectName} — dropping`);
+    console.warn(`[gateway] Unknown task ${taskId} on ${registry.gatewayStreamName(projectName)} — dropping`);
+    await refuse('unknown_task');
     return null;
   }
 
-  const taskProjectName = record.metadata.jiraProjectName?.toLowerCase();
+  const taskProjectName = record.metadata.projectName?.toLowerCase();
   if (taskProjectName && taskProjectName !== registry.normalizeProjectName(projectName)) {
     console.warn(`[gateway] Task ${taskId} belongs to project "${taskProjectName}", not "${projectName}" — dropping`);
+    await refuse('wrong_project');
     return null;
   }
 
   const message = msg.message;
   if (message.role !== 'agent') {
     console.warn(`[gateway] Task ${taskId} submission has role "${message.role}", expected "agent" — dropping`);
+    await refuse('wrong_role');
     return null;
   }
 
@@ -349,23 +525,36 @@ async function handleA2ASubmission(envelope, projectName) {
     });
   } catch (err) {
     if (err instanceof taskStore.A2ATerminalTaskError) {
+      await refuse('task_finished', { finishedState: stateBeforeApplying });
       await reportTaskAlreadyFinished(record, stateBeforeApplying, projectName, envelope);
-      return { ticket_key: record.jiraIssueKey, alreadyFinished: stateBeforeApplying };
+      return { ticket_key: record.id, alreadyFinished: stateBeforeApplying };
     }
     throw err;
   }
 
-  const jiraIssueKey = record.jiraIssueKey;
-  if (!jiraIssueKey) {
-    console.warn(`[gateway] Task ${taskId} has no jiraIssueKey in metadata — nothing to project`);
-    taskStore.markMessageFailed(taskId, message.messageId);
-    return null;
+  // applyTransition returned: taskStore has recorded the message and moved
+  // the Task to its state (or found it already succeeded). Published before
+  // any of the projection and RAISED on failure, as a failed appendComment
+  // publication is: idempotency.once then records no outcome, the entry stays
+  // pending, and its redelivery applies the still-pending message again
+  // without recording it twice, and publishes this again.
+  try {
+    await publishVerdict(projectName, {
+      taskId, messageId: message.messageId, sourceMessageId: envelope.messageId, verdict: 'applied',
+    });
+  } catch (err) {
+    console.error(
+      `[gateway] Could not publish the "applied" verdict for message ${message.messageId} of task ${taskId} ` +
+      `to core: ${err.message} — the entry stays pending and will be redelivered`
+    );
+    throw err;
   }
+
+  const workItemId = record.id;
 
   let outcome;
   try {
-    const mode = await canonicalWorkItems.getMode(projectName);
-    const ctx = { projectName, mode, messageId: envelope.messageId };
+    const ctx = { projectName, messageId: envelope.messageId };
 
     const agentName = deriveAgentDisplayName(record);
     const textPart = message.parts.find(p => p.kind === 'text');
@@ -375,25 +564,25 @@ async function handleA2ASubmission(envelope, projectName) {
     const reference = dataPart?.data?.reference;
 
     if (schema.INTERRUPTED_STATES.includes(msg.state)) {
-      await handleInterrupted(jiraIssueKey, agentName, msg.state, body, reference, ctx);
-      outcome = { ticket_key: jiraIssueKey };
+      await handleInterrupted(workItemId, agentName, msg.state, body, reference, ctx);
+      outcome = { ticket_key: workItemId };
     } else if (msg.state === 'completed') {
-      await handleCompleted(jiraIssueKey, agentName, body, msg.artifacts, ctx);
-      outcome = { ticket_key: jiraIssueKey };
+      await handleCompleted(workItemId, agentName, body, msg.artifacts, ctx);
+      outcome = { ticket_key: workItemId };
     } else if (msg.state === 'failed' || msg.state === 'canceled' || msg.state === 'rejected') {
-      await handleTerminalFailure(jiraIssueKey, agentName, msg.state, body, ctx);
-      outcome = { ticket_key: jiraIssueKey };
+      await handleTerminalFailure(workItemId, agentName, msg.state, body, ctx);
+      outcome = { ticket_key: workItemId };
     } else {
       // Non-terminal, non-interrupted (submitted/working): branch on the
       // requested operation, if any.
       switch (operation) {
         case 'comment':
-          await postFormattedComment(jiraIssueKey, agentName, body, reference, ctx);
-          outcome = { ticket_key: jiraIssueKey };
+          await postFormattedComment(workItemId, agentName, body, reference, ctx);
+          outcome = { ticket_key: workItemId };
           break;
         case 'reassign':
           outcome = await handleReassign(record, dataPart.data.agentFieldValue, agentName, ctx)
-            ? { ticket_key: jiraIssueKey }
+            ? { ticket_key: workItemId }
             : null;
           break;
         case 'create_subtask':
@@ -401,11 +590,11 @@ async function handleA2ASubmission(envelope, projectName) {
           break;
         case undefined:
           // A working-state message with no data part is a plain progress note.
-          if (body) await postFormattedComment(jiraIssueKey, agentName, body, reference, ctx);
-          outcome = { ticket_key: jiraIssueKey };
+          if (body) await postFormattedComment(workItemId, agentName, body, reference, ctx);
+          outcome = { ticket_key: workItemId };
           break;
         default:
-          await reportUnsupportedOperation(jiraIssueKey, operation, ctx);
+          await reportUnsupportedOperation(workItemId, operation, ctx);
           outcome = null;
       }
     }
@@ -416,6 +605,12 @@ async function handleA2ASubmission(envelope, projectName) {
 
   if (outcome === null) taskStore.markMessageFailed(taskId, message.messageId);
   else taskStore.markMessageSucceeded(taskId, message.messageId);
+  await publishVerdictLogged(projectName, {
+    taskId,
+    messageId: message.messageId,
+    sourceMessageId: envelope.messageId,
+    outcome: outcome === null ? 'failed' : 'succeeded',
+  });
   return outcome;
 }
 
@@ -440,17 +635,8 @@ async function handleA2ASubmission(envelope, projectName) {
 // itself. Nothing else about the item changes: its recorded outcome is
 // exactly what this is protecting.
 async function reportTaskAlreadyFinished(record, finishedState, projectName, envelope) {
-  const ticketKey = record.jiraIssueKey;
-  if (!ticketKey) {
-    console.warn(
-      `[gateway] Task ${record.id} is already ${finishedState} and a later message was acknowledged without ` +
-      `being applied, but the Task has no work item to report that on`
-    );
-    return;
-  }
-
-  const mode = await canonicalWorkItems.getMode(projectName);
-  const ctx = { projectName, mode, messageId: envelope.messageId };
+  const ticketKey = record.id;
+  const ctx = { projectName, messageId: envelope.messageId };
   const comment =
     `[system] A further update arrived for this work item after its assigned work had already finished ` +
     `(${finishedState}), so it was not applied and the recorded outcome stands.\n\n` +
@@ -515,20 +701,12 @@ function referenceFields(reference) {
   return { referenceFile: null, referenceFunction: null };
 }
 
-// Post one comment, mode-aware. `formattedBody` is the exact text both
-// modes post — both modes must show the same body/reference content, so
-// this does not reformat per destination, only redirect it: Jira mode
-// keeps the existing jira.postComment call, local mode routes the same
-// text through the Internal Work-Item Service's appendComment Streams
-// command (no Jira call may be required to succeed). `ctx.messageId` is
-// threaded through as the comment's
+// Post one comment. `formattedBody` is the exact text, routed through core's
+// appendComment Streams command — the only destination in every mode.
+// `ctx.messageId` is threaded through as the comment's
 // sourceMessageId so a redelivered gateway entry can't double-post it
 // (append_comment's own redelivery guard).
 async function postComment(ticketKey, ctx, agentName, formattedBody, reference) {
-  if (ctx.mode.mode === 'jira') {
-    await jira.postComment(ticketKey, formattedBody);
-    return;
-  }
   const { referenceFile, referenceFunction } = referenceFields(reference);
   await canonicalWorkItems.publishCommand(ctx.projectName, {
     command: 'appendComment',
@@ -555,11 +733,9 @@ async function postFormattedComment(ticketKey, agentName, body, reference, ctx) 
   console.log(`[gateway] Posted comment on ${ticketKey}`);
 }
 
-// Jira mode represents "blocked/needs input" as a boolean field layered on
-// top of whatever status the ticket is already in. The canonical vocabulary
-// has no equivalent boolean — 'needs-clarification' is the
-// minimum-vocabulary status that means the same thing, so
-// local mode transitions into it instead of flipping a flag.
+// 'needs-clarification' is the minimum-vocabulary status that means
+// "blocked / needs input", so an interrupted submission transitions the work
+// item into it.
 async function handleInterrupted(ticketKey, agentName, state, body, reference, ctx) {
   const label = state === 'auth-required' ? 'AUTHORIZATION REQUIRED' : 'BLOCKED';
   let comment = `[${agentName}] ${label} — ${body || '(no reason provided)'}`;
@@ -567,13 +743,9 @@ async function handleInterrupted(ticketKey, agentName, state, body, reference, c
   if (ref) comment += `\n\nReference: ${ref}`;
   comment += `\nTicket: ${ticketKey}`;
 
-  if (ctx.mode.mode === 'jira') {
-    await jira.setBlockedField(ticketKey, true);
-  } else {
-    await canonicalWorkItems.publishCommand(ctx.projectName, {
-      command: 'transitionStatus', actor: agentName, workItemId: ticketKey, status: 'needs-clarification',
-    });
-  }
+  await canonicalWorkItems.publishCommand(ctx.projectName, {
+    command: 'transitionStatus', actor: agentName, workItemId: ticketKey, status: 'needs-clarification',
+  });
   await postComment(ticketKey, ctx, agentName, comment, reference);
   console.log(`[gateway] Set ${state} on ${ticketKey}`);
 }
@@ -589,29 +761,21 @@ function mapTerminalStateToStatus(state) {
 async function handleTerminalFailure(ticketKey, agentName, state, body, ctx) {
   const comment = `[${agentName}] Task ${state.toUpperCase()} — ${body || '(no detail provided)'}\nTicket: ${ticketKey}`;
 
-  if (ctx.mode.mode === 'jira') {
-    await jira.setBlockedField(ticketKey, true);
-  } else {
-    await canonicalWorkItems.publishCommand(ctx.projectName, {
-      command: 'transitionStatus', actor: agentName, workItemId: ticketKey, status: mapTerminalStateToStatus(state),
-    });
-  }
+  await canonicalWorkItems.publishCommand(ctx.projectName, {
+    command: 'transitionStatus', actor: agentName, workItemId: ticketKey, status: mapTerminalStateToStatus(state),
+  });
   await postComment(ticketKey, ctx, agentName, comment, null);
   console.log(`[gateway] Task ${state} on ${ticketKey}`);
 }
 
-// Read the work item's own persisted status, mode-aware. Only for reporting:
-// the gateway's in-memory Task state is not the work item's status, and
-// nothing in the completion path transitions it, so a log line that names a
-// status has to go and look rather than assert one. A failed read must
-// never turn a successful projection into a retry, so it degrades to "not
-// known" and says so.
+// Read the work item's own persisted status. Only for reporting: the
+// gateway's in-memory Task state is not the work item's status, and nothing
+// in the completion path transitions it, so a log line that names a status
+// has to go and look rather than assert one. A failed read must never turn a
+// successful projection into a retry, so it degrades to "not known" and says
+// so.
 async function persistedStatus(ticketKey, ctx) {
   try {
-    if (ctx.mode.mode === 'jira') {
-      const issue = await jira.getIssue(ticketKey);
-      return issue && issue.status ? issue.status : null;
-    }
     const item = await canonicalWorkItems.getWorkItem(ticketKey);
     return item && item.status ? item.status : null;
   } catch (err) {
@@ -621,12 +785,28 @@ async function persistedStatus(ticketKey, ctx) {
 }
 
 // Handle a completed Task. A "pull-request" Artifact means the agent opened
-// a PR — post a comment only. Opening a PR must not move the ticket out of
-// whatever status it is in, or change its recorded implementation owner:
-// Jenkins is the sole owner of the "In Review" transition, firing only after
-// tests pass, merge, and beta deploy succeed — a Jira-mode concern only
-// (Release work items are carved out of this), so local mode has no status
-// transition to make here in either branch.
+// a PR — record the association and post a comment. Opening a PR must not
+// move the work item out of whatever status it is in, or change its recorded
+// owner: the platform owns the transition into review, firing only after
+// tests pass, merge and beta deploy succeed, so there is no status
+// transition to make here.
+//
+// **The association is V5.2 REQ-03.** The PR url was already parsed out of
+// the Artifact and used only to compose the comment; it is now ALSO recorded
+// as a `pull_request` association on the work item, through the same
+// `publishCommand` path every other canonical write uses. That is the signal
+// REQ-02's resolver reads to turn a deployed pull request back into the work
+// item that delivered it — which needs no new A2A operation, no
+// agent-documentation change and no new ingress, because the agent already
+// supplies the PR and this call site already holds both the work-item id and
+// the url. Idempotence for a repeated completion is core's
+// (`store.attach_artifact`): `publishCommand`'s `dedupeKey` expires, so a
+// second completion must not leave a second row, and the row's reference is
+// normalized on the way in.
+//
+// The Artifact is optional and stays optional: a task completed without one
+// leaves no association, which REQ-02 handles by recording the later
+// deployment as unresolved rather than dropping it.
 async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   const prArtifact = (artifacts || []).find(a => a.name === 'pull-request');
 
@@ -634,6 +814,16 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
     const filePart = prArtifact.parts.find(p => p.kind === 'file');
     const summaryPart = prArtifact.parts.find(p => p.kind === 'text');
     const prUrl = filePart?.file?.uri;
+
+    if (prUrl) {
+      await canonicalWorkItems.publishCommand(ctx.projectName, {
+        command: 'attachArtifact',
+        actor: agentName,
+        workItemId: ticketKey,
+        artifactType: 'pull_request',
+        reference: prUrl,
+      });
+    }
 
     const comment = `[${agentName}] PR opened and ready for review: ${prUrl}${summaryPart ? `\n\n${summaryPart.text}` : ''}\n\nTicket: ${ticketKey}`;
     await postComment(ticketKey, ctx, agentName, comment, null);
@@ -652,33 +842,21 @@ async function handleCompleted(ticketKey, agentName, body, artifacts, ctx) {
   console.log(`[gateway] Task completed for ${ticketKey}`);
 }
 
-// Move a work item into the state that means "a human has to look at this",
-// mode-aware. Jira mode represents it as the Blocked flag layered on top of
-// whatever status the ticket holds; the canonical vocabulary has no such
-// flag, so 'needs-clarification' carries the same meaning there. Every
-// request the gateway refuses to act on ends here, so that a refusal is one
-// visible state rather than a different one per refusal reason.
+// Move a work item into the state that means "a human has to look at this":
+// 'needs-clarification'. Every request the gateway refuses to act on ends
+// here, so that a refusal is one visible state rather than a different one
+// per refusal reason.
 async function flagForAttention(ticketKey, actor, ctx) {
-  if (ctx.mode.mode === 'jira') {
-    await jira.setBlockedField(ticketKey, true);
-    return;
-  }
   await canonicalWorkItems.publishCommand(ctx.projectName, {
     command: 'transitionStatus', actor, workItemId: ticketKey, status: 'needs-clarification',
   });
 }
 
-// Report a rejected agent-field/agentFieldValue assignment back to the
-// requester, mode-aware — a visible assignment failure must stay visible
-// for canonical work items too, not just Jira ones. Jira mode keeps the existing
-// handlers.js behavior untouched. Local mode has no Blocked field to flip,
-// so it transitions to 'needs-clarification' like handleInterrupted above.
+// Report a rejected agentFieldValue assignment back to the requester — a
+// rejected assignment must stay visible on the work item. This is the only
+// wording, in every mode: it transitions to 'needs-clarification' like
+// handleInterrupted above.
 async function reportAssignmentFailure(ticketKey, requestedAgent, result, ctx) {
-  if (ctx.mode.mode === 'jira') {
-    await reportJiraAssignmentFailure(ticketKey, requestedAgent, result);
-    return;
-  }
-
   const reason = result.code === assignment.ERROR_CODES.UNKNOWN_AGENT
     ? `"${requestedAgent}" is not a registered agent id in the catalog.`
     : result.code === assignment.ERROR_CODES.UNKNOWN_PROJECT
@@ -761,7 +939,7 @@ async function reportUnsupportedOperation(ticketKey, operation, ctx) {
 // v4.1 agent-artifact-automation.md REQ-01 — a create_subtask request's
 // optional specificationLink/artifactLinks, validated for shape only (never
 // whether the artifact id actually resolves — that check lives in the
-// work-item service, work-items.md REQ-04, and its rejection is reported
+// core service, work-items.md REQ-04, and its rejection is reported
 // through the materializeDecomposition dead-letter path, not this one).
 // Returns phrases, not bare field names — carry-forward 5 (build brief
 // §1b): reportMissingFields' "the request is missing ..." sentence must
@@ -816,11 +994,11 @@ async function reportSubtaskRejection(parentTicketKey, summary, missingFields, c
   await reportMissingFields(parentTicketKey, 'create_subtask', missingFields, detailLines, ctx);
 }
 
-// Change a ticket's recorded implementation owner. Every path that creates
+// Change a work item's recorded implementation owner. Every path that creates
 // or changes agent responsibility must go through the same catalog-backed
 // validator.
 async function handleReassign(record, agentFieldValue, agentName, ctx) {
-  const ticketKey = record.jiraIssueKey;
+  const ticketKey = record.id;
   if (!agentFieldValue) {
     const project = registry.getProject(ctx.projectName);
     const permitted = project && project.agents.length > 0
@@ -836,55 +1014,33 @@ async function handleReassign(record, agentFieldValue, agentName, ctx) {
     return false;
   }
 
-  if (ctx.mode.mode === 'jira') {
-    await jira.setAgentField(ticketKey, agentFieldValue);
-  } else {
-    await canonicalWorkItems.publishCommand(ctx.projectName, {
-      command: 'assign', actor: agentName, workItemId: ticketKey, agentId: agentFieldValue,
-    });
-  }
-  console.log(`[gateway] Set Agent field on ${ticketKey} to ${agentFieldValue}`);
+  await canonicalWorkItems.publishCommand(ctx.projectName, {
+    command: 'assign', actor: agentName, workItemId: ticketKey, agentId: agentFieldValue,
+  });
+  console.log(`[gateway] Assigned ${ticketKey} to ${agentFieldValue}`);
   return true;
 }
 
-// Create a subtask under the requesting Task's own work item, then dispatch
-// a brand-new A2A Task to the assigned agent for it.
+// Create a subtask under the requesting Task's own work item.
 //
-// Jira mode: unchanged — creates the Jira subtask, dispatches directly, and
-// transitions it to "In Progress". The subtask creation carries its own
-// idempotency guard keyed off the gateway envelope's messageId, independent
-// of the outer once()-wrapped outcome for this whole operation — so if a
-// later step (transitionIssue) fails and the operation is retried from
-// scratch, the Jira subtask is not duplicated (dispatchTask's own dedupeKey
-// separately protects the agent dispatch).
-//
-// Local mode: this operation has no bespoke local-mode counterpart — it
-// reuses the exact same Internal Work-Item Service materializeDecomposition
-// command dependencies.js's routeMaterialization already sends for
-// Refinement Agent decompositions (a single-subtask, no-dependency
-// decomposition is a degenerate case of the same contract; materialize.py
-// creates it and immediately transitions it to 'ready'). This is
-// deliberate, not a shortcut: every
-// dispatch-eligible transition must go through the same
-// work-item-service-event -> dispatchConsumer.js path regardless of
-// ingress, so this function must NOT call dispatchTask directly for a
-// local-mode subtask — dispatchConsumer.js's existing consumer on
-// work_item.status_changed picks up the 'ready' transition and dispatches
-// it the same way it dispatches every other local-mode work item. The
-// subtask id is minted here (a bare UUID — WorkItem.id is a UUIDField,
-// an AI-Gang-issued id) and guarded by the same
-// getOutcome/recordOutcome idempotency pattern as the Jira-mode subtask key,
-// so a from-scratch retry reuses the same id instead of materializing a
-// second work item.
+// This operation has no counterpart of its own: in every mode it reuses the
+// exact same core materializeDecomposition command dependencies.js's
+// routeMaterialization already sends for Refinement Agent decompositions (a
+// single-subtask, no-dependency decomposition is a degenerate case of the
+// same contract; materialize.py creates it and immediately transitions it to
+// 'ready'). This is deliberate, not a shortcut: every dispatch-eligible
+// transition must go through the same core-event -> dispatchConsumer.js path
+// regardless of ingress, so this function must NOT call dispatchTask
+// directly — dispatchConsumer.js's existing consumer on
+// work_item.status_changed picks up the 'ready' transition and dispatches it
+// the same way it dispatches every other work item. The subtask id is minted
+// here (a bare UUID — WorkItem.id is a UUIDField, an AI-Gang-issued id) and
+// guarded by the getOutcome/recordOutcome idempotency pattern, so a
+// from-scratch retry reuses the same id instead of materializing a second
+// work item.
 async function handleCreateSubtask(record, data, ctx) {
   const { summary, description, specificationLink, artifactLinks } = data;
-  const parentTicketKey = record.jiraIssueKey;
-
-  if (!parentTicketKey) {
-    // Nothing to create the subtask under, and nowhere to report it either.
-    console.warn('[gateway] create_subtask missing required fields (parentTicketKey) — dropping. Received:', JSON.stringify(data));
-    return null;
-  }
+  const parentTicketKey = record.id;
 
   // An omitted agentFieldValue is recoverable when the summary's own
   // `<Role>: ...` prefix names exactly one agent this project has, other
@@ -927,56 +1083,33 @@ async function handleCreateSubtask(record, data, ctx) {
   const client = redis.getClient();
   const messageId = ctx.messageId;
 
-  if (ctx.mode.mode !== 'jira') {
-    let subtaskId = await idempotency.getOutcome(client, 'subtask-create', messageId);
-    if (subtaskId === undefined) {
-      subtaskId = crypto.randomUUID();
-      // v4.1 REQ-01 — the two optional references ride inside this
-      // subtask entry untouched, forwarded unchanged to materialize.py,
-      // which passes them through create_work_item exactly as `create`
-      // does (work-items.md REQ-01, REQ-02). Included only when the
-      // request actually carried them, so an unreferenced subtask's
-      // canonical command is byte-for-byte what it was before this
-      // feature.
-      const subtaskEntry = { id: subtaskId, displayName: summary, description: description || '', agent: agentFieldValue };
-      if (specificationLink) subtaskEntry.specificationLink = specificationLink;
-      if (artifactLinks) subtaskEntry.artifactLinks = artifactLinks;
-      await canonicalWorkItems.publishCommand(ctx.projectName, {
-        command: 'materializeDecomposition',
-        actor: agent.id,
-        message: {
-          parentWorkItemId: parentTicketKey,
-          subtasks: [subtaskEntry],
-        },
-      });
-      await idempotency.recordOutcome(client, 'subtask-create', messageId, subtaskId);
-      console.log(`[gateway] Materialized subtask ${subtaskId} under ${parentTicketKey} — dispatch follows from its own ready event`);
-    } else {
-      console.log(`[gateway] Reusing already-materialized subtask ${subtaskId} for messageId ${messageId}`);
-    }
-    return { subtaskId };
-  }
-
-  let subtaskKey = await idempotency.getOutcome(client, 'subtask-create', messageId);
-  if (subtaskKey === undefined) {
-    const parent = await jira.getIssue(parentTicketKey);
-    subtaskKey = await jira.createSubtask(parentTicketKey, parent.project, summary, description || '', agentFieldValue);
-    await idempotency.recordOutcome(client, 'subtask-create', messageId, subtaskKey);
-    console.log(`[gateway] Created subtask ${subtaskKey} under ${parentTicketKey}`);
+  let subtaskId = await idempotency.getOutcome(client, 'subtask-create', messageId);
+  if (subtaskId === undefined) {
+    subtaskId = crypto.randomUUID();
+    // v4.1 REQ-01 — the two optional references ride inside this
+    // subtask entry untouched, forwarded unchanged to materialize.py,
+    // which passes them through create_work_item exactly as `create`
+    // does (work-items.md REQ-01, REQ-02). Included only when the
+    // request actually carried them, so an unreferenced subtask's
+    // canonical command is byte-for-byte what it was before this
+    // feature.
+    const subtaskEntry = { id: subtaskId, displayName: summary, description: description || '', agent: agentFieldValue };
+    if (specificationLink) subtaskEntry.specificationLink = specificationLink;
+    if (artifactLinks) subtaskEntry.artifactLinks = artifactLinks;
+    await canonicalWorkItems.publishCommand(ctx.projectName, {
+      command: 'materializeDecomposition',
+      actor: agent.id,
+      message: {
+        parentWorkItemId: parentTicketKey,
+        subtasks: [subtaskEntry],
+      },
+    });
+    await idempotency.recordOutcome(client, 'subtask-create', messageId, subtaskId);
+    console.log(`[gateway] Materialized subtask ${subtaskId} under ${parentTicketKey} — dispatch follows from its own ready event`);
   } else {
-    console.log(`[gateway] Reusing already-created subtask ${subtaskKey} for messageId ${messageId}`);
+    console.log(`[gateway] Reusing already-materialized subtask ${subtaskId} for messageId ${messageId}`);
   }
-
-  const subtask = await jira.getIssue(subtaskKey);
-  await dispatchTask(subtask, agent, {
-    dispatchId: messageId,
-    promptFactory: (task, message) => buildTaskPrompt(subtask, agent, { task, message }),
-  });
-
-  await jira.transitionIssue(subtaskKey, 'In Progress');
-
-  console.log(`[gateway] Subtask ${subtaskKey} dispatched to ${agentFieldValue}`);
-  return { subtaskKey, dispatched: true };
+  return { subtaskId };
 }
 
 module.exports = {
@@ -984,6 +1117,7 @@ module.exports = {
   stopGatewaySubscriber,
   _handleA2ASubmission: handleA2ASubmission,
   _handlePipelineRetry: handlePipelineRetry,
+  _dispatchGatewayOperation: dispatchGatewayOperation,
   _handleTaskStatus: handleTaskStatus,
   _gatewayConsumerOptions: gatewayConsumerOptions,
 };

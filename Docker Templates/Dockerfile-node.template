@@ -35,6 +35,13 @@ WORKDIR /workspace
 # Switch to non-root user
 USER aigang
 
+# The agent harness's session folder, created as the user the harness runs
+# as. The project's compose file mounts its subdirectory of the shared
+# harness volume here; without this directory Docker would create the mount
+# point, and ~/.claude above it, as root, and the harness could not write
+# its settings (Durable Agent Session Record REQ-01).
+RUN mkdir -p /home/aigang/.claude/projects
+
 # Always (re)start the pm2-managed Redis subscriber as part of the
 # container's actual startup, on every start — including a
 # `docker compose up -d --force-recreate` — instead of relying on a manual

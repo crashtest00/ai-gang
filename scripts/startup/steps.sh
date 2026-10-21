@@ -17,12 +17,13 @@ set -euo pipefail
 STEPS=(
   "create-network|Create the ai-gang Docker network if it does not already exist"
   "start-redis|Start Redis"
-  "start-work-item-service|Build and start the work-item service and apply its database migrations"
+  "start-core|Build and start the core service and apply its database migrations"
   "create-admin|Create the Django admin account from .env"
   "start-scrummaster|Build and start ScrumMaster"
+  "start-memory|Create the shared harness volume, then build and start Memory without its indexer"
   "initialize-project|Initialize the configured project from the configuration"
   "install-project-dockerfile|Install the project container's Dockerfile from its stack's template"
-  "start-project|Build and start the project container, then reload the services that read the project list at startup"
+  "start-project|Build and start the project container, reload the services that read the project list at startup, then start Memory's indexer"
   "confirm-health|Confirm every service is healthy and record the admin address"
 )
 

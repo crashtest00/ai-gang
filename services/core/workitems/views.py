@@ -1,0 +1,471 @@
+"""
+The external HTTP API: a direct query interface, plus
+human-/external-facing interfaces that may write directly to the datastore,
+subject to the Jira-mode restriction on canonical fields. Direct
+port of the Node service's src/httpApi.js — intentionally a thin HTTP
+surface: every request still goes through store.py/readstore.py, which is
+where access logging, write-gating, and
+history all actually happen.
+
+Preserves services/scrummaster/src/canonicalWorkItems.js's expected HTTP contract
+EXACTLY: same paths, same methods, same status codes, same JSON response
+shapes (see serializers.py's module comment) — see the final report for
+confirmation this was achieved with no endpoint requiring a scrummaster-
+side change.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+from . import jira_client, project_config, readstore, registry, relay, store, write_gate
+from .models import ProjectConfig
+from .envelope import Kind, build_envelope
+from .serializers import (
+    serialize_work_item, serialize_work_item_full, serialize_work_item_with_associations,
+    serialize_work_item_with_references,
+)
+from .streams import classify_health, health as stream_health, publish
+
+CLIENT_ERROR_CODES = {
+    'VALIDATION_ERROR', 'ASSIGNMENT_REJECTED', 'DEPENDENCY_GATE_REJECTED', 'WRITE_GATE_REJECTED',
+    'RELEASE_GATE_REJECTED',
+}
+
+
+def _error_response(err: Exception):
+    code = getattr(err, 'code', None)
+    if code in CLIENT_ERROR_CODES:
+        status = 409 if code == 'WRITE_GATE_REJECTED' else 400
+        return JsonResponse({'error': code, 'message': str(err)}, status=status)
+    print(f'[views] unexpected error: {err!r}')
+    return JsonResponse({'error': 'INTERNAL_ERROR'}, status=500)
+
+
+def health(request):
+    """Report on this service's own inbound-webhook consumer group
+    health (the Jira ingestion path, now that this service
+    owns it — see jira_webhook below) and the outbox relay's
+    health, mirroring the depth services/scrummaster/src/server.js's own /health
+    already provides for its streams. It also returns ``a2aRecord``, the row
+    count and size of the five A2A message-record tables. Previously a bare
+    {"status": "ok"} stub."""
+    from .webhook_consumer import WEBHOOK_GROUP
+
+    client = registry_redis_client()
+    reports = []
+    for project_name in registry.get_project_names():
+        webhook = stream_health(client, registry.webhook_stream_name(project_name), WEBHOOK_GROUP)
+        reports.append({**webhook, 'status': classify_health(webhook)})
+
+    relay_report = relay_health(client)
+    reports.append(relay_report)
+
+    overall = 'unhealthy' if any(r['status'] == 'unhealthy' for r in reports) \
+        else 'degraded' if any(r['status'] == 'degraded' for r in reports) \
+        else 'ok'
+    status_code = 503 if overall == 'unhealthy' else 200
+    return JsonResponse({'status': overall, 'streams': reports, 'a2aRecord': a2a_record_volume()},
+                        status=status_code)
+
+
+# durable-a2a-message-record.md §4, "Volume": the A2A tables, in the order a
+# record is built from them.
+A2A_TABLES = ('a2a_task', 'a2a_message', 'a2a_artifact', 'a2a_conflict', 'a2a_verdict')
+
+
+def a2a_record_volume() -> list[dict]:
+    """Each A2A table's row count and size (``pg_total_relation_size``: the
+    table, its indexes and its TOAST data), for the health view. Informational
+    only: it sets no health status, since no row count is unhealthy."""
+    from django.db import connection
+
+    volume = []
+    with connection.cursor() as cursor:
+        for table in A2A_TABLES:
+            cursor.execute(f'SELECT count(*), pg_total_relation_size(%s) FROM {table}', [table])
+            row_count, size_bytes = cursor.fetchone()
+            volume.append({'table': table, 'rowCount': row_count, 'sizeBytes': size_bytes})
+    return volume
+
+
+def registry_redis_client():
+    from .redis_client import get_client
+    return get_client()
+
+
+def relay_health(client) -> dict:
+    """The outbox relay has no consumer group of its own (it's a
+    plain poll-and-publish loop, not a Streams consumer) — health is
+    instead "is there a growing backlog of unpublished rows," using the
+    oldest unpublished row's age as the same kind of staleness signal
+    stream_health's oldestPendingAgeMs already reports for a consumer
+    group."""
+    from django.utils import timezone
+
+    from .models import OutboxEvent
+
+    oldest = OutboxEvent.objects.filter(published_at__isnull=True).order_by('created_at').first()
+    unpublished_count = OutboxEvent.objects.filter(published_at__isnull=True).count()
+    age_ms = None
+    if oldest is not None:
+        age_ms = int((timezone.now() - oldest.created_at).total_seconds() * 1000)
+
+    threshold_ms = 10 * 60 * 1000
+    status = 'unhealthy' if client is None else 'degraded' if (age_ms or 0) > threshold_ms else 'healthy'
+    return {'component': 'outbox-relay', 'unpublishedCount': unpublished_count, 'oldestUnpublishedAgeMs': age_ms, 'status': status}
+
+
+# canonical-delivery-state.md REQ-11 — Jira's own link-creation event,
+# whose body carries `issueLink` and no `issue`.
+ISSUE_LINK_CREATED_EVENT = 'issuelink_created'
+
+
+def _route_webhook_project(jira_project_key, jira_project_name):
+    """The AI Gang project a Jira webhook belongs to.
+
+    canonical-delivery-state.md REQ-10: a webhook whose
+    `issue.fields.project.key` equals a `ProjectConfig.jira_project_key` is
+    routed to THAT ROW'S project, "before falling back to the project name,
+    because a Jira project's name need not match its AI Gang project's".
+    Up to v5.1 the name was the only route, so a Jira project named
+    anything else reached a project this service had never heard of and
+    every webhook for it was recorded as an untracked event.
+
+    Returns None when neither identifies a project, which is the 400 the
+    caller returns."""
+    if jira_project_key:
+        row = ProjectConfig.objects.filter(jira_project_key=jira_project_key).first()
+        if row is not None:
+            return row.project
+    return jira_project_name or jira_project_key or None
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def jira_webhook(request):
+    """Amended 2026-09-09 — Django is AI
+    Gang's sole external-facing surface; this replaces
+    services/scrummaster/src/server.js's deleted `POST /webhook/jira` route.
+
+    Durably enqueues the raw webhook onto the SAME `aigang:webhooks:{project}`
+    Redis Stream, using the SAME envelope/dedupe-key shape server.js used to
+    produce, before ever acknowledging receipt — this is the
+    acceptance test: a Django/core kill immediately after this
+    durable enqueue must not lose the event."""
+    secret = os.environ.get('WEBHOOK_SECRET')
+    if secret:
+        if request.GET.get('secret') != secret:
+            return JsonResponse({'error': 'Unauthorized'}, status=401)
+    else:
+        print('[views] WEBHOOK_SECRET not set — accepting all webhook requests')
+
+    try:
+        body = json.loads(request.body or b'{}')
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({'error': 'Invalid JSON body'}, status=400)
+
+    event = body.get('webhookEvent')
+    issue = body.get('issue')
+
+    if event == ISSUE_LINK_CREATED_EVENT:
+        # canonical-delivery-state.md REQ-11 — this body "carries
+        # `issueLink` and no `issue`", which this view refused up to v5.1.
+        # The source issue is read with `get_issue` ("Jira's
+        # `/issue/{idOrKey}` takes an id") only to learn which Jira project
+        # the link is in, so the event can be routed and enqueued like any
+        # issue event; the pair itself is reconciled by the consumer, which
+        # reads each end's key for itself.
+        link = body.get('issueLink') or {}
+        source_issue_id = link.get('sourceIssueId')
+        if not link.get('id') or not source_issue_id:
+            return JsonResponse({'error': 'Missing issueLink.id or issueLink.sourceIssueId'}, status=400)
+        try:
+            source_issue = jira_client.get_issue(str(source_issue_id)) or {}
+        except Exception as err:
+            # Jira will retry a non-2xx, and the event is not lost.
+            print(f'[views] Could not read issueLink source issue {source_issue_id}: {err!r}')
+            return JsonResponse({'error': 'Failed to resolve the issue link\'s source issue'}, status=502)
+        project_name = _route_webhook_project(source_issue.get('project'), source_issue.get('projectName'))
+        if not project_name:
+            return JsonResponse({'error': 'Missing issueLink source issue project'}, status=400)
+        dedupe_key = f'webhook:issuelink_created:{link["id"]}'
+        subject = f'issue link {link["id"]}'
+        payload = {'event': event, 'issue': None, 'body': body}
+    else:
+        if not event or not issue or not issue.get('key'):
+            return JsonResponse({'error': 'Missing webhookEvent or issue'}, status=400)
+
+        issue_fields = issue.get('fields') or {}
+        project_field = issue_fields.get('project') or {}
+        project_name = _route_webhook_project(project_field.get('key'), project_field.get('name'))
+        if not project_name:
+            return JsonResponse({'error': 'Missing issue.fields.project'}, status=400)
+
+        # Stable across Jira's own redelivery of the same event — built from
+        # fields Jira itself supplies for this delivery, not a value we mint.
+        changelog_id = (body.get('changelog') or {}).get('id')
+        dedupe_seed = ':'.join(
+            str(part) for part in (event, issue['key'], body.get('timestamp'), changelog_id) if part
+        )
+        dedupe_key = f'webhook:{dedupe_seed}'
+        subject = issue['key']
+        payload = {'event': event, 'issue': issue, 'body': body}
+
+    try:
+        client = registry_redis_client()
+        stream = registry.webhook_stream_name(project_name)
+        envelope = build_envelope(
+            Kind.WEBHOOK_EVENT,
+            registry.normalize_project_name(project_name),
+            payload=payload,
+        )
+        result = publish(client, stream, envelope, dedupe_key=dedupe_key)
+        return JsonResponse({'received': True, 'deduped': result['deduped']})
+    except Exception as err:
+        # Do not report success if the event was never durably enqueued —
+        # Jira will retry a non-2xx response.
+        print(f'[views] Failed to durably enqueue webhook for {subject}: {err!r}')
+        return JsonResponse({'error': 'Failed to durably accept event'}, status=502)
+
+
+@require_http_methods(['GET'])
+def project_mode(request, project: str):
+    mode = project_config.get_mode(project)
+    return JsonResponse(mode)
+
+
+@require_http_methods(['GET'])
+def get_work_item(request, work_item_id):
+    actor = request.headers.get('X-Actor', 'http-client')
+    full = request.GET.get('full') == 'true'
+    if full:
+        result = readstore.get_work_item_full(work_item_id, actor=actor)
+        if not result:
+            return JsonResponse({'error': 'not found'}, status=404)
+        return JsonResponse(serialize_work_item_full(result))
+
+    item = readstore.get_work_item(work_item_id, actor=actor)
+    if not item:
+        return JsonResponse({'error': 'not found'}, status=404)
+    specification_link = readstore.get_specification_link(work_item_id, actor=actor)
+    artifact_links = readstore.list_artifact_links(work_item_id, actor=actor)
+    return JsonResponse(serialize_work_item_with_references(item, specification_link, artifact_links))
+
+
+@require_http_methods(['GET'])
+def get_a2a_task(request, task_id: str):
+    """durable-a2a-message-record.md REQ-06: a Task's full durable A2A
+    record — every message with its verdict, reason, ``finishedState`` and
+    outcome, verdicts whose message is not yet archived, the state history
+    and the current ``state`` derived at this read. A direct read, recorded
+    in ``access_log``."""
+    actor = request.headers.get('X-Actor', 'http-client')
+    record = store.get_a2a_task(task_id, actor=actor)
+    if record is None:
+        return JsonResponse({'error': 'not found'}, status=404)
+    return JsonResponse(record)
+
+
+@require_http_methods(['GET'])
+def list_a2a_tasks(request):
+    """durable-a2a-message-record.md REQ-11: the paged, changed-since
+    enumeration of A2A Tasks, each with its full record. ``?cursor=`` is the
+    ``nextCursor`` of the previous page (empty: every Task), ``?limit=`` the
+    page size. Writes no access-log row, so a rebuild does not write one per
+    Task."""
+    try:
+        limit = int(request.GET.get('limit', '50'))
+    except ValueError:
+        return _error_response(store.ValidationError('limit must be a positive integer'))
+    try:
+        result = store.list_a2a_tasks(request.GET.get('cursor') or None, limit=limit)
+    except store.ValidationError as err:
+        return _error_response(err)
+    return JsonResponse(result)
+
+
+def _enumeration_response(request, enumerate_changed):
+    """The shared body of the three corpus-indexing.md REQ-11 routes:
+    ``?cursor=`` is the ``nextCursor`` of the previous page (empty: every
+    record), ``?limit=`` the page size. Writes no access-log row."""
+    try:
+        limit = int(request.GET.get('limit', '50'))
+    except ValueError:
+        return _error_response(store.ValidationError('limit must be a positive integer'))
+    try:
+        result = enumerate_changed(request.GET.get('cursor') or None, limit=limit)
+    except store.ValidationError as err:
+        return _error_response(err)
+    return JsonResponse(result)
+
+
+@require_http_methods(['GET'])
+def changed_work_items(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    work items, each with its history and links."""
+    return _enumeration_response(request, store.list_work_items_changed)
+
+
+@require_http_methods(['GET'])
+def changed_work_item_comments(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    work-item comments."""
+    return _enumeration_response(request, store.list_work_item_comments_changed)
+
+
+@require_http_methods(['GET'])
+def changed_delivery_artifacts(request):
+    """corpus-indexing.md REQ-11: the paged, changed-since enumeration of
+    delivery artifacts."""
+    return _enumeration_response(request, store.list_delivery_artifacts_changed)
+
+
+@require_http_methods(['GET'])
+def list_work_items(request):
+    """`specArtifactId`/`requirementId` are work-items.md REQ-06's forward
+    query (see urls.py's module docstring) — when either is supplied, each
+    result is serialized with its specification link and REQ-06 delivery
+    associations included, per that requirement's acceptance. Absent both,
+    behavior (and response shape) is unchanged."""
+    actor = request.headers.get('X-Actor', 'http-client')
+    spec_artifact_id = request.GET.get('specArtifactId')
+    requirement_id = request.GET.get('requirementId')
+    rows = readstore.list_work_items(
+        project=request.GET.get('project'),
+        status=request.GET.get('status'),
+        assignee_agent_id=request.GET.get('assigneeAgentId'),
+        parent_id=request.GET.get('parentId'),
+        spec_artifact_id=spec_artifact_id,
+        requirement_id=requirement_id,
+        actor=actor,
+    )
+    if spec_artifact_id or requirement_id:
+        return JsonResponse([serialize_work_item_with_associations(r) for r in rows], safe=False)
+    return JsonResponse([serialize_work_item(r) for r in rows], safe=False)
+
+
+@require_http_methods(['GET'])
+def get_specification_link_for_delivery_artifact(request, work_item_artifact_id):
+    """work-items.md REQ-06 (AC-04) — backward traceability. Addressed by
+    the `work_item_artifact` association's OWN id (the delivery-evidence
+    row REQ-06 already links a work item forward to what it produced), not
+    by the work item's id — see urls.py's module docstring."""
+    actor = request.headers.get('X-Actor', 'http-client')
+    result = readstore.get_specification_link_for_delivery_artifact(work_item_artifact_id, actor=actor)
+    if result is None:
+        return JsonResponse({'error': 'not found'}, status=404)
+    return JsonResponse(result)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def admin_create_work_item(request):
+    try:
+        actor = request.headers.get('X-Actor', 'external-api')
+        body = json.loads(request.body or b'{}')
+        item = store.create_work_item(body, actor=actor, origin=write_gate.Origins.EXTERNAL_API)
+        return JsonResponse(serialize_work_item(item), status=201)
+    except Exception as err:
+        return _error_response(err)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def admin_transition_work_item(request, work_item_id):
+    """canonical-delivery-state.md REQ-09, "Callers state no mode" — the
+    external API is a MACHINE caller (at the pin its only callers outside
+    tests are Jenkins' posts), so `route` pushes its write in Jira mode
+    rather than refusing it. This view holds no transaction of its own
+    (`ATOMIC_REQUESTS` is off, and nothing here opens one), which is what
+    lets the push run in-process: a failed post then returns an error to
+    the caller and records nothing, instead of being registered for after a
+    commit nobody is waiting on.
+
+    On a push `transition_status` returns the posted result rather than a
+    work-item row, and this returns 202: the canonical row has not changed
+    and will not until Jira's webhook returns. It passes no
+    `completion_key`, so the write is not deduplicated — as in local
+    mode."""
+    try:
+        actor = request.headers.get('X-Actor', 'external-api')
+        body = json.loads(request.body or b'{}')
+        result = store.transition_status(work_item_id, body.get('status'), actor=actor,
+                                          origin=write_gate.Origins.EXTERNAL_API)
+        if isinstance(result, dict):
+            return JsonResponse(result, status=202)
+        return JsonResponse(serialize_work_item(result))
+    except Exception as err:
+        return _error_response(err)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def admin_record_release_candidate(request, work_item_id):
+    """The writeback target for the release-candidate Jenkins job's results
+    (Candidate SHA, Build Identifier, Preview URL, and — when a native build
+    ran — `nativeBuildUrl` and `nativeBuildStatus`), called by Jenkins in
+    every mode (canonical-delivery-state.md REQ-06): `jenkins.yaml` makes
+    one unconditional POST to this endpoint, with no per-mode branch, and
+    never writes to a tracker itself.
+
+    `store.report_release_candidate` routes it, origin EXTERNAL_API
+    (release-mode-parity.md REQ-13): in local mode it records the candidate
+    and moves the Release to `in-review` (REQ-09); in Jira mode the writer
+    pushes the three fields to the Release ticket in one edit and records
+    nothing, and this returns 202, since the canonical row changes only when
+    Jira's webhook returns. Either way the native build becomes one comment
+    (REQ-12). This view holds no transaction, so a failed push returns its
+    error to the job.
+
+    The report is accepted only for a Release `core` holds at `in-progress`
+    (REQ-09). For any other status the store refuses it before anything is
+    recorded, commented or pushed, and this returns 400 `VALIDATION_ERROR`,
+    which fails the job's `curl -sf` visibly."""
+    try:
+        actor = request.headers.get('X-Actor', 'jenkins')
+        body = json.loads(request.body or b'{}')
+        if not body.get('candidateSha'):
+            return JsonResponse({'error': 'VALIDATION_ERROR', 'message': 'candidateSha is required'}, status=400)
+        result = store.report_release_candidate(
+            work_item_id, candidate_sha=body['candidateSha'], build_identifier=body.get('buildIdentifier'),
+            preview_url=body.get('previewUrl'), native_build_url=body.get('nativeBuildUrl'),
+            native_build_status=body.get('nativeBuildStatus'), actor=actor,
+            origin=write_gate.Origins.EXTERNAL_API,
+        )
+        if isinstance(result, dict):
+            return JsonResponse(result, status=202)
+        return JsonResponse(serialize_work_item(result))
+    except Exception as err:
+        return _error_response(err)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def admin_add_comment(request, work_item_id):
+    """The one comment path, from the external API (REQ-09). Like the
+    transition above, this view holds no transaction, so in Jira mode the
+    writer posts in-process and a failed post returns its error to the
+    caller with nothing recorded. A posted comment returns 202 and no row:
+    the comment reaches `core` on its own `comment_created` webhook. The
+    body's `sourceMessageId` deduplicates it in both modes — as the row's
+    key in local mode, as the writer's completion key in Jira mode."""
+    try:
+        actor = request.headers.get('X-Actor', 'external-api')
+        body = json.loads(request.body or b'{}')
+        comment = store.append_comment(
+            work_item_id, actor, body.get('body'),
+            reference_file=body.get('referenceFile'), reference_function=body.get('referenceFunction'),
+            source_message_id=body.get('sourceMessageId'),
+            origin=write_gate.Origins.EXTERNAL_API,
+        )
+        if comment.get('id') is None and comment.get('posted'):
+            return JsonResponse(comment, status=202)
+        return JsonResponse(comment, status=201)
+    except Exception as err:
+        return _error_response(err)

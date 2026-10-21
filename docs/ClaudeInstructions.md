@@ -43,8 +43,9 @@ it — Phases 0 to 4 — is how a customer project is set up on a running AI
 Gang. Platform startup performs that project setup once, unattended, for
 the one project its configuration names.*
 
-An operator with Docker installed, an Anthropic API key, and an empty
-GitHub repository already created for the project reaches a running AI
+An operator with Docker installed, a Claude credential (an Anthropic API
+key for `authMethod` `api-key`, or an OAuth token from `claude setup-token`
+for `oauth-token`), and an empty GitHub repository already created for the project reaches a running AI
 Gang in six steps and one command:
 
 1. Clone AI Gang.
@@ -98,13 +99,14 @@ what the container builds the agent's own instructions from.
 | --- | --- | --- |
 | 1 | `scripts/startup/create-network.sh` | Create the ai-gang Docker network if it does not already exist |
 | 2 | `scripts/startup/start-redis.sh` | Start Redis |
-| 3 | `scripts/startup/start-work-item-service.sh` | Build and start the work-item service and apply its database migrations |
+| 3 | `scripts/startup/start-core.sh` | Build and start the core service and apply its database migrations |
 | 4 | `scripts/startup/create-admin.sh` | Create the Django admin account from .env |
 | 5 | `scripts/startup/start-scrummaster.sh` | Build and start ScrumMaster |
-| 6 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
-| 7 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
-| 8 | `scripts/startup/start-project.sh` | Build and start the project container, then reload the services that read the project list at startup |
-| 9 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
+| 6 | `scripts/startup/start-memory.sh` | Create the shared harness volume, then build and start Memory without its indexer |
+| 7 | `scripts/startup/initialize-project.sh` | Initialize the configured project from the configuration |
+| 8 | `scripts/startup/install-project-dockerfile.sh` | Install the project container's Dockerfile from its stack's template |
+| 9 | `scripts/startup/start-project.sh` | Build and start the project container, reload the services that read the project list at startup, then start Memory's indexer |
+| 10 | `scripts/startup/confirm-health.sh` | Confirm every service is healthy and record the admin address |
 
 Before the first of them, the entrypoint has already run
 `scripts/startup/validate-config.sh`, `scripts/startup/validate-env.sh`,
@@ -178,7 +180,7 @@ leaves out, and `.ai-gang/agent.log` for the part of it the agent wrote.
 ### Which phases below this flow covers
 
 Included, performed by the steps above: **2.1** (Redis), **2.2**
-(ScrumMaster), **3.1** (project initialisation), **3.2** (container
+(ScrumMaster), **2.6** (Memory), **3.1** (project initialisation), **3.2** (container
 setup), **3.3** (the project map stub `init-project.sh` writes — filling
 it in is still the operator's), **3.4** (Claude Code and git access in the
 project container, exercised by the end-to-end test below) and **3.5**
@@ -280,15 +282,12 @@ Create a dedicated Atlassian account for AI Gang. Jira API tokens inherit the fu
 - `[HUMAN]` Create a new Atlassian account — e.g. `ai-gang-bot@your-domain.com` (use a shared mailbox or email alias)
 - `[HUMAN]` Invite it to your Jira instance: **Jira Settings → User Management → Invite Users**
 - `[HUMAN]` Log in as the service account → **Manage Account → Security → Create and manage API tokens** → create a token named `ai-gang-hq`
-- `[HUMAN]` Add to `services/scrummaster/.env`:
-  ```
-  JIRA_USER_EMAIL=ai-gang-bot@your-domain.com
-  JIRA_API_TOKEN=<token from above>
-  ```
-- `[HUMAN]` Also add to `~/ai-gang/.env` (used by `init-project.sh`):
+- `[HUMAN]` Add to `~/ai-gang/.env` (the platform `.env` `derive-env.sh` reads at
+  startup, copying these into `services/core/.env` for Django/`core` — the
+  platform's only Jira client, V5.1 REQ-01, REQ-06):
   ```
   JIRA_EMAIL=ai-gang-bot@your-domain.com
-  JIRA_TOKEN=<same token>
+  JIRA_TOKEN=<token from above>
   JIRA_URL=https://your-org.atlassian.net
   ```
 
@@ -306,16 +305,24 @@ curl -u "$JIRA_EMAIL:$JIRA_TOKEN" "$JIRA_URL/rest/api/3/myself"
 Custom fields are Jira instance-level resources — create them once, their IDs are stable and reused by every project.
 
 ```bash
-cd ~/ai-gang && ./scripts/create-jira-fields.sh
+cd ~/ai-gang && ./scripts/create-jira-fields.sh && ./scripts/create-release-fields.sh
 ```
 
 This creates:
-- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`)
+- **Agent** (single-select: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`)
 - **Blocked** (single-select: `Yes` / null)
 - 7 story schema fields (paragraph type): `Value Hypothesis`, `Test & Measurement`, `Behavior`, `Acceptance Criteria`, `Constraints`, `Edge Cases`, `Out of Scope`
-- Writes all 9 `JIRA_*_FIELD_ID` vars automatically to `services/scrummaster/.env`
+- The Release issue type's 5 fields (Target Project, Release Notes, Candidate SHA, Build Identifier, Preview URL) (Abandoned is a workflow status, created by `scripts/init-project.sh`, not by this script)
 
-Verify: `grep JIRA_.*_FIELD_ID ~/ai-gang/services/scrummaster/.env | wc -l` should return `9`.
+Both scripts write the `JIRA_*_FIELD_ID` values they create directly into
+`~/ai-gang/.env`, the platform `.env` — not into `services/scrummaster/.env`,
+which nothing Jira-facing has read since v5.1 moved the Jira client into
+Django/core. `derive-env.sh` carries them from there into `services/core/.env`,
+the platform's only Jira client (`canonical-delivery-state.md` REQ-10).
+There is nothing to copy by hand.
+
+Verify: `grep -cE '^JIRA_[A-Z_]+_FIELD_ID=customfield_' ~/ai-gang/.env` should
+return `14`, the full set `derive-env.sh`'s `JIRA_FIELD_ID_VARS` loop reads.
 
 When adding a new project, apply existing fields via `init-project.sh` — do not recreate them.
 
@@ -385,10 +392,21 @@ docker compose exec ai-gang-redis redis-cli ping  # should return PONG
 
 ```bash
 cp ~/ai-gang/services/scrummaster/.env.example ~/ai-gang/services/scrummaster/.env
-# Fill in .env: Jira credentials and WEBHOOK_SECRET
-# All JIRA_*_FIELD_ID vars are already written by Phase 1.1 — do not overwrite them
+# .env.example declares no Jira variable, and ScrumMaster reads none: the Jira
+# credentials and the Phase 1.1 field ids both live in the platform .env, which
+# derive-env.sh carries to Django/core (see Phase 1.0 and 1.1). Do not fill in
+# any Jira value here.
+# If Phase 1.1 has already run, this file exists and holds that script's record
+# of the field ids, which the other provisioning scripts read — copy
+# .env.example over it only after preserving those lines.
+# WEBHOOK_SECRET is not one of this file's values — see 2.4 Security below
 cd ~/ai-gang/services/scrummaster && docker compose up -d
-curl http://localhost:9000/health  # should return {"status":"ok"}
+# ScrumMaster publishes no port (see 2.4 Security and this service's
+# docker-compose.yml), so /health is reached from inside the container — the
+# same way scripts/startup/confirm-health.sh reaches it:
+docker exec scrummaster node -e \
+  "fetch('http://localhost:9000/health').then(r => r.text()).then(console.log)"
+# should print {"status":"ok"}
 ```
 
 ### 2.3 Jenkins
@@ -400,12 +418,12 @@ curl http://localhost:9000/health  # should return {"status":"ok"}
 ```
 
 This builds and starts the Jenkins container, installs plugins, and applies JCasC config. Key behaviors:
-- Sources `.env` before `docker compose up` so JCasC env vars (`JIRA_URL`, `JENKINS_URL`, etc.) are available at first boot
+- Sources `.env` before `docker compose up` so JCasC env vars (`JENKINS_URL`, etc.) are available at first boot
 - Waits for "Jenkins is fully up and running" in logs before declaring success
 
 **Critical configuration decisions**:
 
-- **Credential type**: Use `usernamePassword`, never `string`, for GitHub PAT credentials. The Git plugin cannot use a bare `string` secret for HTTPS authentication. For a GitHub PAT: `username: x-access-token`, `password: <PAT>`. This is already set correctly in `jenkins.yaml` — do not change it.
+- **Credential type**: Use `usernamePassword` for the GitHub PAT credential that git operations use (`github-token`). The Git plugin cannot use a bare `string` secret for HTTPS authentication. For a GitHub PAT: `username: x-access-token`, `password: <PAT>`. The one exception is `github-api-token`, a deliberate `string` (Secret Text) credential holding the same PAT, because the classic github plugin's webhook/status-check management accepts only Secret Text. Both are already set correctly in `jenkins.yaml` — do not change them.
 
 - **JCasC live reload**: `POST /configuration-as-code/reload` works for most config changes but cannot change an existing credential's type. If you need to change a credential type, wipe the volume and restart clean: `docker volume rm jenkins_jenkins-data && docker compose up -d`.
 
@@ -416,7 +434,6 @@ This builds and starts the Jenkins container, installs plugins, and applies JCas
 After Jenkins is up:
 
 - `[HUMAN]` Verify UI: `curl http://localhost:8080`
-- `[HUMAN]` Verify Jira connection: **Manage Jenkins → System → Jira → Test Connection**
 - Wire `JENKINS_URL` into ScrumMaster config so ScrumMaster can trigger builds
 
 **Release flow jobs**: `release-candidate`, `production-promote`, and `release-preview-teardown` exist in Jenkins and are ready to receive triggers — ScrumMaster calls them directly (see `setup/JenkinsConfig.md` §6). There is no Jira webhook to configure for any of this: dev → beta deploys automatically on merge (no Jira involvement at all), and the two Release-ticket jobs are called by ScrumMaster's `handleReleaseRequested`/`handleDone`/`handleReleaseAbandoned`, not by a Jira automation rule.
@@ -426,9 +443,9 @@ After Jenkins is up:
 ### 2.4 Security
 
 **Webhook secret validation**:
-- `WEBHOOK_SECRET` is auto-generated by `init-project.sh` and stored in `services/scrummaster/.env`
-- Embedded in the Jira webhook URL as `?secret=<value>`
-- ScrumMaster validates `req.query.secret` on every `/webhook` request (returns 401 on mismatch)
+- `WEBHOOK_SECRET` is a value you invent yourself (`openssl rand -hex 24`) and set in the platform `~/ai-gang/.env` — nothing generates it for you. `scripts/startup/derive-env.sh` carries it from there into `services/core/.env`, the same way it carries the `JIRA_*_FIELD_ID` values; it is not a `services/scrummaster/.env` value at all.
+- Embedded in the Jira webhook URL as `?secret=<value>`, by `manage.py ensure_jira_webhook` (`scripts/init-project.sh`)
+- The core service, not ScrumMaster, validates `request.GET['secret']` on every `/webhooks/jira` request (`workitems/views.py`'s `jira_webhook` view — returns 401 on mismatch). Left unset in the platform `.env`, it accepts every webhook request unauthenticated.
 
 **Network exposure**:
 - Port 9000 (ScrumMaster) must be bound to `localhost` only
@@ -437,7 +454,7 @@ After Jenkins is up:
 **Branch protection** (see `setup/JenkinsConfig.md` §7 for the full settings and `gh api` commands):
 - `dev`: require status checks to pass + branch up to date + do not allow bypassing
 - `beta`: no direct pushes — Jenkins only, fast-forward from `dev` only
-- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release ticket to Done, not a GitHub review.
+- `prod`: require PR + status checks + restrict merges to Jenkins' `github-token` identity + do not allow bypassing. No required human PR review — the human approval gate is moving the Release work item to Done, not a GitHub review.
 
 ### 2.5 Beta VM Bootstrap
 
@@ -470,6 +487,83 @@ This creates the unprivileged `beta-deploy` account with rootless Docker, genera
 - A Prod equivalent — Prod's deploy path isn't fully specified yet. Once it is, Prod's topology choice will be three-way rather than Beta's two: its own dedicated VM, a container on the Dev VM, or — only reachable if Beta above was provisioned as its own VM — a container on the Beta VM. Until any of those paths has a script, repeat the manual `beta-vm/README.md` steps with `prod-deploy`/`PROD_VM_HOST` against whichever host you've chosen
 
 Verify: `curl http://$BETA_VM_HOST:$BETA_VM_TRAEFIK_PORT` reaches Traefik (a 404 is expected — no routes exist until the first `deploy.sh`/`preview-deploy.sh` runs).
+
+### 2.6 Memory
+
+Memory keeps every agent session's record — what the agent read, reasoned,
+tried and produced, as its harness wrote it — after the project container
+that ran it is gone. Each project container mounts its own subdirectory of
+one shared Docker volume, `aigang-harness`, at the agent harness's
+`~/.claude/projects` directory; Memory's copier reads every project's
+sessions from that volume into Memory's own archive. Platform startup does
+this as its `start-memory` step. By hand, for an install that does not use
+platform startup:
+
+1. In the platform `.env` (`~/ai-gang/.env`), set `MEMORY_PGPASSWORD` and
+   `MEMORY_DJANGO_SECRET_KEY` (`openssl rand -hex 24` each). Memory never
+   uses the core service's database or key.
+2. Run `scripts/startup/derive-env.sh` to write `services/memory/.env`. It
+   also regenerates `services/core/.env` and sets ScrumMaster's keys, as at
+   startup, so the platform `.env`'s `PGPASSWORD` and `DJANGO_SECRET_KEY`
+   must be set too.
+3. Create the shared volume and start Memory:
+   ```bash
+   docker volume create aigang-harness
+   cd ~/ai-gang/services/memory && docker compose up -d --build
+   ```
+
+The volume must exist before any project is initialised: `init-project.sh`
+(3.1) refuses without it. Memory's compose file and every project's name it
+`external`, so no `docker compose down -v` deletes it.
+
+Memory runs seven containers: `memory-postgres` (its own database),
+`migrate` (one-shot), `memory-copier` (copies sessions, as root, because the
+harness writes transcripts readable only by its own user), `memory-api`
+(reads sessions, notes and counts, and answers questions against the corpus
+index with `/retrieve`, on port 9200 inside the `ai-gang` network; it reads
+the core service and Redis at query time and sends nothing outside the
+deployment), `memory-extraction` (extracts the text of artifact-library files:
+it reads each upload event and, every 30 minutes, the whole library from the
+core service, and keeps the extracted text in Memory's database),
+`memory-extractor` (parses those files for it, from its own image, with no
+network at all) and `memory-indexer` (keeps the corpus index in Memory's
+database: it follows the core service's events and reads, the archive
+through `memory-api`, the extracted text, and the Markdown under `docs/` and
+`setup/` at this checkout's HEAD, from the checkout's `.git` directory
+mounted read-only; it reads HEAD when `memory-indexer` starts and on a
+rebuild or platform retry, not on every new commit). Memory is healthy when
+all five long-running containers (`memory-copier`, `memory-api`,
+`memory-extraction`, `memory-extractor` and `memory-indexer`) are running —
+the `memory` line of `scripts/startup/confirm-health.sh`.
+
+**Two costs of the embedding index.** Upgrading to the release that adds it runs
+Memory index migration `0004_unit_embedding`, which empties the index; the
+indexer then re-embeds every unit, and until it has, retrieval reports the
+classes it has not reached as "not indexed yet". The measured cost is about
+1.2 s per unit (1.24 s over 2,000 units on a 4-vCPU host with no GPU), so
+20,000 units take about 6.5 hours (`services/memory/index/__init__.py`).
+And building Memory's image downloads the pinned embedding model (about
+150 MB) from huggingface.co (`services/memory/scripts/fetch-embedding-model.sh`),
+so the build host needs that access; nothing is downloaded at runtime. The
+compose file runs `memory-indexer` capped at 2 threads and 2 CPUs
+(`MEMORY_EMBED_THREADS=2`, `cpus: "2"`) so the first full embedding cannot
+saturate a small host; `memory-api` is uncapped, for query embedding latency. If the model is missing or broken, retrieval degrades to
+full-text search with `incomplete` set and the reason "embedding model unavailable", and
+the indexer records indexing failures until it is restored.
+
+**Size the host's inotify watch limit.** The copier watches every directory
+on the harness volume — one per project, plus one or more per session the
+harness still keeps — and falls back to its 30-minute reconciling pass for
+any directory it cannot watch, so a low limit costs promptness, never data
+(the copier logs `could not watch …`). Check the limit with
+`sysctl fs.inotify.max_user_watches`, and raise it above the number of
+directories under the volume (`sudo find /var/lib/docker/volumes/aigang-harness/_data -type d | wc -l`),
+with room for growth:
+
+```bash
+echo 'fs.inotify.max_user_watches=524288' | sudo tee /etc/sysctl.d/90-aigang-inotify.conf
+sudo sysctl --system
+```
 
 ---
 
@@ -506,6 +600,10 @@ the file has validated. A runnable example is
 values are published in `setup/graphs/engine/lib/config/catalog.js`.
 `GitHub HTTPS URL` and `GH_TOKEN` are still prompted for either way.
 
+**Before running this**: Memory's shared harness volume, `aigang-harness`,
+must exist — see 2.6 Memory. The script checks for it before asking
+anything, and refuses, naming Memory, without it.
+
 Without `--config`, the alternative is the fully interactive flow:
 
 ```bash
@@ -525,8 +623,9 @@ target reaches that graph's remediation node (or this script's own
 equivalent guidance) rather than an empty, unexplained repository.
 
 Creates:
-- `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount
-- `projects/<name>/.env` — `PROJECT_NAME`, `REDIS_HOST`, `ANTHROPIC_API_KEY`, `GITHUB_URL`, `GH_TOKEN`
+- `projects/<name>/docker-compose.yml` — network, env file, agent-docs mount, and the harness mount: the project's subdirectory of `aigang-harness` at `/home/aigang/.claude/projects`, so the agent sessions the container runs survive a recreate and reach Memory
+- `aigang-harness:/<name>/` — the project's subdirectory of the shared harness volume, owned by the harness user; created on every run, so a re-created volume gets it back
+- `projects/<name>/.env` — `PROJECT_NAME`, `REDIS_HOST`, the Claude credential (`ANTHROPIC_API_KEY` for `authMethod` `api-key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth-token`), `GITHUB_URL`, `GH_TOKEN`
 - `projects/<name>/src/CLAUDE.md` — project map stub
 - GitHub branches `dev`, `beta`, `prod` with branch protection rules
 
@@ -563,13 +662,13 @@ docker ps  # verify running
 ```
 
 **Each container's `.env` must have**:
-- `ANTHROPIC_API_KEY` — Claude Code auth
+- `ANTHROPIC_API_KEY` — Claude Code auth when the platform's `authMethod` is `api-key`; `CLAUDE_CODE_OAUTH_TOKEN` instead when it is `oauth-token` (mint it once with `claude setup-token` and paste it into `.env`)
 - `PROJECT_NAME` — must match the project name used at 3.1 (and the Jira project name, if `--connect-jira` was used)
 - `REDIS_HOST=ai-gang-redis`
 - `AGENT_CHANNEL_SUFFIX=<role>` — e.g. `backend`, `frontend`, `mobile`, `api`
 - `GH_TOKEN` — fine-grained PAT scoped to this repo only, needing Contents/Pull requests/Metadata read-write plus **Administration: Read and write** (the last one is only needed at Phase 3.1's branch-protection step, above — a token missing it still works for everything else)
 
-For multi-repo projects, each container also needs its own agent definition mounts in `docker-compose.yml` (mount only the definitions relevant to this repo's role).
+For multi-repo projects, each container also needs the `../../setup:/agent-docs:ro` mount in `docker-compose.yml` — the same whole-directory mount every container gets, not a per-file selection: `subscriber.js` requires the rest of the commons at startup, so a container mounting only the definitions relevant to its own role cannot start the subscriber at all. Routing to the right repo is ScrumMaster's job (`AGENT_CHANNEL_SUFFIX`, above), not a matter of which definitions are mounted.
 
 ### 3.3 Project Map (CLAUDE.md)
 
@@ -620,10 +719,13 @@ For deployment target-specific pipeline steps:
 There is no manual `beta → prod` PR for a human to open — `prod` only changes
 via the Release-ticket flow:
 1. Human creates a Jira Release ticket (Target Project field required) once
-   enough has accumulated on `beta`
-2. Jenkins checks `beta`'s queue is clean, pins the candidate SHA, cuts
-   `release/<sha>`, opens the `release/<sha> → prod` PR, and deploys a
-   private preview — link posted back to the ticket
+   enough has accumulated on `beta`; its creation is the request, and `core`
+   pushes the ticket to In Progress (a local Release is requested by moving it
+   `proposed` → `in-progress`)
+2. The `core` service checks `beta`'s queue is clean; Jenkins then pins the
+   candidate SHA, cuts `release/<sha>`, opens the `release/<sha> → prod` PR,
+   and deploys a private preview — its report to `core` records the link on the
+   ticket (in local mode it also moves the Release to `in-review`)
 3. Human reviews the preview, then moves the Release ticket to **Done**
 4. Jenkins merges the frozen PR and redeploys that exact artifact to
    production — no manual Jenkins or GitHub action required
@@ -654,16 +756,17 @@ Adapt the story to match what the project's actual agents can implement.
 
 ### Validation legs
 
-**ScrumMaster leg**:
-- Verify ScrumMaster receives the webhook: `docker compose logs scrummaster`
-- Verify Agent field on the story is set to `refinement-agent`
-- Verify a comment appears: "Ticket received. Assigned to Refinement Agent for decomposition."
+**`core` leg** (ScrumMaster is not a Jira client and receives no Jira
+webhook — `canonical-delivery-state.md` REQ-09):
+- Verify `core` receives the webhook: `docker compose logs core`
+- Verify Agent field on the story is set to `refinement-agent`, by `core`'s
+  outbound writer
+- Verify a comment appears: "Ticket received. Assigned to Refinement Agent for decomposition." — posted by the writer, through `core`'s one comment path
 - Verify story passes schema validation (no block comment)
 
 **Refinement leg**:
-- Verify a message is published to the project's Redis channel
-- Verify the container subscriber picks it up and invokes Claude
-- Verify Refinement Agent creates subtasks in Jira — **only for agent types that exist in this project**
+- Verify ScrumMaster's dispatch consumer, on the story's `work_item.status_changed` to `ready`, dispatches to the Refinement Agent — the same dispatch path every agent uses, not a Jira-specific one
+- Verify Refinement Agent creates subtasks as canonical work items, which `core`'s writer mirrors into Jira as Sub-tasks — **only for agent types that exist in this project**
 - Verify a completion comment is posted on the parent story
 
 **Dev agent leg** (repeat for each subtask):
@@ -702,10 +805,11 @@ Under **Workitems → Work items**, add a work item:
 - **Status**: `proposed`
 - **Assignee agent id**: `refinement-agent`
 - **External key**: leave it empty. It is the Jira issue key a work item
-  mirrors; this flow has no Jira integration configured, so setting it
-  saves fine but makes dispatch refuse the item outright — a comment
-  explaining why, and the item moved to `needs-clarification` instead of
-  being run.
+  mirrors; this flow has no Jira integration configured, and dispatch does
+  not check it either way — a non-blank value on a local-mode work item
+  saves fine and is simply not read, so the item still dispatches and
+  displays by its canonical id. Leave it blank here since there is no Jira
+  issue for it to name.
 
 It takes three saves, in this order, and the order matters:
 
@@ -725,10 +829,10 @@ nothing is dispatched before that.
 
 ### Validation legs
 
-**Work-item service leg** — the write was recorded and published:
+**Core service leg** — the write was recorded and published:
 
 ```bash
-docker logs workitem-relay --tail 50     # the outbox row was published
+docker logs core-relay --tail 50     # the outbox row was published
 docker exec ai-gang-redis redis-cli XLEN aigang:workitems:<project>:events
 ```
 
@@ -753,11 +857,11 @@ consumed:
 
 ```bash
 docker exec ai-gang-redis redis-cli XINFO GROUPS aigang:workitems:<project>
-docker logs workitem-consumers --tail 50
+docker logs core-consumers --tail 50
 ```
 
-A `workitemservice` group has to be listed, and the log has to name the
-project. The work-item service reads
+A `core` group has to be listed, and the log has to name the project.
+The core service reads
 `services/scrummaster/config/projects.json` once at startup, exactly as
 ScrumMaster does, and creates each listed project's consumer groups then.
 If the group is missing, that service is older than the project's
@@ -766,7 +870,7 @@ the stream, nothing reads them, no subtask is ever created and no agent
 runs — with no error in any log. Make it re-read:
 
 ```bash
-cd ~/ai-gang/services/work-item-service && docker compose restart api consumers
+cd ~/ai-gang/services/core && docker compose restart api consumers
 ```
 
 **Project container leg** — the agent ran:
@@ -814,20 +918,21 @@ Existing containers are unaffected; the new container is independent.
 Update the value in the relevant `.env` file, then restart the service that uses it:
 
 ```bash
-# ScrumMaster (e.g. JIRA_API_TOKEN)
-cd ~/ai-gang/services/scrummaster && docker compose restart
+# Jira credentials (e.g. JIRA_TOKEN) — update ~/ai-gang/.env, the platform
+# .env, then re-run platform startup so derive-env.sh re-derives
+# services/core/.env and restarts core, the platform's only Jira client
 
 # Jenkins (update via JCasC reload)
 curl -X POST http://localhost:8080/configuration-as-code/reload \
   -u "admin:$JENKINS_ADMIN_PASSWORD" -H "$(get_crumb)"
 
-# App container (e.g. ANTHROPIC_API_KEY)
+# App container (e.g. ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)
 cd ~/ai-gang/projects/<name> && docker compose restart
 ```
 
 ### Updating agent definitions
 
-Agent definitions in `~/ai-gang/setup/` are mounted as live volumes into all running containers. A `git pull` on `~/ai-gang` is sufficient — no container restart required.
+Agent definitions in `~/ai-gang/setup/agents/` are mounted as live volumes into all running containers. A `git pull` on `~/ai-gang` is sufficient — no container restart required.
 
 ```bash
 cd ~/ai-gang && git pull

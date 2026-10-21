@@ -3,21 +3,21 @@
     {
       "id": "refinement-agent",
       "displayName": "Refinement Agent",
-      "definitionPath": "/agent-docs/refinement-agent.md",
+      "definitionPath": "/agent-docs/agents/refinement-agent.md",
       "routing": { "channelSuffix": "refinement" },
       "agentCard": { "name": "Refinement Agent", "description": "Decomposes stories into subtasks." }
     },
     {
       "id": "backend-agent",
       "displayName": "Backend Agent",
-      "definitionPath": "/agent-docs/backend-agent.md",
+      "definitionPath": "/agent-docs/agents/backend-agent.md",
       "routing": { "channelSuffix": "backend" },
       "agentCard": { "name": "Backend Agent", "description": "Implements APIs." }
     },
     {
       "id": "frontend-agent",
       "displayName": "Frontend Agent",
-      "definitionPath": "/agent-docs/frontend-agent.md",
+      "definitionPath": "/agent-docs/agents/frontend-agent.md",
       "routing": { "channelSuffix": "frontend" },
       "agentCard": { "name": "Frontend Agent", "description": "Implements UI." }
     }

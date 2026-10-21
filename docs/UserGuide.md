@@ -6,13 +6,14 @@
 
 ## Overview
 
-AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with Jira and GitHub on your behalf.
+AI Gang HQ is a cloud VM that hosts isolated Docker containers — one per repo. Each container has Claude Code installed and mounts the shared agent definitions from `~/ai-gang/setup/`. Agents run inside these containers and interact with GitHub on your behalf. They are never given a tracker: a work item reaches an agent through its prompt, and everything an agent reports goes back through ScrumMaster to the core service.
 
-Three shared services run alongside the project containers, and platform
-startup brings up all three: **Redis** (message broker), the **work-item
+Four shared services run alongside the project containers, and platform
+startup brings up all four: **Redis** (message broker), the **core
 service** (the datastore and the Django admin panel you write stories in,
-at `http://127.0.0.1:9100/django-admin/`), and **ScrumMaster** (work
-router). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes
+at `http://127.0.0.1:9100/django-admin/`), **ScrumMaster** (work
+router), and **Memory** (keeps every agent session's record after its
+container is gone). **Jenkins** (CI/CD — auto-merges to `dev` on test pass, promotes
 to `beta` when a ticket moves to Done) is a later addition an operator
 sets up separately; so are Jira, Cloudflare and the Beta VM.
 
@@ -85,7 +86,14 @@ machine or on a server you have Docker on. One command does all of it.
 
 - **Docker**, with the Compose plugin. `./scripts/install-docker.sh`
   installs both if you do not have them.
-- **An Anthropic API key** — <https://console.anthropic.com/settings/keys>.
+- **A Claude credential**, matching the `authMethod` you will set in
+  `ai-gang.config.json`:
+  - `api-key` — a Claude Console API key,
+    <https://console.anthropic.com/settings/keys>, goes in `.env` as
+    `ANTHROPIC_API_KEY`.
+  - `oauth-token` — a long-lived OAuth token for a Claude subscription. Run
+    `claude setup-token` once, complete the browser login it opens, and
+    paste the token it prints into `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
 - **An empty GitHub repository** for the project you want built, and a
   fine-grained PAT for it (see "GitHub Fine-Grained PAT" above). AI Gang
   does not create the repository; it pushes into the one you made.
@@ -102,12 +110,13 @@ cp .env.template .env                                 # then edit it
 docker compose up --exit-code-from ai-gang
 ```
 
-`ai-gang.config.json` is four values — what to build, and where its code
-lives:
+`ai-gang.config.json` is five values — how Claude authenticates, what to
+build, and where its code lives:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "authMethod": "api-key",
   "project": {
     "name": "hello-world",
     "type": "web",
@@ -125,13 +134,22 @@ from a fixed list of supported profiles — today that is `web` with
 wrong. `repository.url` is that repository's plain HTTPS URL, with no
 username or token in it — the PAT goes in `.env`, as `GH_TOKEN`.
 
+`authMethod` is how Claude Code authenticates, and it is `api-key` or
+`oauth-token`. It decides which credential `.env` must carry:
+`api-key` requires `ANTHROPIC_API_KEY`, and `oauth-token` requires
+`CLAUDE_CODE_OAUTH_TOKEN`, which you mint once with `claude setup-token`
+and paste into `.env`. Startup refuses a `.env` missing the credential
+your method requires, naming it. If `.env` carries both, Claude Code uses
+`ANTHROPIC_API_KEY` first, so comment out the one you are not using.
+
 `.env` is where you put every secret. Startup copies the ones a service needs
 into that service's own `.env` (and the project's), each written
 owner-readable only; nothing else holds a copy.
 The first section of `.env.template` is what startup needs: your Anthropic
 key, the project's `GH_TOKEN`, the Django admin account you will sign in
-with, and a PostgreSQL password and Django secret key you invent
-(`openssl rand -hex 24` twice). Everything below that first section
+with, and two PostgreSQL passwords and two Django secret keys you invent —
+one of each for the core service, one of each for Memory
+(`openssl rand -hex 24` four times). Everything below that first section
 belongs to Jira, Cloudflare, Jenkins and the Beta VM, which you add later
 if you want them — leave them blank.
 
@@ -139,13 +157,13 @@ if you want them — leave them blank.
 
 `docker compose up --exit-code-from ai-gang` builds and starts one
 container, and streams what it is doing. That container brings up the rest
-— Redis, the work-item service, ScrumMaster, and your project's own
+— Redis, the core service, ScrumMaster, Memory, and your project's own
 container — and then exits, and the command exits with the same status.
 Status 0 means AI Gang is up. Nothing to run in between. (The
 `--exit-code-from` flag is what carries the container's status out to your
 shell; plain `docker compose up` would return 0 even after a failed run.)
 
-A first run builds four images and takes a while. Run it in the
+A first run builds five images and takes a while. Run it in the
 foreground and watch; if you would rather watch from elsewhere,
 `.ai-gang/status.json` in the checkout says which step is in progress and
 how each service is doing, and `.ai-gang/startup.log` holds the same
@@ -181,9 +199,11 @@ Under **Workitems → Work items**, add a work item with your project's
 name, **Type** `story`, an **Assignee agent id** of `refinement-agent`,
 and **Status** `proposed`, leaving **External key** empty — it ties a work
 item to an existing Jira issue, and this setup has no Jira integration
-configured. The save itself accepts a non-blank value; it's dispatch that
-refuses it, posting a comment explaining why and moving the item to
-`needs-clarification` instead of running it. It
+configured. Dispatch does not check it: a non-blank value on a local-mode
+project's work item is accepted and simply not read — the dispatch prompt's
+display line always falls back to the canonical work-item id for a project
+that is not in Jira mode. Leave it blank unless you have connected this
+project to Jira (`connect_jira`, canonical-delivery-state.md REQ-10). It
 takes three saves: save the work item, re-open it and fill in the story fields
 (Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) and
 save, then re-open it once more and set **Status** to `ready`. The story
@@ -214,6 +234,17 @@ Adding a second repository to a project you already have is a different
 thing, and is the "Adding a repo to an existing project" path in
 `ClaudeInstructions.md`.
 
+### Upgrading
+
+Pulling a later version and running `docker compose up --exit-code-from
+ai-gang` again is usually all an upgrade takes. One past change is the
+exception, carrying a one-time manual step: if your checkout has canonical
+state (work items, artifacts, deliveries) recorded from before the
+internal core service's own directory and containers were renamed, read
+[services/core/UPGRADE.md](../services/core/UPGRADE.md) before you pull —
+skipping it does not fail loudly, it silently starts you over with an
+empty installation. A fresh install has nothing to do here.
+
 ---
 
 ## Creating a New Project
@@ -224,9 +255,10 @@ another project by hand to an AI Gang that is already running.*
 
 ### Before you run the script
 
-One thing must exist before `init-project.sh` can finish:
+Two things must exist before `init-project.sh` can finish:
 
-1. **GitHub repository** — create it on GitHub first (empty is fine). The script will prompt for its HTTPS URL, your `GH_TOKEN` (fine-grained PAT — entered securely, not echoed to the terminal), and will push the initial commit automatically. No deploy key setup required.
+1. **Memory's shared harness volume**, `aigang-harness` — platform startup creates it; by hand, see `docs/ClaudeInstructions.md` "2.6 Memory". The script checks for it before asking anything and refuses, naming Memory, without it.
+2. **GitHub repository** — create it on GitHub first (empty is fine). The script will prompt for its HTTPS URL, your `GH_TOKEN` (fine-grained PAT — entered securely, not echoed to the terminal), and will push the initial commit automatically. No deploy key setup required.
 
 ### The fast path: ask Claude
 
@@ -257,8 +289,8 @@ The script will prompt for:
 
 It creates:
 
-- `projects/hello-world/docker-compose.yml` — pre-configured with the `ai-gang` network, env file, and agent-docs mount; container startup runs `gh auth setup-git` using `GH_TOKEN`
-- `projects/hello-world/.env` — with `PROJECT_NAME`, `REDIS_HOST`, `ANTHROPIC_API_KEY`, `GITHUB_URL`, and `GH_TOKEN`
+- `projects/hello-world/docker-compose.yml` — pre-configured with the `ai-gang` network, env file, agent-docs mount, and the harness mount (the project's subdirectory of Memory's shared `aigang-harness` volume at `/home/aigang/.claude/projects`, so agent sessions survive a recreate); container startup runs `gh auth setup-git` using `GH_TOKEN`
+- `projects/hello-world/.env` — with `PROJECT_NAME`, `REDIS_HOST`, the Claude credential for the platform's `authMethod` (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`), `GITHUB_URL`, and `GH_TOKEN`
 - `projects/hello-world/src/CLAUDE.md` — project map stub; fill in before the first agent run
 - The Jira project (company-managed Kanban) with all custom fields applied to every screen
 
@@ -268,11 +300,12 @@ It creates:
 
 > **Manual step required — configure board columns**
 >
-> `init-project.sh` applies the AI Gang Kanban workflow (`Backlog → Shovel Ready → In Progress → In Review → Done`) to your Jira project, but Jira's board column configuration cannot be updated via API. Without this step your board will show the wrong columns and statuses will appear unmapped.
+> `init-project.sh` applies the AI Gang Kanban workflow (`Backlog → Shovel Ready → In Progress → In Review → Done`, plus an `Abandoned` status in the Done category, reachable from every status) to your Jira project, but Jira's board column configuration cannot be updated via API. Without this step your board will show the wrong columns and statuses will appear unmapped.
 >
 > Go to your board → **Board Settings → Columns** and:
 >
 > - **Add** columns for **Shovel Ready** and **In Review**
+> - **Add** a column for **Abandoned**, in the Done category's column or its own, so abandoned tickets are not left unmapped
 > - **Remove** the default **Selected for Development** column
 >
 > This is a one-time step per project and takes about two minutes.
@@ -283,9 +316,9 @@ Choose the appropriate template for your tech stack:
 
 ```bash
 cd ~/ai-gang/projects/<project-name>
-cp ~/ai-gang/Dockerfile-node.template ./Dockerfile
+cp ~/ai-gang/Docker\ Templates/Dockerfile-node.template ./Dockerfile
 # or
-cp ~/ai-gang/Dockerfile-python.template ./Dockerfile
+cp ~/ai-gang/Docker\ Templates/Dockerfile-python.template ./Dockerfile
 ```
 
 Customize as needed for your project's dependencies.
@@ -302,7 +335,7 @@ docker ps  # verify it's running
 
 ```bash
 docker compose exec dev claude --version
-docker compose exec dev ls /agent-docs  # should show agent definition files
+docker compose exec dev ls /agent-docs  # should show agents/, commons/ and the platform files (subscriber.js, SCRUMMASTER_SPEC_v1.md, ...)
 ```
 
 ### Step 4: Start the Redis subscriber
@@ -343,14 +376,14 @@ Each container needs its own `.env` with `AGENT_CHANNEL_SUFFIX` set to its role:
 PROJECT_NAME=myapp
 AGENT_CHANNEL_SUFFIX=frontend
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=...
+ANTHROPIC_API_KEY=...   # or CLAUDE_CODE_OAUTH_TOKEN=..., per authMethod
 GH_TOKEN=...   # fine-grained PAT scoped to myapp-frontend only
 
 # backend/.env
 PROJECT_NAME=myapp
 AGENT_CHANNEL_SUFFIX=backend
 REDIS_HOST=ai-gang-redis
-ANTHROPIC_API_KEY=...
+ANTHROPIC_API_KEY=...   # or CLAUDE_CODE_OAUTH_TOKEN=..., per authMethod
 GH_TOKEN=...   # fine-grained PAT scoped to myapp-backend only
 ```
 
@@ -358,24 +391,21 @@ ScrumMaster routes `frontend-agent` tasks to `agent:myapp-frontend` and `backend
 
 ### Agent definition mounts
 
-Mount only the definitions each container needs in `docker-compose.yml`:
+Each container mounts the whole `setup/` directory read-only, the same way `init-project.sh` generates it for a single-repo project — not a per-file selection of just the definitions the role needs. `subscriber.js` requires `./commons/tools/envelope`, `./dispatch-snapshot` and the rest of the commons at startup, so a container mounting only its own role's `.md` files and `subscriber.js` cannot start the subscriber at all:
 
 ```yaml
 frontend:
   volumes:
     - ./frontend:/workspace
-    - ../../setup/frontend-agent.md:/agent-docs/frontend-agent.md:ro
-    - ../../setup/refinement-agent.md:/agent-docs/refinement-agent.md:ro
-    - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
+    - ../../setup:/agent-docs:ro
 
 backend:
   volumes:
     - ./backend:/workspace
-    - ../../setup/backend-agent.md:/agent-docs/backend-agent.md:ro
-    - ../../setup/refinement-agent.md:/agent-docs/refinement-agent.md:ro
-    - ../../setup/devops-agent.md:/agent-docs/devops-agent.md:ro
-    - ../../setup/subscriber.js:/agent-docs/subscriber.js:ro
+    - ../../setup:/agent-docs:ro
 ```
+
+Routing to the right repo is ScrumMaster's job (`AGENT_CHANNEL_SUFFIX`, above), not a matter of which definitions are visible inside a container — every container sees every definition.
 
 ### Integration testing
 
@@ -433,7 +463,7 @@ docker compose up -d
 
 **ScrumMaster not routing to this project**
 
-- Confirm `PROJECT_NAME` in `.env` matches the Jira project name
+- Confirm `PROJECT_NAME` in `.env` matches the project name recorded on the work items in `core`
 - Confirm the Redis subscriber is running: `docker compose exec dev ps aux | grep subscriber`
 - Check ScrumMaster logs: `cd ~/ai-gang/services/scrummaster && docker compose logs`
 

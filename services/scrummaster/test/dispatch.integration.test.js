@@ -5,7 +5,7 @@
 // (startDispatchConsumers/stopDispatchConsumers) — the real consumer group,
 // the real handler, the real envelopes, the real publishes.
 //
-// The canonical work-item service does not run in this process, so it is
+// The core service does not run in this process, so it is
 // stood in for at its two real boundaries and nowhere else:
 //
 //  - its HTTP reads (canonicalWorkItems.getWorkItem/getMode) are answered
@@ -27,6 +27,7 @@ const assert = require('node:assert/strict');
 
 process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '..', 'config', 'agents.json');
 process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '..', 'config', 'projects.json');
+process.env.MEMORY_API_URL = ''; // no memory-api in this suite: dispatch records retrieval as skipped
 process.env.REDIS_HOST = process.env.REDIS_TEST_HOST || 'localhost';
 process.env.REDIS_PORT = process.env.REDIS_TEST_PORT || '16399';
 

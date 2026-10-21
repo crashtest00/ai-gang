@@ -2,7 +2,7 @@
 
 ## Technical Specification
 
-**Purpose**: Defines the architecture, responsibilities, and behavior of the ScrumMaster service — the exclusive communication bridge between Jira and the AI Gang agent ecosystem.
+**Purpose**: Defines the architecture, responsibilities, and behavior of the ScrumMaster service — the exclusive communication bridge between Django/`core`'s canonical work items and the AI Gang agent ecosystem.
 
 **Date**: March 25, 2026
 **Version**: 1.1
@@ -17,7 +17,7 @@
 3. [Architecture](#architecture)
 4. [Jira Configuration Dependencies](#jira-configuration-dependencies)
 5. [Inbound Webhook Handling](#inbound-webhook-handling)
-6. [Outbound Jira Operations](#outbound-jira-operations)
+6. [Outbound Canonical Operations](#outbound-canonical-operations)
 7. [Redis Message Contract](#redis-message-contract)
 8. [Prompt Construction](#prompt-construction)
 9. [Agent Catalog and Assignment Validation](#agent-catalog-and-assignment-validation)
@@ -28,9 +28,9 @@
 
 ## Overview
 
-ScrumMaster is a persistent service running on the AI Gang HQ droplet. It has two jobs: listen for events from Jira and route them to the correct agent, and listen for messages from agents and act on Jira on their behalf.
+ScrumMaster is a persistent service running on the AI Gang HQ droplet. It has two jobs: listen for canonical work-item events from Django/`core` and route them to the correct agent, and listen for messages from agents and publish the canonical commands they imply back to `core`.
 
-No agent except the Refinement Agent has direct access to Jira. All Jira reads and writes for dev agents flow through ScrumMaster. This gives a single point of control for all Jira interactions — formatting, error handling, rate limiting, and audit logging live here.
+No agent, and no ScrumMaster module, has direct access to Jira: Django/`core` is the running platform's only Jira client (V5.1 REQ-01), and `core`'s outbound writer makes every Jira write for a Jira-mode project. ScrumMaster reads canonical work items from `core` and publishes canonical commands back to it on agents' behalf — formatting, error handling, rate limiting, and audit logging for that path live here.
 
 ScrumMaster does not make decisions about work. It routes, fetches context, constructs prompts, and relays. The Refinement Agent makes decisions about tickets. Dev agents make decisions about code.
 
@@ -40,19 +40,19 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 
 **ScrumMaster owns:**
 
-- Receiving and processing all inbound Jira webhooks
-- Fetching full ticket context from the Jira API when building agent prompts
+- Reading canonical work-item context from `core` when building agent prompts
 - Routing inbound events to the correct agent via Redis
 - Receiving outbound messages from all agents via Redis
-- Writing to Jira on behalf of all agents (comments, field updates, subtask creation)
-- Enforcing comment formatting standards before posting to Jira
+- Publishing the canonical commands agents' comments, field updates and subtask creation imply, to `core`, on their behalf
+- Enforcing comment formatting standards before publishing a comment command
 - Including the correct agent definition path in every Claude Code invocation prompt
 
 **ScrumMaster does NOT own:**
 
 - Ticket content decisions (Refinement Agent)
 - Code (dev agents)
-- CI/CD pipeline results (Jenkins posts directly to Jira)
+- Receiving or interpreting Jira webhooks, or calling the Jira API (Django/`core`, V5.1 REQ-01)
+- CI/CD pipeline results (Jenkins publishes them to `core` as canonical events and writes to no tracker)
 - Infrastructure (Cloud Engineering)
 
 ---
@@ -85,7 +85,7 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 │  │     messageId                                          │  │
 │  │                                                       │  │
 │  │  Context Builder                                      │  │
-│  │   - Fetches full ticket from Jira API                 │  │
+│  │   - Reads the full work item from core's read API      │  │
 │  │   - Resolves agent definition path from registry      │  │
 │  │   - Searches codebase for BLOCKED markers             │  │
 │  │   - Constructs Claude Code prompt                     │  │
@@ -97,20 +97,29 @@ ScrumMaster does not make decisions about work. It routes, fetches context, cons
 │  │  Gateway Stream Consumer                                │  │
 │  │   - Reads each project's gateway Stream via a consumer  │  │
 │  │     group, exactly once per messageId                  │  │
-│  │   - Executes the corresponding Jira API call            │  │
+│  │   - Publishes the corresponding canonical command       │  │
+│  │     to core                                             │  │
+│  │   - Publishes a recordA2AVerdict command to core for    │  │
+│  │     each submission it handles (Durable A2A Message     │  │
+│  │     Record REQ-04)                                      │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                                                             │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ Redis (Streams + consumer groups — durable, ack'd)    │  │
 │  │                                                       │  │
-│  │  Jira webhook ingestion (Jira -> ScrumMaster):        │  │
-│  │   aigang:webhooks:{project}      group: scrummaster   │  │
+│  │  Inbound (core -> ScrumMaster):                       │  │
+│  │   aigang:workitems:{project}:events  group: dispatch  │  │
 │  │                                                       │  │
 │  │  Inbound (ScrumMaster -> agents):                     │  │
-│  │   aigang:agent:{project}:{suffix} group: agent-{suffix}│  │
+│  │   aigang:agent:{project}:{suffix}                     │  │
+│  │     groups: agent-{suffix}, core-a2a-archive          │  │
 │  │                                                       │  │
 │  │  Outbound (agents -> ScrumMaster):                    │  │
-│  │   aigang:gateway:{project}       group: scrummaster   │  │
+│  │   aigang:gateway:{project}                            │  │
+│  │     groups: scrummaster, core-a2a-archive             │  │
+│  │                                                       │  │
+│  │  Outbound (ScrumMaster -> core):                      │  │
+│  │   aigang:workitems:{project}     group: core          │  │
 │  │                                                       │  │
 │  │  Failed messages: <source-stream>:dead                │  │
 │  └───────────────────────────────────────────────────────┘  │
@@ -139,18 +148,27 @@ guarantees.
 
 ## Jira Configuration Dependencies
 
-ScrumMaster depends on the following Jira configuration being in place before it can operate. These are not ScrumMaster's responsibility to create — they are prerequisites defined in PDI-8.
+**ScrumMaster depends on none of this.** It operates on canonical work items and
+never reads a Jira field, status or webhook (V5.1 REQ-01, REQ-04). The
+configuration below is what Django/`core` needs in place before a project can
+be put in Jira mode, and it is recorded here only because this document's
+readers are the ones who will ask what became of it. The Jira configuration
+specification beside this document on the `/agent-docs` mount is the full
+configuration reference; these are prerequisites defined in PDI-8, and
+creating them is nobody's job at runtime — the provisioning scripts do it.
+
+A project exercises any of it only once the operator has put it in Jira mode with `connect_jira`.
 
 ### Custom Fields
 
-All custom fields are instance-level resources created by `scripts/create-jira-fields.sh`. Their IDs are written to `services/scrummaster/.env` automatically.
+All custom fields are instance-level resources created by `scripts/create-jira-fields.sh`, which writes the IDs it created directly into the platform `.env`, which `derive-env.sh` carries to `core`; the operator does not copy them.
 
 **Routing and control fields:**
 
 | Field Name | Type | Purpose |
 |-----------|------|---------|
-| `Agent` | Single-select | Identifies which agent owns the ticket. ScrumMaster uses this to determine routing target. |
-| `Blocked` | Single-select (`Yes` / null) | Set by ScrumMaster when an agent blocks. Cleared by human to trigger unblock flow. |
+| `Agent` | Single-select | Identifies which agent owns the ticket. `core` carries its value onto the canonical work item; routing is decided from there. |
+| `Blocked` | Single-select (`Yes` / null) | Set by `core`'s outbound writer when a Jira-mode work item enters `needs-clarification` or `failed` (a `cancelled` item is written as the `Abandoned` status instead), and when story intake finds a Story's required fields missing. Cleared by a human, which `core` interprets into the canonical change that triggers the unblock flow. |
 
 **Story schema fields (all paragraph/textarea type):**
 
@@ -164,127 +182,167 @@ All custom fields are instance-level resources created by `scripts/create-jira-f
 | `Edge Cases` | **Yes** | Invalid input, partial failures, timeouts |
 | `Out of Scope` | **Yes** | Explicitly what is NOT included |
 
-ScrumMaster validates Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope on every `jira:issue_created` event before dispatching to the Refinement Agent. See Handler 1.
+Django/`core` validates Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope on every `jira:issue_created` event (`workitems/webhook_consumer.py`'s `_handle_story_created`); the `story_intake` side effect it records from that check has no ScrumMaster consumer: `core`'s outbound writer sets the Agent field and the Blocked flag on the Jira ticket, and the acknowledgement or missing-fields comment goes through `core`'s comment path (see Inbound Webhook Handling).
 
 ### Workflow Statuses
+
+Jira's statuses, which a Jira-mode project's mapping projects the canonical
+status onto. ScrumMaster's own vocabulary is the canonical one — `backlog`,
+`ready`, `in-progress`, `in-review`, `done`.
 
 | Status         | Meaning                                                                           |
 | -------------- | --------------------------------------------------------------------------------- |
 | `Backlog`      | Ticket created, not yet refined                                                   |
-| `Shovel Ready` | Refined, subtasks assigned, agent can begin work                                  |
+| `Shovel Ready` | Ready for an agent to take (canonical `ready`)                                    |
 | `In Progress`  | Agent actively working                                                            |
 | `Blocked`      | Agent waiting for human clarification — note: also reflected in the Blocked field |
-| `In Review`    | PR open, awaiting review                                                          |
-| `Done`         | Merged and deployed                                                               |
+| `In Review`    | Delivered to beta (canonical `in-review`), awaiting human review                  |
+| `Done`         | Accepted after review on beta; a human's move                                     |
 
 ### Webhook Triggers
 
-ScrumMaster registers to receive Jira webhooks for the following events:
+ScrumMaster does not register for or receive Jira webhooks at all: Django/`core`
+is the sole recipient and interpreter of every Jira webhook (`workitems/views.py`,
+`workitems/webhook_consumer.py`; V5.1 REQ-01). ScrumMaster instead reacts to the
+canonical work-item events `core` publishes from its own interpretation of
+those webhooks (and from every other ingress — Admin Panel writes, the HTTP
+API — on the same path):
 
-| Event                 | Trigger Condition                        | Handler                                         |
-| --------------------- | ---------------------------------------- | ----------------------------------------------- |
-| Ticket Created        | Any new ticket in any watched project    | Build prompt, durably dispatch to Refinement Agent's Stream |
-| Status → Shovel Ready | Ticket status changes to Shovel Ready    | Build prompt, invoke assigned dev agent         |
-| Blocked field cleared | Blocked field changes from true to false | Fetch ticket context, invoke assigned dev agent |
+| Canonical event                                      | Trigger Condition                                            | Handler                                 |
+| ------------------------------------------------------ | -------------------------------------------------------------- | ---------------------------------------- |
+| `work_item.created` / `work_item.status_changed`       | A work item's status reaches `ready` with an assigned agent     | Build prompt, durably dispatch to that agent's Stream |
+| `work_item.jira_side_effect` (kind `blocked_cleared`)  | `core` clears a dev-agent ticket's Blocked side effect          | Search for BLOCKED marker, redispatch assigned agent |
+
+A `work_item.jira_side_effect` of kind `story_intake` — `core`'s record of a
+newly-created Story and whether its schema fields are complete — has no
+ScrumMaster consumer: `core`'s outbound writer applies it to the Jira
+ticket, and the acknowledgement or missing-fields comment it implies goes
+through `core`'s comment path.
 
 ---
 
 ## Inbound Webhook Handling
 
-### Handler 1: Story Created
+ScrumMaster has no Jira webhook handler: every Jira webhook is received,
+validated, and interpreted entirely inside Django/`core`
+(`workitems/webhook_consumer.py`), including the story-readiness check
+V1's Handler 1 ran here. What follows are the two canonical events `core`
+publishes that ScrumMaster still acts on.
 
-Fired when a new Story is created in any watched Jira project.
+### Handler 1: Dispatch on a dispatch-eligible work item
 
-ScrumMaster owns story readiness. The Refinement Agent only ever receives a story when all required schema fields are non-empty. This check is hardcoded in ScrumMaster — the Refinement Agent does not validate fields.
-
-**Action:**
-
-1. Validate webhook secret
-2. Set Agent field to `refinement-agent`
-3. Post acknowledgement comment: "Ticket received. Assigned to Refinement Agent for decomposition."
-4. Fetch full ticket context from Jira API (including all story schema fields)
-5. **Validate required fields**: Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope
-   - If any are missing/empty: post comment listing missing fields, set Blocked field to `Yes`, stop
-   - If all present: continue
-6. Construct Claude Code prompt including the 5 required schema fields
-7. Durably dispatch prompt to `aigang:agent:{project}:{suffix}`
-8. Log event
-
-### Handler 2: Status → Shovel Ready
-
-Fired when the Refinement Agent moves a subtask ticket to Shovel Ready.
+Fired on `work_item.created` or `work_item.status_changed` for a work item
+whose status is `ready` and which has an assigned agent (`dispatchConsumer.js`'s
+`maybeDispatch`).
 
 **Action:**
 
-1. Validate webhook payload
-2. Read ticket key, Agent field value, and project key
-3. Look up agent definition path from agent catalog using Agent field value
-4. Fetch full ticket context from Jira API:
+1. Read the full canonical work item from `core`'s read API
+2. Look up the assigned agent's definition path from the agent catalog
+3. Construct Claude Code prompt (see Prompt Construction) from the work
+   item's own canonical fields — behavior, acceptance criteria, comment
+   thread, parent, external key if any
+4. Durably dispatch prompt to `aigang:agent:{project}:{suffix}`
+5. Log event
 
-   - Title
-   - Description
-   - Acceptance criteria
-   - Full comment thread
-   - Parent ticket if subtask
-5. Construct Claude Code prompt (see Prompt Construction)
-6. Durably dispatch prompt to `aigang:agent:{project}:{suffix}`
-7. Update ticket status: Shovel Ready → In Progress
-8. Log event
+### Handler 2: Blocked side effect cleared
 
-### Handler 3: Blocked Field Cleared
-
-Fired when a human clears the Blocked field on a ticket, indicating a response has been provided.
+Fired on a `work_item.jira_side_effect` of kind `blocked_cleared` — `core`'s
+record that a dev-agent ticket's block was lifted (`dispatchConsumer.js`'s
+`handleBlockedClearedSideEffect`).
 
 **Action:**
 
-1. Validate webhook payload
-2. Read ticket key, Agent field value, and project key
-3. Look up agent definition path from agent catalog
-4. Fetch full ticket context from Jira API including the full comment thread
-5. Search project codebase for `BLOCKED {ticket-key}` marker to identify resume point
-6. Construct Claude Code prompt (see Prompt Construction) including:
-
-   - Full ticket and comment thread
-   - File path and line reference of BLOCKED marker if found
-7. Durably dispatch prompt to `aigang:agent:{project}:{suffix}`
-8. Log event
+1. Read the full canonical work item from `core`'s read API
+2. Look up the assigned agent's definition path from the agent catalog
+3. Search project codebase for a `BLOCKED {work item id}` marker, keyed on
+   the work item's own canonical id, to identify the resume point
+4. Construct Claude Code prompt (see Prompt Construction) including the
+   comment thread and the marker's file/line, if found
+5. Durably dispatch prompt to `aigang:agent:{project}:{suffix}`
+6. Log event
 
 ---
 
-## Outbound Jira Operations
+## Outbound Canonical Operations
 
 ScrumMaster runs one durable Streams consumer per project on that project's gateway stream (`aigang:gateway:{project-name}`, consumer group `scrummaster`) and processes outbound messages from that project's container(s). Project identity is derived from which stream a consumer is bound to — never from message content. All messages must conform to the message contract defined below, and each is processed at most once per messageId even if redelivered.
 
+Alongside the operations below, ScrumMaster publishes `recordA2AVerdict`
+commands to `core` on the project's command stream, so the message record
+holds ScrumMaster's verdict on each submission (Durable A2A Message Record
+REQ-04): a verdict at each exit of `handleA2ASubmission` (`applied`, or
+`refused` with a reason), an outcome after the projection, a `failed`
+outcome (or a `refused`/`dead_lettered` verdict when the message had none)
+from the gateway's dead-letter hook, and a `superseded` outcome, once for each message whose `failed`
+outcome a controlled reopen turns `superseded`. A failed
+publication of any verdict but `applied` is logged, not retried into a dead
+letter. A failed `applied` publication raises, so the entry stays pending and
+is redelivered, and is dead-lettered once its retries run out. The spec's table of
+verdicts and outcomes is authoritative.
+
+Nothing here writes to Jira. Each operation below resolves to a canonical
+command ScrumMaster publishes to `core`, which applies it to the work item and
+is the sole authority on what the item then is (V5.1 REQ-01, REQ-04).
+`core`'s outbound writer mirrors what it applied onto the Jira ticket of a
+project in Jira mode.
+
 ### Supported Operations
 
-**Post Comment**
-Posts a formatted comment to the specified ticket on behalf of the named agent.
+**Post Comment** — A2A operation `comment`, or any working-state submission
+carrying body text and no data part.
+Publishes an `appendComment` command naming the work item, the authoring agent
+and the formatted body. The gateway threads the submission's `messageId`
+through as the command's `sourceMessageId`, so a redelivered gateway entry
+cannot double-post it — `core`'s `append_comment` holds that guard.
 
-ScrumMaster enforces comment formatting before posting. See Agent Comment Standard below.
+ScrumMaster enforces comment formatting before publishing. See Agent Comment
+Standard below.
 
-**Set Blocked Field**
-Sets the Blocked field to true on the specified ticket. ScrumMaster also posts a system comment noting which agent set the field and at what time.
+**Report Blocked** — not an operation but a submission state: `input-required`
+or `auth-required`.
+Publishes a `transitionStatus` command moving the work item to
+`needs-clarification`, the minimum-vocabulary status meaning "blocked, needs
+input", and then an `appendComment` command whose body is labelled `BLOCKED`,
+or `AUTHORIZATION REQUIRED` for `auth-required`, naming the agent and its
+reason. There is no Blocked-field command and no Jira field write: the block
+is a canonical status plus a canonical comment.
 
-**Set Agent Field**
-Updates the Agent field on a ticket. Used by the Refinement Agent to assign subtasks to dev agents.
+**Reassign** — A2A operation `reassign`.
+Publishes an `assign` command carrying the requested agent id, once
+`src/assignment.js` has validated it against the agent catalog and the
+project's permitted set. Used by the Refinement Agent to put subtasks with dev
+agents. A request that fails validation publishes no `assign` command — it is
+reported as a comment naming the requested agent, the reason and the ids
+permitted for that project.
 
-**Create Subtask**
-Creates a subtask under a specified parent ticket. Used by the Refinement Agent to decompose stories. ScrumMaster enforces that the subtask is created within the same project as the parent ticket.
+**Create Subtask** — A2A operation `create_subtask`.
+Publishes a `materializeDecomposition` command carrying the parent's canonical
+id and a one-subtask list, the same command a full Refinement Agent
+decomposition sends. Used by the Refinement Agent to decompose stories. The
+subtask is created under the requesting Task's own work item, so it is in that
+item's project by construction; the new subtask's id is recorded against the
+submission's `messageId`, so a redelivery reuses it rather than creating a
+second subtask. ScrumMaster does not dispatch the subtask — that follows from
+its own `ready` event.
 
-All four operations above are now carried as canonical A2A envelopes rather
-than bare `{"type": ...}` messages — see [Redis Message
+Every operation above is carried as a canonical A2A envelope rather
+than a bare `{"type": ...}` message — see [Redis Message
 Contract](#redis-message-contract) below for the full contract.
 
 ### Agent Comment Standard
 
-All comments posted to Jira by ScrumMaster on behalf of an agent must follow this format:
+Every comment command ScrumMaster publishes to `core` on behalf of an agent must follow this format:
 
 ```
 [{Agent Name}] {comment body}
 
 Reference: {file path and function/line if applicable}
-Ticket: {ticket key}
+Ticket: {canonical work item id}
 ```
+
+The `Ticket:` line carries the work item's canonical id, in every mode — never
+a tracker key (V5.1 REQ-04).
 
 Example:
 
@@ -292,10 +350,10 @@ Example:
 [Backend Agent] Uncertain which endpoint to use for doAuth() in auth.py
 
 Reference: src/auth.py → doAuth()
-Ticket: GANG-42
+Ticket: 8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43
 ```
 
-ScrumMaster enforces this format. If an agent submits a comment that does not include a reference field, ScrumMaster logs a warning and posts the comment with the reference field omitted rather than dropping the message.
+ScrumMaster enforces this format. The reference field is optional: no submission path can be rejected or flagged for leaving it out. When it is absent, ScrumMaster publishes the `appendComment` command with the `Reference:` line omitted — no warning is logged.
 
 ---
 
@@ -309,15 +367,18 @@ envelope schema, stream/group topology, retry, dead-letter, and idempotency
 rules are defined in Durable Agent Messaging with Redis
 Streams. This section documents
 the canonical A2A shape of `payload` for `kind: "task"` and `kind:
-"jira_operation"` — see A2A
+"gateway_operation"` — see A2A
 Messaging. There is no separate
 legacy `type`/`prompt` contract on this path.
 
-`taskId` = the ticket's own Jira issue key; `contextId` = its parent ticket
-key (or the ticket's own key when there is no parent) — minted the first time
-ScrumMaster sees the root ticket, and shared by every subtask created under
-it. A Task's identity is stable for its whole lifecycle: one Jira ticket ↔ one
-Task, from initial dispatch through completion. Unblocking a ticket, a
+`taskId` = the work item's own canonical id, in both modes; `contextId` =
+its parent work item's canonical id (or its own id when there is no parent)
+— minted the first time ScrumMaster sees the root work item, and shared by
+every subtask created under it. A Jira issue key MAY ride along as
+`metadata.externalKey` for display; no ScrumMaster module reads it to
+address anything (V5.1 REQ-06, REQ-07). A Task's identity is stable for its
+whole lifecycle: one work item ↔ one Task, from initial dispatch through
+completion. Unblocking a ticket, a
 Jenkins pipeline retry, and a human-requested rework redispatch are all
 continuations of the *same* Task and context — none of them creates a new
 assignment. Terminal states (`completed`, `failed`, `canceled`, `rejected`)
@@ -331,8 +392,8 @@ Envelope `kind: "task"`. `payload` is a single A2A Message (`role: "client"`):
 {
   "kind": "message",
   "messageId": "msg-<uuid>",
-  "taskId": "GANG-42",
-  "contextId": "GANG-40",
+  "taskId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43",
+  "contextId": "5a9e2f61-7c84-4d13-8b0a-6f3c91d7e204",
   "role": "client",
   "referenceMessageId": "msg-<uuid-of-prior-message>",
   "parts": [ { "kind": "text", "text": "<full Claude Code prompt>" } ]
@@ -354,12 +415,14 @@ Streams-level execution-outcome signal, not agent-authored A2A content.
 
 ScrumMaster derives project identity from which stream a message arrived on,
 not from any field in the payload, and cross-checks it against the Task's own
-`jiraProjectName` metadata recorded at dispatch time. An agent cannot claim a
+`projectName` metadata recorded at dispatch time. An agent cannot claim a
 different project by writing a different value into its submission — the
 stream is the authority, and an envelope whose declared project doesn't match
-is rejected and dead-lettered without any Jira effect.
+is rejected and dead-lettered; the gateway's dead-letter hook publishes a
+`refused`/`dead_lettered` verdict for it to `core` (Durable A2A Message
+Record REQ-04), and nothing is projected onto a work item.
 
-Envelope `kind: "jira_operation"`. `payload` is one A2A submission:
+Envelope `kind: "gateway_operation"`. `payload` is one A2A submission:
 
 ```json
 {
@@ -367,10 +430,11 @@ Envelope `kind: "jira_operation"`. `payload` is one A2A submission:
   "message": {
     "kind": "message",
     "messageId": "msg-<uuid>",
-    "taskId": "GANG-42",
-    "contextId": "GANG-40",
+    "taskId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43",
+    "contextId": "5a9e2f61-7c84-4d13-8b0a-6f3c91d7e204",
     "role": "agent",
     "referenceMessageId": "msg-<uuid-of-prior-message>",
+    "metadata": { "sessionId": "<agent-session-id>" },
     "parts": [
       { "kind": "text", "text": "<human-readable content>" },
       { "kind": "data", "data": { "operation": "comment | reassign | create_subtask" } }
@@ -380,7 +444,7 @@ Envelope `kind: "jira_operation"`. `payload` is one A2A submission:
     {
       "kind": "artifact",
       "artifactId": "artifact-<uuid>",
-      "taskId": "GANG-42",
+      "taskId": "8c1d4a7e-3b52-4f09-9a6d-2e7f1b508c43",
       "name": "pull-request",
       "parts": [
         { "kind": "file", "file": { "name": "pull-request", "mimeType": "text/uri-list", "uri": "https://github.com/org/repo/pull/7" } },
@@ -413,7 +477,9 @@ what to do:
 | `failed` / `canceled` / `rejected` | — | Set Blocked field + comment identifying the terminal failure |
 
 An optional `data.reference: { "file": "...", "function": "..." }` sibling
-field is supported on any operation.
+field is read on the three submissions that consume it: a `comment` operation,
+a plain progress note that sets no `data.operation`, and the `input-required` /
+`auth-required` states.
 
 A `create_subtask` request that omits `data.agentFieldValue` is not dropped.
 ScrumMaster first tries to recover the id from the summary's own
@@ -448,64 +514,97 @@ Every prompt ScrumMaster constructs for Claude Code invocation must include the 
 ```
 1. ROLE
    "You are the {agent name}. Read your full agent definition before taking any action:
-   /agent-docs/{agent-definition-file}.md"
+   /agent-docs/agents/{agent-definition-file}.md"
 
 2. TICKET CONTEXT
-   Ticket: {ticket_key} — {ticket_title}
-   Parent ticket: {parent_key}  (if subtask)
+   Ticket: {canonical work item id} — {work item title}
+   Parent ticket: {parent work item id}  (if subtask)
 
-   ### Behavior
-   {behavior field}
+   Task dispatch only:
+     ### Behavior
+     {behavior field}
 
-   ### Acceptance Criteria
-   {acceptance_criteria field}
+     ### Acceptance Criteria
+     {acceptance_criteria field}
 
-   ### Constraints
-   {constraints field}
+     ### Constraints
+     {constraints field}
 
-   ### Edge Cases
-   {edge_cases field}
+     ### Edge Cases
+     {edge_cases field}
 
-   ### Out of Scope
-   {out_of_scope field}
+     ### Out of Scope
+     {out_of_scope field}
 
-   (Story schema fields only — present for Refinement Agent prompts.
-    Dev agent prompts use the subtask description written by the Refinement Agent.)
+     (Story schema fields only — present for Refinement Agent prompts.
+      Dev agent prompts use the subtask description written by the Refinement Agent.)
 
-3. COMMENT THREAD (if present)
-   The following clarifications have been provided:
+   Unblock flow only:
+     Description:
+     {subtask description, or "(no description provided)"}
+
+   Retry flow adds neither block: TICKET CONTEXT is just the ticket/parent lines.
+
+3. COMMENT THREAD and RESUME POINT — order depends on flow; task dispatch
+   renders neither RESUME POINT nor a distinct COMMENT THREAD ordering issue
+   (it has no RESUME POINT at all):
+
+   Unblock flow: COMMENT THREAD (if present), then RESUME POINT.
+   Retry flow: RESUME POINT, then COMMENT THREAD (if present).
+
+   COMMENT THREAD (if present) — the lead-in line differs by flow:
+     Task dispatch:
+       The following clarifications have been provided:
+     Unblock and retry flows:
+       The following clarifications have been provided (most recent last):
+   Then, in every flow, one line per comment:
    [{timestamp}] {author}: {body}
 
-4. RESUME POINT (unblock flow only)
-   File: {file path}
-   Line: {line number}
-   Your note: {blocked marker text}
-   Continue from this point using the clarification provided above.
+   RESUME POINT (unblock and retry flows; task dispatch has none)
+   Unblock:
+     You previously stopped work on this ticket and left a BLOCKED marker.
+     File: {file path}
+     Line: {line number}
+     Your note: {blocked marker text}
+     Continue from this point using the clarification provided above.
+   Retry, pipeline failure:
+     The project pipeline failed on your pull request for this ticket.
+     Build log: {build_url}
+     Build number: {build_number}
+     Diagnose the failure, fix it, and push the fix to the same branch/PR.
+   Retry, human rework:
+     A human reviewer requested rework after reviewing this ticket on beta.
+     Read the comment thread below for the specific rework requested, address
+     it, and push the fix to the same branch/PR.
 
-5. A2A TASK CONTEXT
-   Task ID: {task.id}
-   Context ID: {task.contextId}
-   Last Message ID: {message.messageId}
-   Jira issue key: {issue.key}
+4. ALLOWED AGENTS (only when the dispatch supplies an allowed-agent set,
+   which task dispatches do and continuations and retries do not)
+   - {agent id}: {agent card description}   (one line per permitted agent)
 
-   These identify the Task this dispatch belongs to. The agent must echo them
-   back (with a freshly generated messageId per submission, referencing the
-   previous one) in every gateway submission it sends for this ticket — see
-   A2A Messaging.
+   Project data for delegation, rendered from the canonical catalog filtered
+   to what the project enables — not an instruction about messaging. The
+   Refinement Agent names one of these ids as the agent a subtask is for.
 
-6. INSTRUCTIONS
-   - Read your agent definition fully before taking any action
-   - All Jira interactions must go through the ScrumMaster gateway stream as
-     a canonical A2A submission (see Redis Message Contract) — never a bare
-     {"type": ...} payload
-   - Use: node /agent-docs/lib/gateway-publish.js $PROJECT_NAME <path-to-json-file>
-   - If you need clarification, publish a submission with "state" set to
-     input-required (missing information) or auth-required (missing
-     authorization) and the exact file/function reference in the message
-   - Do not block without a precise, located question
-   - When your work is complete, publish a submission with "state" set to
-     completed and a summary text Part
+5. WORK ITEM REFERENCES
+   Work item id: {canonical id}
+   External key: {tracker key}                            — only when set (Jira mode)
+   Specification link: {artifact id} ({requirement id})   — or "none"
+   Artifact links: {artifact id}, {artifact id}           — or "none"
+
+   The work item's own references, which the agent reads to ask the librarian
+   for an artifact. AI Gang canonical ids and, in Jira mode only, a
+   display-only tracker key — never a delivered path, and never read back by
+   any ScrumMaster module (V5.1 REQ-06, REQ-07). A work item carrying neither
+   specification nor artifact reference renders "none" rather than omitting
+   the line (v4.1 agent-artifact-automation.md REQ-04).
 ```
+
+No prompt instructs an agent how to construct a submission, and none carries
+an identifier for an agent to copy into one. An agent submits through the
+constructor in the agent commons, which the `a2a-submit` skill describes; the
+task, the context and the chain reach it as environment variables the
+subscriber exports into the session (V5.0 Deterministic Gateway Message
+Tooling REQ-04, Agent Commons REQ-02, REQ-03).
 
 ---
 
@@ -529,7 +628,7 @@ failing fast if either is malformed (`src/registry.js`):
     {
       "id": "backend-agent",
       "displayName": "Backend Agent",
-      "definitionPath": "/agent-docs/backend-agent.md",
+      "definitionPath": "/agent-docs/agents/backend-agent.md",
       "routing": { "channelSuffix": "backend" },
       "agentCard": { "name": "Backend Agent", "description": "Implements APIs, business logic, and data persistence." }
     }
@@ -554,14 +653,14 @@ fails fast if any entry cannot produce a valid AgentCard, or if the catalog or
 project configuration itself is malformed.
 
 `src/assignment.js` is the sole catalog-backed validator: every path that
-creates or changes agent responsibility (initial refinement dispatch, Shovel
-Ready dispatch, blocked-clear redispatch, and the Refinement Agent's
+creates or changes agent responsibility (initial refinement dispatch, ready
+dispatch, blocked-clear redispatch, and the Refinement Agent's
 decomposition tool, plus the gateway's `reassign` and `create_subtask` A2A
-operations) calls it rather than writing a literal agent id to Jira or
+operations) calls it rather than writing a literal agent id onto a work item or
 dispatching an agent directly. An invalid assignment is never silently
-dropped — it produces a durable, visible Jira comment naming the requested
-agent, the failure reason, and the permitted ids for that project, and the
-ticket is left Blocked rather than reported as dispatched.
+dropped — ScrumMaster publishes an `appendComment` command to `core` naming the
+requested agent, the failure reason, and the permitted ids for that project,
+and leaves the work item blocked rather than reporting it as dispatched.
 
 When a new agent type is added to the system, add an entry to `agents.json`
 (including its `agentCard`), a definition file in `setup/`, and (if
@@ -569,8 +668,10 @@ applicable) the agent's id to the relevant project's entry in
 `projects.json` — no ScrumMaster code changes are required. See Agent
 Catalog and Assignment
 Integrity for the full
-contract, including Jira Agent-field provisioning/reconciliation and the
-periodic drift audit.
+contract. Provisioning and reconciling the Jira Agent field's options is the
+provisioning scripts' job (`scripts/create-jira-fields.sh`,
+`scripts/reconcile-agent-field.sh`); ScrumMaster runs no periodic drift audit
+against Jira.
 
 ---
 
@@ -598,33 +699,19 @@ ScrumMaster runs as a persistent container on the HQ droplet alongside Jenkins a
 
 **Runtime requirements:**
 
-- Network access to Atlassian Cloud (outbound HTTPS)
+- Network access to Django/`core` (Docker network) — ScrumMaster's source of
+  canonical work-item events and destination for canonical commands
 - Network access to Redis container (Docker network)
 - Read access to project container workspaces (for BLOCKED marker search)
-- Jira API token with read/write access to all watched projects
-- Exposed port for receiving Jira webhooks
+- No network access to Atlassian Cloud and no exposed port: Django/`core` is
+  the platform's only Jira client and its only externally-reachable surface
+  (V5.1 REQ-01)
 
 **Environment variables required:**
 
 ```
-JIRA_BASE_URL                    # https://your-org.atlassian.net
-JIRA_API_TOKEN                   # Stored in secrets, not in compose file
-JIRA_USER_EMAIL                  # Account email associated with API token
-
-# Custom field IDs — written automatically by scripts/create-jira-fields.sh
-JIRA_AGENT_FIELD_ID              # customfield_XXXXX
-JIRA_BLOCKED_FIELD_ID            # customfield_XXXXX
-JIRA_VALUE_HYPOTHESIS_FIELD_ID   # customfield_XXXXX
-JIRA_TEST_MEASUREMENT_FIELD_ID   # customfield_XXXXX
-JIRA_BEHAVIOR_FIELD_ID           # customfield_XXXXX
-JIRA_AC_FIELD_ID                 # customfield_XXXXX
-JIRA_CONSTRAINTS_FIELD_ID        # customfield_XXXXX
-JIRA_EDGE_CASES_FIELD_ID         # customfield_XXXXX
-JIRA_OUT_OF_SCOPE_FIELD_ID       # customfield_XXXXX
-
 REDIS_HOST           # Redis container hostname on Docker network
 REDIS_PORT           # Default 6379
-WEBHOOK_SECRET        # Shared secret for validating inbound Jira webhooks
 AGENTS_CATALOG_PATH   # Path to agents.json (canonical agent catalog)
 PROJECTS_CONFIG_PATH  # Path to projects.json (per-project allowed-agent set)
 PROJECTS_BASE_PATH    # Path to ~/ai-gang/projects/ for BLOCKED marker search
@@ -648,9 +735,12 @@ DEAD_LETTER_RETENTION_DAYS # Default 30 — dead-letter entry retention
 
 **ScrumMaster assumes:**
 
-- Jira custom fields (Agent, Blocked) are configured before first run
-- All watched Jira project webhooks are registered and point to ScrumMaster's endpoint
+- `core` is reachable and publishing canonical work-item events
 - The agent catalog (agents.json) and project configuration (projects.json) are accurate and up to date
+
+ScrumMaster has no Jira prerequisite of any kind: no custom field and no
+registered webhook. The instance webhook is registered on `core`, not here
+(V5.1 REQ-01).
 
 **On message delivery:**
 Redis Streams durably persist every accepted message. A project container does not need to be running when ScrumMaster dispatches work — the entry waits in its stream, pending in the container's consumer group, until that container's `subscriber.js` starts (or resumes after a restart) and consumes it. Redis persistence (AOF) must be enabled so this durability survives a Redis restart too — see Durable Agent Messaging with Redis Streams for retry, dead-letter, and retention behavior.

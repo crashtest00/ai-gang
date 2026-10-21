@@ -1,6 +1,8 @@
 # AI Gang - Jira Configuration Specification
 
-**Purpose**: Defines the complete Jira configuration required to support the AI Gang automated development lifecycle. Intended as a setup reference for human administrators and a behavioral reference for the Refinement Agent and ScrumMaster.
+**Purpose**: Defines the complete Jira **instance and project configuration** an AI Gang deployment needs in order to connect a project to Jira — custom fields, story-schema fields, statuses, project structure, automation rules, webhook registration and the Agent field's roster. Intended as a setup reference for human administrators.
+
+**This document describes configuration, not behaviour.** It is not a behavioural reference for any agent. What the platform does with a work item is defined by the canonical work model and, for ScrumMaster, by `SCRUMMASTER_SPEC_v1.md`; from V5.1 ScrumMaster is not a Jira client and reads and writes nothing in Jira (V5.1 REQ-01, REQ-04). Where this document has to name a component, it names Django/`core`, the running platform's only Jira client, and says plainly where the behaviour does not exist yet.
 
 **Date**: March 25, 2026
 **Version**: 1.1
@@ -23,26 +25,43 @@
 
 ## Overview
 
-Jira is the single source of truth for all work in the AI Gang system. Every piece of code written by an agent traces back to a Jira ticket. The configuration defined here supports a fully automated lifecycle:
+Jira is an **optional tracker front-end**, configured per project. The single
+source of truth for all work in the AI Gang system is the canonical work item
+in Django/`core`; a Jira ticket is a projection of one, for a project the
+operator has put in Jira mode.
+
+A project runs in local mode until the operator runs `connect_jira` for it
+(Canonical Delivery State REQ-10), the only path that puts a project into Jira
+mode; nothing in the configuration below is exercised at runtime for a project
+that is still local. It is one-time instance work, and `connect_jira` refuses to
+run until it is in place.
+
+What the configuration supports, once a project is in Jira mode:
 
 ```
 Human creates Story in Jira
-  → ScrumMaster validates required story fields
-  → If incomplete: ticket blocked with comment listing missing fields
-  → If complete: Refinement Agent decomposes into subtasks
-  → Dev agents receive subtasks via ScrumMaster
-  → Ticket closes on merge
+  → core's webhook consumer interprets the payload and records a canonical
+    work item
+  → Refinement Agent decomposes it into subtasks
+  → Dev agents receive subtasks from core's events, routed by ScrumMaster
+  → the work item closes on merge
 ```
+
+For a Jira-mode project, `core` validates a newly created Story against the
+required-field list below: a Story with an empty required field is recorded as
+`proposed`, flagged Blocked, and given a comment on the ticket naming the
+missing fields (`webhook_consumer.py`, `_handle_story_created`).
 
 ### Jira Access by Role
 
 | Role | Jira Access | Notes |
 |------|-------------|-------|
 | Human | Full | Creates tickets, responds to blockers, clears Blocked field |
-| ScrumMaster | Full read/write | All Jira interactions for agents are proxied through ScrumMaster |
-| Dev Agents | None | Submit to the ScrumMaster gateway Redis Stream (`aigang:gateway:{project-name}`); ScrumMaster executes on their behalf |
-| Refinement Agent | None | Same as dev agents — Jira access via ScrumMaster only |
-| Jenkins | Comment + status | Posts pipeline results directly via Jira plugin |
+| Django/`core` | Full read/write | The running platform's only Jira client (V5.1 REQ-01). Inbound: receives the instance webhook. Outbound: `core`'s writer (`jira_writer.py`) makes every Jira write for a Jira-mode project; `ensure_jira_webhook` (registration) and `connect_jira` (the push) also call the client |
+| ScrumMaster | None | Not a Jira client. Reads canonical work items from `core` and publishes canonical commands back to it (V5.1 REQ-04) |
+| Dev Agents | None | Submit to the ScrumMaster gateway Redis Stream (`aigang:gateway:{project-name}`); ScrumMaster publishes the canonical command to `core` on their behalf |
+| Refinement Agent | None | Same as dev agents |
+| Jenkins | None | Not a Jira client: it holds no Jira credential, plugin or configuration. It reports pipeline results to `core` as canonical events, and `core` makes any Jira write |
 
 ---
 
@@ -50,52 +69,52 @@ Human creates Story in Jira
 
 **Host**: Atlassian Cloud
 **URL**: `https://your-org.atlassian.net` *(replace with actual org URL)*
-**Authentication**: API token — ScrumMaster holds the single service token
+**Authentication**: API token — held in the platform `.env` as `JIRA_TOKEN`, which `scripts/startup/derive-env.sh` carries into `services/core/.env` for Django/`core`
 
 ### API Tokens Required
 
 | Consumer | Purpose | Scope |
 |----------|---------|-------|
-| ScrumMaster | Read tickets, post comments, update fields, create subtasks | All projects |
-| Jenkins | Post comments, update status | All projects |
+| Django/`core` | Register the instance webhook; read tickets, post comments, update fields and create subtasks through its outbound writer | All projects |
+| Provisioning scripts | Create and reconcile instance fields and per-project configuration | All projects |
 
-Tokens are generated at `https://id.atlassian.com/manage-profile/security/api-tokens` and stored in each service's `.env` file. See DevOps Handbook for secrets storage procedure.
+One token serves all of them. It is generated at `https://id.atlassian.com/manage-profile/security/api-tokens` and set once in the platform `.env` as `JIRA_TOKEN`; `derive-env.sh` carries it to `core`. See DevOps Handbook for secrets storage procedure.
 
 ---
 
 ## Custom Fields
 
-These fields are **instance-level** — created once for the whole Jira instance via `scripts/create-jira-fields.sh`. Their IDs are stable and written automatically to `services/scrummaster/.env`. When adding a new project, these fields are applied to the project's screens by `scripts/init-project.sh`.
+These fields are **instance-level** — created once for the whole Jira instance via `scripts/create-jira-fields.sh`, which writes the IDs it created directly into the platform `.env`, which `derive-env.sh` carries to `core`; the operator does not copy them. The IDs are stable. When adding a new project, these fields are applied to the project's screens by `scripts/init-project.sh`.
 
 ### Field: Agent
 
-**Purpose**: Identifies which agent owns a ticket. Used by ScrumMaster to route inbound webhook events to the correct agent container via Redis.
+**Purpose**: Identifies which agent owns a ticket. `core` carries its value onto the canonical work item it records from the webhook; routing to an agent container is then decided from the canonical work item, not from Jira.
 
 | Attribute | Value |
 |-----------|-------|
 | Field name | `Agent` |
 | Field type | Single-select |
 | Scope | All projects |
-| Set by | ScrumMaster — `refinement-agent` on story creation; agent field value on subtasks |
-| Read by | ScrumMaster — determines routing target |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human or the provisioning scripts may also set it |
+| Read by | `core`'s webhook interpretation, which carries the value onto the canonical work item |
 | Env var | `JIRA_AGENT_FIELD_ID` |
 
-**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`. See [Agent Roster](#agent-roster). Values must match Agent Registry entries in ScrumMaster exactly.
+**Allowed values**: `refinement-agent`, `frontend-agent`, `backend-agent`, `devops-agent`, `desktop-agent`. See [Agent Roster](#agent-roster). Values must match the canonical agent catalog's entries exactly — all five, including `desktop-agent`, which no project's `projects.json` currently enables for dispatch but which the catalog still declares.
 
 ---
 
 ### Field: Blocked
 
-**Purpose**: Signals that an agent is waiting for human clarification. Setting this field causes ScrumMaster to post a system comment. Clearing it triggers the unblock flow — ScrumMaster fetches ticket context and re-dispatches the assigned agent.
+**Purpose**: Signals that an agent is waiting for human clarification. A human clears it; `core` interprets the clearing webhook and records the canonical change, from which the assigned agent is re-dispatched.
 
 | Attribute | Value |
 |-----------|-------|
 | Field name | `Blocked` |
 | Field type | Single-select (one option: `Yes`) |
 | Scope | All projects |
-| Set by | ScrumMaster (on behalf of dev agent, or when story fails validation) |
+| Set by | `core`'s outbound writer, for a Jira-mode project (canonical-delivery-state.md REQ-09); a human may also set it |
 | Cleared by | Human only |
-| Read by | ScrumMaster — `jira:issue_updated` webhook detects when field is cleared |
+| Read by | `core` — the `jira:issue_updated` webhook tells it the field was cleared |
 | Env var | `JIRA_BLOCKED_FIELD_ID` |
 
 To set: `{ "value": "Yes" }`. To clear: `null`.
@@ -104,7 +123,7 @@ To set: `{ "value": "Yes" }`. To clear: `null`.
 
 ## Story Schema Fields
 
-These fields define the required structure of a Story before it can be refined. ScrumMaster validates that all required fields are non-empty before dispatching to the Refinement Agent. If any required field is missing, ScrumMaster blocks the ticket and posts a comment listing what needs to be filled in.
+These fields define the required structure of a Story before it can be refined. **For a Jira-mode project, `core` enforces the five required ones** (Behavior, Acceptance Criteria, Constraints, Edge Cases, Out of Scope) when a Story is created: an empty one leaves the Story `proposed`, sets its Blocked field, and `core` comments the missing fields on the ticket through its writer; a human who fills them and clears Blocked is checked again, and re-blocked with a comment if any is still empty (`webhook_consumer.py`, `_handle_story_created`, `_missing_fields_comment`, `_reblock_comment`; `jira_interpret.REQUIRED_STORY_FIELDS`).
 
 All story schema fields are paragraph (textarea) type. All are **instance-level** custom fields created by `scripts/create-jira-fields.sh`.
 
@@ -118,35 +137,54 @@ All story schema fields are paragraph (textarea) type. All are **instance-level*
 | `Edge Cases` | **Yes** | `JIRA_EDGE_CASES_FIELD_ID` | Invalid input, partial failure, duplicates, timeouts, state inconsistencies. Enter `N/A` if none. |
 | `Out of Scope` | **Yes** | `JIRA_OUT_OF_SCOPE_FIELD_ID` | Explicitly what is NOT included in this story. Enter `N/A` if none. |
 
-**Validation gate**: ScrumMaster checks Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope on every `jira:issue_created` event. Value Hypothesis and Test & Measurement are informational and not validated.
+**Which fields the validation gate covers**: Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope. Value Hypothesis and Test & Measurement are informational and are not part of it.
 
-**Refinement Agent context**: ScrumMaster includes Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope in the prompt sent to the Refinement Agent. Value Hypothesis and Test & Measurement are not passed through.
+**Refinement Agent context**: Behavior, Acceptance Criteria, Constraints, Edge Cases, and Out of Scope reach the Refinement Agent's prompt, from the canonical work item's own story fields. Value Hypothesis and Test & Measurement are not passed through.
 
 ---
 
 ## Workflow Statuses
 
-The following statuses apply to all projects. The board displays one column per status.
+The following statuses must exist on every project's workflow, and the board
+displays one column per status. They are the Jira statuses a project's mapping
+projects the canonical work item's status onto; the canonical statuses
+themselves are `backlog`, `ready`, `in-progress`, `in-review` and `done`.
 
-| Status | Meaning | Transition Trigger |
-|--------|---------|-------------------|
-| `Backlog` | Ticket created, not yet refined | Human creates ticket |
-| `Shovel Ready` | Refined, subtasks assigned, ready for dev | Refinement Agent |
-| `In Progress` | Agent actively working | ScrumMaster (on Shovel Ready webhook) |
-| `In Review` | PR open, pipeline running | Jenkins (on PR open) |
-| `Done` | Merged and deployed to staging | Jenkins (on merge to main) |
+| Status | Meaning |
+|--------|---------|
+| `Backlog` | Ticket created, not yet refined |
+| `Shovel Ready` | Ready for an agent to take (canonical `ready`) |
+| `In Progress` | Agent actively working |
+| `In Review` | Delivered to beta (canonical `in-review`), awaiting human review; set by `core` when it records a beta deployment |
+| `Done` | Accepted after review on beta; a human's move |
+| `Abandoned` | A ticket abandoned without shipping (status category Done; `core` maps it to canonical `cancelled`, and writes it for a `cancelled` item; offered from every status, and `Done` is not offered from it) (release-mode-parity.md REQ-14) |
 
 `Blocked` is a field state (the Blocked custom field set to `Yes`), not a standalone workflow status. A ticket can be `In Progress` and blocked simultaneously.
 
-### Status Transition Rules
+### Who Moves a Ticket
 
-```
-Backlog → Shovel Ready        Refinement Agent (via jira-gateway)
-Shovel Ready → In Progress    ScrumMaster only (automated on Shovel Ready webhook)
-In Progress → In Review       Jenkins only (on PR open)
-In Review → In Progress       Jenkins only (on pipeline failure)
-In Review → Done              Jenkins only (on merge to main)
-```
+Status changes are made on the canonical work item; `core`'s outbound writer
+(Canonical Delivery State REQ-09) makes the equivalent Jira write for a
+project in Jira mode, and the canonical status follows from Jira's webhook —
+no canonical row changes before the webhook returns. Jenkins holds no Jira
+credential and writes to no tracker: it reports a beta deployment as a
+canonical event carrying no ticket key, and `core` makes the transition
+(REQ-04, REQ-05, REQ-06). The transitions this configuration must permit, and
+who makes each:
+
+| Transition | Who / What | Written to Jira |
+|---|---|---|
+| `Backlog` → `Shovel Ready` | Refinement Agent, via the ScrumMaster gateway, through `core`'s writer | Yes |
+| `Shovel Ready` → `In Progress` | ScrumMaster, on dispatch, as a canonical command to `core`, through the writer | Yes |
+| `In Progress` → `In Review` | `core`, on a beta deployment Jenkins reports as a canonical event, through the writer | Yes |
+| `In Review` → `Done` | A human, in Jira — moving a ticket to Done is no longer any automation rule's action | By the human directly |
+
+A human may of course move a ticket in Jira directly; `core` interprets the
+resulting webhook for a project in Jira mode. From v5.2 no component moves a
+ticket back out of `In Review` on a failed build: Jenkins' pipeline-failure
+handler appends the failure comment through `core`'s comment path and
+leaves the ticket's status as it is (REQ-01); only a human, or a later
+beta deployment reaching `In Review` again, changes it further.
 
 ---
 
@@ -165,7 +203,7 @@ Project: Analytics Pipeline  Key prefix: AP
 
 ### Routing
 
-ScrumMaster routes issues to the correct container using the **Jira project name**, which `init-project.sh` sets to match the `PROJECT_NAME` env var in the container (e.g. `hello-world`). No Component field is required.
+`core` resolves a webhook to the right project using the **Jira project name**, which `init-project.sh` sets to match the `PROJECT_NAME` env var in the container (e.g. `hello-world`). Routing to a container is then decided from the canonical work item. No Component field is required.
 
 ### Board Configuration
 
@@ -180,17 +218,33 @@ Each project board is configured identically:
 ```
 Epic
   └── Story                  (created by human — must include all required schema fields)
-        └── Subtask           (created by Refinement Agent via jira-gateway)
+        └── Subtask           (created by the Refinement Agent through the
+                               gateway stream, aigang:gateway:{project})
               └── assigned to a single dev agent via Agent field
 ```
 
-The Refinement Agent creates subtasks under the parent story. Each subtask is assigned to exactly one agent via the Agent field. The subtask description contains the full build prompt written by the Refinement Agent. ScrumMaster operates at the subtask level for dev agent dispatch.
+The Refinement Agent creates subtasks under the parent story — as canonical work items, which `core` mirrors into Jira as Sub-tasks for a Jira-mode project (Canonical Delivery State REQ-11). Each subtask is assigned to exactly one agent. The subtask description contains the full build prompt written by the Refinement Agent. Dev agent dispatch operates at the subtask level.
 
 ---
 
 ## Automation Rules
 
-### Rule 1: PR Merged → Done
+**Retired, v5.2 (Canonical Delivery State REQ-04; product owner, October 2,
+2026, preliminary review decision 7.1).** The instance ran three automation
+rules through v5.1; none is enabled from v5.2, and `core` takes over none of
+them — the live Jira-mode proof (§5 of the specification) confirms no rule is
+enabled. They are kept below as a record of what the instance no longer
+runs, not as current configuration.
+
+Rule 1 moved a ticket to Done at merge, before its human review on beta —
+before `core`'s writer existed to make that transition deliberately, and
+colliding with the beta-queue-clean check once one did. Done remains a
+human's move, made in Jira and read back through the webhook ("Who Moves a
+Ticket", above). Rules 2 and 3 only added and removed a label for board
+visibility; the board now shows the Blocked field itself on ticket cards
+(see Board Configuration, above), so no label mirror is needed.
+
+### Rule 1: PR Merged → Done (retired)
 
 | Attribute | Value |
 |-----------|-------|
@@ -199,7 +253,7 @@ The Refinement Agent creates subtasks under the parent story. Each subtask is as
 | Action | Transition issue to Done |
 | Notes | Requires GitHub for Jira app installed and connected |
 
-### Rule 2: Blocked Field Set → Add Board Indicator
+### Rule 2: Blocked Field Set → Add Board Indicator (retired)
 
 | Attribute | Value |
 |-----------|-------|
@@ -208,42 +262,63 @@ The Refinement Agent creates subtasks under the parent story. Each subtask is as
 | Action | Add label `blocked` to ticket for board visibility |
 | Notes | Visual only — does not affect workflow status |
 
-### Rule 3: Blocked Field Cleared → Remove Board Indicator
+### Rule 3: Blocked Field Cleared → Remove Board Indicator (retired)
 
 | Attribute | Value |
 |-----------|-------|
 | Trigger | Blocked field cleared (set to null) |
 | Condition | None |
 | Action | Remove label `blocked` from ticket |
-| Notes | ScrumMaster webhook fires separately and re-dispatches the assigned agent |
+| Notes | `core` interprets the same change separately, and the assigned agent is re-dispatched from the canonical work item |
 
-> Note: Agent field assignment on new tickets is handled by ScrumMaster, not a Jira automation rule.
+> Note: the Agent field is not maintained by a Jira automation rule. `core`'s
+> outbound writer writes it back to Jira, for a project in Jira mode
+> (Canonical Delivery State REQ-09).
 
 ---
 
 ## Webhook Configuration
 
-One instance-level webhook. ScrumMaster routes all events internally — no per-project webhook registration needed.
+One instance-level webhook, registered on Django/`core` — no per-project
+webhook registration needed. Registration is not a manual step and is not a
+shell script's job either: `init-project.sh --connect-jira` runs `core`'s own
+`ensure_jira_webhook` management command, which is idempotent.
 
 ### Webhook Endpoint
 
 ```
-http://{hq-droplet-ip}:9000/webhook/jira
+${HQ_URL}/webhooks/jira?secret=${WEBHOOK_SECRET}
 ```
 
-All inbound requests must include the shared secret as a header: `X-Webhook-Secret: {value}`. Requests missing or mismatching the secret are rejected with 401.
+`core` compares the `secret` query parameter against its own
+`WEBHOOK_SECRET`; a missing or mismatched value is rejected. The operator sets
+`WEBHOOK_SECRET` once in the platform `.env` and `derive-env.sh` carries it
+into `services/core/.env`.
 
 ### Registered Events
 
-| Event | Jira `webhookEvent` value | ScrumMaster Handler |
+Four, all set by `ensure_jira_webhook` (`WEBHOOK_EVENTS`):
+
+| Event | Jira `webhookEvent` value | What `core` does with it |
 |-------|--------------------------|---------------------|
-| Story created | `jira:issue_created` | Validate schema fields; assign to Refinement Agent; dispatch or block |
-| Status → Shovel Ready | `jira:issue_updated` (status change) | Fetch context; build prompt; dispatch dev agent; transition to In Progress |
-| Blocked field cleared | `jira:issue_updated` (field change) | Fetch context + BLOCKED marker; build prompt; re-dispatch agent |
+| Story created | `jira:issue_created` | Interprets the payload and records the canonical work item |
+| Any issue update — status change, Blocked field cleared, Release transition | `jira:issue_updated` | Interprets the change and applies it to the canonical work item |
+| Comment created | `comment_created` | Records the comment on the canonical work item; a comment `core` posted comes back with its author. Comment edits (`comment_updated`) are deliberately not subscribed |
+| Issue link created | `issuelink_created` | Reconciles a Blocks link a person makes in Jira into the canonical `blocks` link (Sub-task link mirror); without it such a link reaches `core` only on the dependent's next `jira:issue_updated` |
+
+`connect_jira` refuses to connect a project unless a webhook registered at
+`core`'s own path carries all four, so a webhook registered by hand must
+subscribe to every one.
+
+`core` applies a Jira webhook only to a project in Jira mode, and never applies
+a Jira change to a work item of a local-mode project; for a local-mode project
+each delivered event is recorded and nothing is applied.
 
 ### Event Filtering
 
-ScrumMaster discards events that do not match a handled trigger. Unhandled events are logged and dropped — no error response. Webhook JQL filter can be left empty; ScrumMaster handles filtering internally.
+`core` records an event it has no handler for and applies nothing — no error
+response. The webhook's JQL filter can be left empty; filtering happens in
+`core`.
 
 ---
 
@@ -253,8 +328,9 @@ The Agent field is a human-visible projection of the canonical agent catalog
 (`services/scrummaster/config/agents.json`) — not an independent source of truth. Its
 options are generated and reconciled from that catalog by
 `scripts/create-jira-fields.sh` (initial provisioning) and
-`scripts/reconcile-agent-field.sh` (ongoing sync as the catalog changes), and
-audited for drift by ScrumMaster at startup and every 24 hours. Jira is never
+`scripts/reconcile-agent-field.sh` (ongoing sync as the catalog changes).
+Nothing audits the Jira options for drift against the catalog — running the
+reconcile script after a catalog change is what keeps them in step. Jira is never
 consulted to decide whether an agent identity is valid for runtime
 assignment — that is decided solely by the catalog plus each project's
 `services/scrummaster/config/projects.json` entry.

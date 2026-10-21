@@ -13,7 +13,7 @@ test('parseCatalog accepts a well-formed catalog', () => {
       {
         id: 'backend-agent',
         displayName: 'Backend Agent',
-        definitionPath: '/agent-docs/backend-agent.md',
+        definitionPath: '/agent-docs/agents/backend-agent.md',
         routing: { channelSuffix: 'backend' },
         agentCard: { name: 'Backend Agent', description: 'Implements APIs.' },
       },
@@ -109,9 +109,6 @@ test('load() reads the fixture catalog and project config; getEffectiveAgents/ge
   const freshRegistry = require('../src/registry');
 
   freshRegistry.load();
-
-  assert.deepEqual(freshRegistry.getAllAgentIds(), ['refinement-agent', 'backend-agent', 'frontend-agent']);
-  assert.deepEqual(freshRegistry.getRetiredAgentIds(), ['qa-agent']);
 
   const effective = freshRegistry.getEffectiveAgents('test-project');
   assert.deepEqual(effective.map(a => a.id), ['refinement-agent', 'backend-agent']);

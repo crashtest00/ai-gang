@@ -30,12 +30,15 @@ const PLATFORM_ENV = [
   'AIGANG_ADMIN_PASSWORD=a-test-only-password',
   'PGPASSWORD=a-test-only-pg-password',
   'DJANGO_SECRET_KEY=a-test-only-django-key',
+  'MEMORY_PGPASSWORD=a-test-only-memory-pg-password',
+  'MEMORY_DJANGO_SECRET_KEY=a-test-only-memory-django-key',
 ].join('\n') + '\n';
 
 function makeRoot({ platformEnv = PLATFORM_ENV, scrummasterEnv = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aigang-derive-env-'));
-  fs.mkdirSync(path.join(root, 'services', 'work-item-service'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'core'), { recursive: true });
   fs.mkdirSync(path.join(root, 'services', 'scrummaster'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'services', 'memory'), { recursive: true });
   fs.writeFileSync(path.join(root, '.env'), platformEnv);
   fs.copyFileSync(ENV_TEMPLATE, path.join(root, '.env.template'));
   fs.copyFileSync(REAL_SM_ENV_EXAMPLE, path.join(root, 'services', 'scrummaster', '.env.example'));
@@ -64,18 +67,18 @@ function parseEnvFile(file) {
   return out;
 }
 
-test("the work-item service's environment file carries its database, Redis and Django settings", () => {
+test("the core service's environment file carries its database, Redis and Django settings", () => {
   const root = makeRoot();
   const result = run(root);
   assert.equal(result.status, 0, result.stderr);
 
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGPASSWORD, 'a-test-only-pg-password');
   assert.equal(derived.DJANGO_SECRET_KEY, 'a-test-only-django-key');
   // Not set in the platform .env, so these come from the contract's defaults.
   assert.equal(derived.PGUSER, 'workitem');
   assert.equal(derived.PGDATABASE, 'workitem');
-  assert.equal(derived.PGHOST, 'workitem-postgres');
+  assert.equal(derived.PGHOST, 'core-postgres');
   assert.equal(derived.PGPORT, '5432');
   assert.equal(derived.REDIS_HOST, 'ai-gang-redis');
   assert.equal(derived.PORT, '9100');
@@ -84,7 +87,7 @@ test("the work-item service's environment file carries its database, Redis and D
 test('an operator override in the platform .env wins over the contract default', () => {
   const root = makeRoot({ platformEnv: PLATFORM_ENV + 'PGUSER=chosen-role\nPGDATABASE=chosen-db\n' });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGUSER, 'chosen-role');
   assert.equal(derived.PGDATABASE, 'chosen-db');
 });
@@ -92,7 +95,7 @@ test('an operator override in the platform .env wins over the contract default',
 // BUGFIXES.md BF-01 Pass 1 audit row 1: workitems/jira_interpret.py and
 // workitems/webhook_consumer.py read these JIRA_*_FIELD_ID variables via
 // os.environ, but the documented startup flow never carried them from the
-// platform .env into the work-item service's own .env — they always saw
+// platform .env into the core service's own .env — they always saw
 // unconfigured ids. This is the full list jira_interpret.py and
 // webhook_consumer.py read (Story fields, the five BF-01 Release fields,
 // and the Agent/Blocked fields).
@@ -104,12 +107,12 @@ const ALL_JIRA_FIELD_ID_VARS = [
   'JIRA_BUILD_IDENTIFIER_FIELD_ID', 'JIRA_PREVIEW_URL_FIELD_ID',
 ];
 
-test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item service .env, and an unset one is left out entirely', () => {
+test('a JIRA_*_FIELD_ID set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
   const root = makeRoot({
     platformEnv: PLATFORM_ENV + 'JIRA_BEHAVIOR_FIELD_ID=customfield_10050\nJIRA_TARGET_PROJECT_FIELD_ID=customfield_10060\n',
   });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.JIRA_BEHAVIOR_FIELD_ID, 'customfield_10050');
   assert.equal(derived.JIRA_TARGET_PROJECT_FIELD_ID, 'customfield_10060');
   // Not set in the platform .env — a local-mode-only deployment must see
@@ -120,14 +123,62 @@ test('a JIRA_*_FIELD_ID set in the platform .env is carried into the work-item s
   }
 });
 
-test('every JIRA_*_FIELD_ID the work-item service reads is wired through when the platform .env sets it', () => {
+test('every JIRA_*_FIELD_ID the core service reads is wired through when the platform .env sets it', () => {
   const extra = ALL_JIRA_FIELD_ID_VARS.map((name, i) => `${name}=customfield_${10000 + i}`).join('\n') + '\n';
   const root = makeRoot({ platformEnv: PLATFORM_ENV + extra });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   ALL_JIRA_FIELD_ID_VARS.forEach((name, i) => {
-    assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the work-item service .env`);
+    assert.equal(derived[name], `customfield_${10000 + i}`, `${name} was not carried into the core service .env`);
   });
+});
+
+test('WEBHOOK_SECRET set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
+  const withSecret = makeRoot({ platformEnv: PLATFORM_ENV + 'WEBHOOK_SECRET=a-test-only-webhook-secret\n' });
+  assert.equal(run(withSecret).status, 0);
+  const derivedWithSecret = parseEnvFile(path.join(withSecret, 'services', 'core', '.env'));
+  assert.equal(derivedWithSecret.WEBHOOK_SECRET, 'a-test-only-webhook-secret');
+
+  const withoutSecret = makeRoot();
+  assert.equal(run(withoutSecret).status, 0);
+  const derivedWithoutSecret = parseEnvFile(path.join(withoutSecret, 'services', 'core', '.env'));
+  assert.equal('WEBHOOK_SECRET' in derivedWithoutSecret, false, 'WEBHOOK_SECRET should not appear when unset in the platform .env');
+});
+
+// V5.1 REQ-06: services/core/workitems/jira_client.py authenticates from the
+// platform .env's own JIRA_URL/JIRA_EMAIL/JIRA_TOKEN (its REQUIRED_ENV), so
+// derivation has to carry them the same way it carries the field ids.
+// startup-env.test.js reads the JIRA_CREDENTIAL_VARS array literal out of the
+// script, which proves the set is declared; this runs the script and proves the
+// set is delivered.
+const ALL_JIRA_CREDENTIAL_VARS = ['JIRA_URL', 'JIRA_EMAIL', 'JIRA_TOKEN'];
+
+test('a Jira credential set in the platform .env is carried into the core service .env, and an unset one is left out entirely', () => {
+  const values = {
+    JIRA_URL: 'https://jira.example.invalid',
+    JIRA_EMAIL: 'operator@example.invalid',
+    JIRA_TOKEN: 'a-test-only-jira-token',
+  };
+  const withCredentials = makeRoot({
+    platformEnv: PLATFORM_ENV + ALL_JIRA_CREDENTIAL_VARS.map((name) => `${name}=${values[name]}`).join('\n') + '\n',
+  });
+  const result = run(withCredentials);
+  assert.equal(result.status, 0, result.stderr);
+  const derivedWith = parseEnvFile(path.join(withCredentials, 'services', 'core', '.env'));
+  for (const name of ALL_JIRA_CREDENTIAL_VARS) {
+    assert.equal(derivedWith[name], values[name], `${name} was not carried into the core service .env`);
+  }
+
+  // Not set in the platform .env — a local-mode-only deployment must see no
+  // trace of them, not even an empty assignment, because jira_client.py's
+  // REQUIRED_ENV check treats an empty value and an absent one alike and the
+  // derived file is what distinguishes a configured deployment from a bare one.
+  const withoutCredentials = makeRoot();
+  assert.equal(run(withoutCredentials).status, 0);
+  const derivedWithout = parseEnvFile(path.join(withoutCredentials, 'services', 'core', '.env'));
+  for (const name of ALL_JIRA_CREDENTIAL_VARS) {
+    assert.equal(name in derivedWithout, false, `${name} should not appear when unset in the platform .env`);
+  }
 });
 
 test("ScrumMaster's environment file gets AI_GANG_HOME set to the checkout's own path", () => {
@@ -143,12 +194,17 @@ test("an absent ScrumMaster .env is seeded from the service's own .env.example",
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   const text = fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8');
-  assert.match(text, /JIRA_AGENT_FIELD_ID=/, 'the example file\'s own keys should still be there');
+  // v5.1 REQ-06 removed ScrumMaster's tracker variables from this template, so
+  // the seeded file is checked against keys it still declares.
+  assert.match(text, /PROJECTS_BASE_PATH=/, 'the example file\'s own keys should still be there');
+  assert.match(text, /STREAM_RETENTION_DAYS=/);
 });
 
 test('an existing ScrumMaster .env keeps every value this flow does not own', () => {
   // scripts/create-jira-fields.sh and scripts/init-project.sh both write
-  // into this file. Derivation must never be the thing that loses them.
+  // into this file — v5.1 REQ-06 removed the tracker variables from the
+  // template, not from those scripts. Derivation must never be the thing that
+  // loses a value another writer put there.
   const existing = [
     'JIRA_AGENT_FIELD_ID=customfield_10099',
     'WEBHOOK_SECRET=an-existing-secret',
@@ -168,12 +224,12 @@ test('running twice leaves exactly the same files, with no duplicated assignment
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   const first = {
-    wis: fs.readFileSync(path.join(root, 'services', 'work-item-service', '.env'), 'utf8'),
+    wis: fs.readFileSync(path.join(root, 'services', 'core', '.env'), 'utf8'),
     sm: fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8'),
   };
   assert.equal(run(root).status, 0);
   const second = {
-    wis: fs.readFileSync(path.join(root, 'services', 'work-item-service', '.env'), 'utf8'),
+    wis: fs.readFileSync(path.join(root, 'services', 'core', '.env'), 'utf8'),
     sm: fs.readFileSync(path.join(root, 'services', 'scrummaster', '.env'), 'utf8'),
   };
   assert.equal(second.wis, first.wis);
@@ -186,7 +242,7 @@ test('both derived files are written owner-readable only', () => {
   const root = makeRoot();
   assert.equal(run(root).status, 0);
   for (const file of [
-    path.join(root, 'services', 'work-item-service', '.env'),
+    path.join(root, 'services', 'core', '.env'),
     path.join(root, 'services', 'scrummaster', '.env'),
   ]) {
     assert.equal(fs.statSync(file).mode & 0o077, 0, `${file} must not be group- or world-readable`);
@@ -194,10 +250,16 @@ test('both derived files are written owner-readable only', () => {
 });
 
 test('no secret reaches the step output', () => {
-  const root = makeRoot();
+  // JIRA_TOKEN is added to this root's platform .env rather than to
+  // PLATFORM_ENV, which the Jira-credential test above needs to stay free of
+  // them. It belongs here because derivation carries it like any other
+  // credential, so it is leakable like any other, and it is the one this stage
+  // introduced (V5.1 audit row 54).
+  const root = makeRoot({ platformEnv: PLATFORM_ENV + 'JIRA_TOKEN=a-test-only-jira-token\n' });
   const result = run(root);
   const output = `${result.stdout}${result.stderr}`;
-  for (const secret of ['a-test-only-pg-password', 'a-test-only-django-key', 'github_pat_test_not_a_real_token']) {
+  for (const secret of ['a-test-only-pg-password', 'a-test-only-django-key', 'github_pat_test_not_a_real_token',
+    'a-test-only-jira-token']) {
     assert.equal(output.includes(secret), false);
   }
 });
@@ -205,6 +267,6 @@ test('no secret reaches the step output', () => {
 test('a quoted value in the platform .env is unquoted the way Compose unquotes it', () => {
   const root = makeRoot({ platformEnv: PLATFORM_ENV.replace('PGPASSWORD=a-test-only-pg-password', 'PGPASSWORD="a quoted password"') });
   assert.equal(run(root).status, 0);
-  const derived = parseEnvFile(path.join(root, 'services', 'work-item-service', '.env'));
+  const derived = parseEnvFile(path.join(root, 'services', 'core', '.env'));
   assert.equal(derived.PGPASSWORD, 'a quoted password');
 });

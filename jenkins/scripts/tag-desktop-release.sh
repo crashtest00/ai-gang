@@ -9,7 +9,7 @@
 # Unlike trigger-native-build.sh, this step is REQUIRED production behavior
 # for desktop projects, not supplementary validation — `set -e` lets a real
 # git/gh failure fail the production-promote job so it surfaces through the
-# existing post-failure Jira comment, instead of silently skipping the
+# existing post-failure comment, instead of silently skipping the
 # release tag.
 #
 # Requires: git configured to push to origin, run from inside the project's

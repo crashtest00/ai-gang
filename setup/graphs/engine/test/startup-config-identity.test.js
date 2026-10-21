@@ -21,7 +21,8 @@ const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..');
 const IDENTITY = path.join(REPO_ROOT, 'scripts', 'startup', 'config-identity.sh');
 
 const BASE = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  authMethod: 'api-key',
   project: { name: 'acceptance-project', type: 'web', stack: 'node-express' },
   repository: { url: 'https://github.com/an-org/a-repo.git' },
 };
@@ -114,7 +115,7 @@ test('record refuses a changed configuration as firmly as check does', () => {
 });
 
 test('an invalid configuration fails validation here, before anything is recorded', () => {
-  const fixture = makeFixture({ schemaVersion: 1, project: { name: 'x', type: 'web', stack: 'nope' } });
+  const fixture = makeFixture({ schemaVersion: 2, authMethod: 'api-key', project: { name: 'x', type: 'web', stack: 'nope' } });
   const result = run(fixture, 'record');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /not a supported stack profile|missing required field "repository"/);

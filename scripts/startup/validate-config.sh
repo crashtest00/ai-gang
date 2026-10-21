@@ -7,7 +7,7 @@
 #
 # On success the normalized decisions are printed as plain KEY=value
 # lines, for a caller to read:
-#   PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK, REPOSITORY_URL
+#   PROJECT_NAME, PROJECT_TYPE, PROJECT_STACK, REPOSITORY_URL, AUTH_METHOD
 #
 # The validation itself is setup/graphs/engine/lib/config/ — the same
 # shared path scripts/init-project.sh --config uses, with the platform

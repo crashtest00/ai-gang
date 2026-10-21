@@ -12,7 +12,6 @@ const { deriveAgentCard } = require('./a2a/agentCard');
 
 let catalog = null;   // { byId: Map<string, agent>, ids: string[] }
 let projects = null;  // Map<string, { name, jiraProjectKey, agents: string[] }>
-let agentCardsById = null; // Map<string, AgentCard> — derived from catalog.byId
 
 function catalogPath() {
   return process.env.AGENTS_CATALOG_PATH || '/app/config/agents.json';
@@ -94,7 +93,6 @@ function parseCatalog(raw, path) {
   return {
     byId,
     ids: Array.from(byId.keys()),
-    retiredIds: retiredAgents.map(r => r.id),
   };
 }
 
@@ -154,10 +152,10 @@ function load() {
 
   // Fail fast: every registered agent must produce a valid AgentCard. A
   // catalog entry that can't derive one is a configuration error, not a
-  // runtime-recoverable condition.
-  agentCardsById = new Map();
+  // runtime-recoverable condition. Nothing reads the derived cards, so they
+  // are not retained — deriving each one is the whole point.
   for (const id of catalog.ids) {
-    agentCardsById.set(id, deriveAgentCard(catalog.byId.get(id)));
+    deriveAgentCard(catalog.byId.get(id));
   }
 }
 
@@ -166,29 +164,6 @@ function load() {
 function getAgent(id) {
   load();
   return catalog.byId.get(id) || null;
-}
-
-// Look up the derived AgentCard for a registered agent, or null if unknown.
-function getAgentCard(id) {
-  load();
-  return agentCardsById.get(id) || null;
-}
-
-// All registered AgentCards, keyed by catalog agent id.
-function listAgentCards() {
-  load();
-  return Object.fromEntries(agentCardsById);
-}
-
-// All registered agent ids, in catalog order.
-function getAllAgentIds() {
-  load();
-  return catalog.ids.slice();
-}
-
-function getRetiredAgentIds() {
-  load();
-  return catalog.retiredIds.slice();
 }
 
 function getProjectNames() {
@@ -220,14 +195,10 @@ function getEffectiveAgents(projectName) {
 // already bound to (a Jira issue's own project, or the stream a consumer is
 // reading), not from message content.
 const GATEWAY_GROUP = 'scrummaster';
-// This service's own consumer group on the internal work-item service's
-// outbound event stream (any interested subscriber creates its own group —
-// see services/work-item-service/workitems/stream_topology.py's module comment).
-const JIRA_CATCHUP_GROUP = 'jira-catchup';
-// ScrumMaster's dispatch-trigger consumer
-// group on that SAME outbound event stream. A second, independent
-// subscriber (Streams' normal fan-out — every interested consumer gets its
-// own group), not a replacement for JIRA_CATCHUP_GROUP.
+// ScrumMaster's dispatch-trigger consumer group on the core service's
+// outbound event stream — this service's only group there, one among the
+// groups any interested subscriber creates for itself (see
+// services/core/workitems/stream_topology.py's module comment).
 const DISPATCH_GROUP = 'dispatch';
 
 function normalizeProjectName(name) {
@@ -248,8 +219,8 @@ function gatewayStreamName(projectName) {
   return `aigang:gateway:${normalizeProjectName(projectName)}`;
 }
 
-// Internal work-item service -> ScrumMaster (outbound events): matches
-// services/work-item-service/workitems/stream_topology.py's event_stream_name()
+// Core service -> ScrumMaster (outbound events): matches
+// services/core/workitems/stream_topology.py's event_stream_name()
 // exactly — the shared naming contract both sides agree on (same reasoning
 // as commandStreamName in canonicalWorkItems.js).
 function workItemEventStreamName(projectName) {
@@ -263,10 +234,6 @@ module.exports = {
   parseCatalog,
   parseProjects,
   getAgent,
-  getAgentCard,
-  listAgentCards,
-  getAllAgentIds,
-  getRetiredAgentIds,
   getProjectNames,
   getProject,
   getEffectiveAgents,
@@ -276,6 +243,5 @@ module.exports = {
   gatewayStreamName,
   workItemEventStreamName,
   GATEWAY_GROUP,
-  JIRA_CATCHUP_GROUP,
   DISPATCH_GROUP,
 };

@@ -1,0 +1,469 @@
+'use strict';
+
+/**
+ * REQ-05 — valid input is a strict improvement, not a behavior change
+ * (V5.0 Deterministic Gateway Message Tooling).
+ *
+ * For each operation type, the same well-formed submission is made twice
+ * against the same fixture and the same real gateway consumer: once the legacy
+ * way, a hand-authored `{ state, message, artifacts? }` payload published
+ * straight onto the gateway stream, and once through the new constructor,
+ * `setup/commons/tools/a2a-submit.js`, run as a real child process with the
+ * dispatch environment the subscriber exports. Both rounds are then compared on
+ * two things: the Streams entry that reached the gateway, and the gateway-side
+ * effect it produced — the canonical commands published to core, and the tasks
+ * dispatched.
+ *
+ * From v5.1 a handler has one half, not two: every projection of a submission is
+ * a canonical command — `transitionStatus`/`assign`/`appendComment`/
+ * `materializeDecomposition` — published to core in every mode (v5.1 REQ-04,
+ * REQ-05), so there is one outcome per case to compare rather than one per mode
+ * (V5.0 audit row 40 compared both). `canceled` and `rejected` stay in the case
+ * list: they are the two states whose canonical status differs from `failed`
+ * (`mapTerminalStateToStatus`), so leaving them out would leave the one place
+ * the three terminal states are not interchangeable uncompared.
+ *
+ * Only identifiers and timestamps are normalised away, because the constructor
+ * mints its own and the whole point of it is that no id crosses the agent.
+ * Nothing in gateway.js changes for this test: it drives the real
+ * startGatewaySubscriber over the same in-memory fake `core`
+ * gateway.integration.test.js installs.
+ *
+ * The two approved divergences (a `create_subtask` with no `description` and
+ * one with no `agentFieldValue`, both accepted by the gateway and both refused
+ * at construction — REQ-02's tightenings, READINESS_DECISIONS.md item 4) are
+ * excluded from this comparison by construction: the constructor cannot express
+ * either, and setup/commons/tools/a2a-submit.test.js asserts each is refused.
+ */
+
+const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { execFile } = require('node:child_process');
+const { test, before, after, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+process.env.AGENTS_CATALOG_PATH = path.join(__dirname, '..', 'config', 'agents.json');
+process.env.PROJECTS_CONFIG_PATH = path.join(__dirname, '..', 'config', 'projects.json');
+process.env.MEMORY_API_URL = ''; // no memory-api in this suite: dispatch records retrieval as skipped
+process.env.REDIS_HOST = process.env.REDIS_TEST_HOST || 'localhost';
+process.env.REDIS_PORT = process.env.REDIS_TEST_PORT || '16399';
+
+const registry = require('../src/registry');
+const streams = require('../src/streams');
+const canonicalWorkItems = require('../src/canonicalWorkItems');
+const taskStore = require('../src/a2a/taskStore');
+const { buildMessage, buildTask } = require('../src/a2a/parts');
+const { buildEnvelope, KIND, fromStreamFields } = require('../src/envelope');
+const gateway = require('../src/gateway');
+const redisModule = require('../src/redis');
+
+const PROJECT = 'hello-world';
+const TASK_ID = 'HW-1';
+const SEED_MESSAGE_ID = 'msg-seed-HW-1';
+const AGENT_SUFFIXES = ['backend', 'frontend', 'refinement', 'devops'];
+
+// The constructor, at its commons path, and the node_modules that resolve its
+// `redis` require — the commons is mounted into a container that installs it
+// globally, and here ScrumMaster's own copy stands in for that.
+const CONSTRUCTOR = path.join(__dirname, '..', '..', '..', 'setup', 'commons', 'tools', 'a2a-submit.js');
+const NODE_PATH = process.env.NODE_PATH || path.join(__dirname, '..', 'node_modules');
+
+let client;
+let dispatchDir;
+
+// The one projection the gateway makes of a submission: the canonical commands
+// it publishes to core.
+const fakeCanonical = {
+  commands: [],
+  // What `persistedStatus` reads back after a completion; only ever reported.
+  status: 'in-progress',
+};
+
+function resetFakeCanonical() {
+  fakeCanonical.commands = [];
+}
+
+function registerTask() {
+  const message = buildMessage({
+    messageId: SEED_MESSAGE_ID, taskId: TASK_ID, contextId: TASK_ID, role: 'client',
+    parts: [{ kind: 'text', text: 'seed dispatch' }],
+  });
+  taskStore.register(buildTask({
+    id: TASK_ID,
+    contextId: TASK_ID,
+    status: { state: 'submitted', timestamp: new Date().toISOString(), message },
+    metadata: {
+      jiraProjectKey: 'HW', projectName: PROJECT,
+      agentId: 'refinement-agent',
+    },
+  }));
+}
+
+before(async () => {
+  await redisModule.connect();
+  client = redisModule.getClient();
+
+  canonicalWorkItems.publishCommand = async (projectName, command) => {
+    fakeCanonical.commands.push({ projectName, ...command });
+  };
+  canonicalWorkItems.getWorkItem = async (id) => ({ id, status: fakeCanonical.status });
+
+  // The constructor keeps its chain in the `state/` directory beside the
+  // commons snapshot; each round gets a fresh one, so both rounds' submissions
+  // are a task's first.
+  dispatchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'req05-dispatch-'));
+});
+
+after(async () => {
+  await client.quit();
+  fs.rmSync(dispatchDir, { recursive: true, force: true });
+});
+
+beforeEach(async () => {
+  await client.flushDb();
+  resetFakeCanonical();
+  taskStore._reset();
+});
+
+// --- the two paths ---------------------------------------------------------
+
+async function publishLegacy(payload) {
+  const envelope = buildEnvelope({
+    kind: KIND.GATEWAY_OPERATION,
+    project: PROJECT,
+    taskId: payload.message.taskId,
+    contextId: payload.message.contextId,
+    payload,
+  });
+  await streams.publish(client, registry.gatewayStreamName(PROJECT), envelope);
+}
+
+function publishThroughConstructor(args) {
+  const stateDir = fs.mkdtempSync(path.join(dispatchDir, 'session-'));
+  const commonsDir = path.join(stateDir, 'commons');
+  fs.mkdirSync(commonsDir);
+  fs.mkdirSync(path.join(stateDir, 'state'));
+
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [CONSTRUCTOR, ...args],
+      {
+        env: {
+          ...process.env,
+          NODE_PATH,
+          PROJECT_NAME: PROJECT,
+          REDIS_HOST: process.env.REDIS_HOST,
+          REDIS_PORT: process.env.REDIS_PORT,
+          A2A_TASK_ID: TASK_ID,
+          A2A_CONTEXT_ID: TASK_ID,
+          A2A_LAST_MESSAGE_ID: SEED_MESSAGE_ID,
+          AIGANG_COMMONS_DIR: commonsDir,
+          // Durable A2A Message Record REQ-12: the constructor refuses without
+          // the harness session id, and the runner's environment may lack it.
+          CLAUDE_CODE_SESSION_ID: 'legacy-vs-tool-session',
+        },
+      },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(`a2a-submit.js failed: ${stderr || stdout}`));
+        else resolve();
+      }
+    );
+  });
+}
+
+// --- what is compared -----------------------------------------------------
+
+// The gateway stream entry, with everything an id or a clock normalised out.
+function normalizeEntry(envelope) {
+  const normalizeParts = parts => parts.map(part => (
+    part.kind === 'data'
+      ? { kind: 'data', data: Object.fromEntries(Object.entries(part.data).sort()) }
+      : part
+  ));
+  return {
+    kind: envelope.kind,
+    project: envelope.project,
+    taskId: envelope.taskId,
+    contextId: envelope.contextId,
+    payload: {
+      state: envelope.payload.state,
+      message: {
+        // `metadata` is left out: the constructor's message carries the
+        // harness session id there (Durable A2A Message Record REQ-12) and the
+        // legacy hand-authored one does not, as it carries no other id either.
+        topLevelKeys: Object.keys(envelope.payload.message).filter(key => key !== 'metadata').sort(),
+        kind: envelope.payload.message.kind,
+        role: envelope.payload.message.role,
+        taskId: envelope.payload.message.taskId,
+        contextId: envelope.payload.message.contextId,
+        chainedToTheDispatch: envelope.payload.message.referenceMessageId === SEED_MESSAGE_ID,
+        parts: normalizeParts(envelope.payload.message.parts),
+      },
+      artifacts: (envelope.payload.artifacts || []).map(artifact => ({
+        kind: artifact.kind,
+        name: artifact.name,
+        taskId: artifact.taskId,
+        hasArtifactId: typeof artifact.artifactId === 'string' && artifact.artifactId.length > 0,
+        parts: artifact.parts,
+      })),
+    },
+  };
+}
+
+// The canonical commands, with the two values that are fresh per round by
+// design normalised away: the envelope id the gateway stamps on a comment, and
+// the id it mints for a materialized subtask (a bare UUID, an AI-Gang-issued id
+// — the whole point being that no id crosses the agent on either path).
+function normalizeCommands() {
+  return fakeCanonical.commands.map(command => {
+    const out = { ...command };
+    if (typeof out.sourceMessageId === 'string') out.sourceMessageId = '<message-id>';
+    // A verdict names the A2A message it is about (Durable A2A Message Record
+    // REQ-04), whose id is fresh per round like the envelope id above.
+    if (out.command === 'recordA2AVerdict' && typeof out.messageId === 'string') out.messageId = '<message-id>';
+    if (out.message && Array.isArray(out.message.subtasks)) {
+      out.message = {
+        ...out.message,
+        subtasks: out.message.subtasks.map(subtask => ({
+          ...subtask,
+          id: typeof subtask.id === 'string' && subtask.id.length > 0 ? '<subtask-id>' : subtask.id,
+        })),
+      };
+    }
+    return out;
+  });
+}
+
+async function gatewaySideEffect() {
+  const dispatches = [];
+  for (const suffix of AGENT_SUFFIXES) {
+    const stream = registry.agentStreamName(PROJECT, suffix);
+    for (const entry of await client.xRange(stream, '-', '+')) {
+      const envelope = fromStreamFields(entry.message);
+      dispatches.push({
+        suffix, taskId: envelope.taskId, contextId: envelope.contextId, role: envelope.payload.role,
+      });
+    }
+  }
+  return {
+    canonicalCommands: normalizeCommands(),
+    dispatches: dispatches.sort((a, b) => `${a.suffix}${a.taskId}`.localeCompare(`${b.suffix}${b.taskId}`)),
+    taskState: taskStore.getTaskById(TASK_ID).state,
+    failedMessages: taskStore.failedMessageIds(TASK_ID).length,
+  };
+}
+
+async function waitFor(predicate, description, timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+// One round: seed the fixture, publish one submission the given way, let the
+// real gateway consumer apply it, and report both the entry and the effect.
+async function round(publish) {
+  await client.flushDb();
+  resetFakeCanonical();
+  taskStore._reset();
+  registerTask();
+
+  await publish();
+  const [entry] = await client.xRange(registry.gatewayStreamName(PROJECT), '-', '+');
+  assert.ok(entry, 'the submission should be on the gateway stream');
+
+  await gateway.startGatewaySubscriber();
+  try {
+    // Every projection is a canonical command, including create_subtask, which
+    // materializes the subtask in core and dispatches from its own ready event
+    // rather than here.
+    // Waits for a projection command: the `applied` verdict (REQ-04) is
+    // published before any of the projection.
+    await waitFor(
+      async () => fakeCanonical.commands.some(command => command.command !== 'recordA2AVerdict'),
+      'the gateway to apply the submission'
+    );
+    // Let any follow-on step (transition, dispatch) finish too.
+    await new Promise(r => setTimeout(r, 250));
+  } finally {
+    await gateway.stopGatewaySubscriber();
+  }
+
+  return { entry: normalizeEntry(fromStreamFields(entry.message)), effect: await gatewaySideEffect() };
+}
+
+// --- the comparisons, one per operation type -------------------------------
+
+// The legacy hand-authored message, exactly as the dispatch prompt's template
+// taught an agent to write one: a plain object with these six keys and nothing
+// else. Not `a2a/parts.js`'s buildMessage, which is ScrumMaster's own
+// server-side builder and adds a `timestamp` no agent ever typed.
+function message(parts) {
+  return {
+    kind: 'message',
+    messageId: `msg-legacy-${process.hrtime.bigint()}`,
+    taskId: TASK_ID,
+    contextId: TASK_ID,
+    role: 'agent',
+    referenceMessageId: SEED_MESSAGE_ID,
+    parts,
+  };
+}
+
+const CASES = [
+  {
+    name: 'comment, carrying data.reference',
+    legacy: {
+      state: 'working',
+      message: message([
+        { kind: 'text', text: 'migration written' },
+        { kind: 'data', data: { operation: 'comment', reference: { file: 'db/migrate.sql', function: 'up' } } },
+      ]),
+    },
+    args: ['comment', '--text', 'migration written',
+      '--reference-file', 'db/migrate.sql', '--reference-function', 'up'],
+  },
+  {
+    name: 'a plain progress note with no operation, carrying data.reference',
+    legacy: {
+      state: 'working',
+      message: message([
+        { kind: 'text', text: 'halfway through the port' },
+        { kind: 'data', data: { reference: { file: 'src/app.js' } } },
+      ]),
+    },
+    args: ['progress', '--text', 'halfway through the port', '--reference-file', 'src/app.js'],
+  },
+  {
+    name: 'a blocked submission carrying data.reference',
+    legacy: {
+      state: 'input-required',
+      message: message([
+        { kind: 'text', text: 'which column is canonical?' },
+        { kind: 'data', data: { reference: { file: 'models.py', function: 'WorkItem' } } },
+      ]),
+    },
+    args: ['input-required', '--text', 'which column is canonical?',
+      '--reference-file', 'models.py', '--reference-function', 'WorkItem'],
+  },
+  {
+    name: 'an auth-required submission',
+    legacy: {
+      state: 'auth-required',
+      message: message([{ kind: 'text', text: 'the deploy key is missing' }]),
+    },
+    args: ['auth-required', '--text', 'the deploy key is missing'],
+  },
+  {
+    name: 'reassign',
+    legacy: {
+      state: 'working',
+      message: message([
+        { kind: 'text', text: 'this is frontend work' },
+        { kind: 'data', data: { operation: 'reassign', agentFieldValue: 'frontend-agent' } },
+      ]),
+    },
+    args: ['reassign', '--text', 'this is frontend work', '--agent', 'frontend-agent'],
+  },
+  {
+    name: 'create_subtask, with both optional references',
+    legacy: {
+      state: 'working',
+      message: message([
+        { kind: 'text', text: 'splitting this out' },
+        {
+          kind: 'data',
+          data: {
+            operation: 'create_subtask',
+            summary: 'Backend Agent: add the endpoint',
+            description: 'Expose POST /signup and cover it.',
+            agentFieldValue: 'backend-agent',
+            specificationLink: { artifactId: 'ART-1', requirementId: 'REQ-03' },
+            artifactLinks: ['ART-2', 'ART-3'],
+          },
+        },
+      ]),
+    },
+    args: ['create-subtask', '--text', 'splitting this out',
+      '--summary', 'Backend Agent: add the endpoint',
+      '--description', 'Expose POST /signup and cover it.',
+      '--agent', 'backend-agent',
+      '--specification-artifact', 'ART-1', '--specification-requirement', 'REQ-03',
+      '--artifact-link', 'ART-2', '--artifact-link', 'ART-3'],
+  },
+  {
+    name: 'completed with a pull-request artifact',
+    legacy: {
+      state: 'completed',
+      message: message([{ kind: 'text', text: 'PR is open' }]),
+      artifacts: [{
+        kind: 'artifact',
+        artifactId: 'artifact-legacy-1',
+        taskId: TASK_ID,
+        name: 'pull-request',
+        parts: [
+          { kind: 'file', file: { name: 'pull-request', mimeType: 'text/uri-list', uri: 'https://example.test/pull/9' } },
+          { kind: 'text', text: 'PR is open' },
+        ],
+      }],
+    },
+    args: ['completed', '--text', 'PR is open', '--pull-request', 'https://example.test/pull/9'],
+  },
+  {
+    name: 'completed with no artifact',
+    legacy: {
+      state: 'completed',
+      message: message([{ kind: 'text', text: 'all done, nothing to review' }]),
+    },
+    args: ['completed', '--text', 'all done, nothing to review'],
+  },
+  {
+    name: 'a terminal failure',
+    legacy: {
+      state: 'failed',
+      message: message([{ kind: 'text', text: 'the toolchain is missing' }]),
+    },
+    args: ['failed', '--text', 'the toolchain is missing'],
+  },
+  {
+    // canceled and rejected are the two states mapTerminalStateToStatus does
+    // not map to 'failed', so they are the only terminal states whose canonical
+    // projection differs from the one above.
+    name: 'a canceled task',
+    legacy: {
+      state: 'canceled',
+      message: message([{ kind: 'text', text: 'superseded by HW-9' }]),
+    },
+    args: ['canceled', '--text', 'superseded by HW-9'],
+  },
+  {
+    name: 'a rejected task',
+    legacy: {
+      state: 'rejected',
+      message: message([{ kind: 'text', text: 'this is not work this role should do' }]),
+    },
+    args: ['rejected', '--text', 'this is not work this role should do'],
+  },
+];
+
+for (const testCase of CASES) {
+  test(`REQ-05: ${testCase.name} — the legacy path and the constructor produce the same entry and the same outcome`, async () => {
+    const legacy = await round(() => publishLegacy(testCase.legacy));
+    const tool = await round(() => publishThroughConstructor(testCase.args));
+
+    assert.deepEqual(tool.entry, legacy.entry, 'the Streams entry differs');
+    assert.deepEqual(tool.effect, legacy.effect, 'the gateway-side outcome differs');
+    assert.equal(tool.effect.failedMessages, 0, 'neither path may record a failed message');
+    assert.equal(tool.entry.payload.message.chainedToTheDispatch, true,
+      'the constructor chains its first submission to the dispatch message, with no id given to it');
+
+    // The comparison is only worth anything if the submission really reached a
+    // handler: two empty command lists would otherwise compare equal and pass.
+    assert.ok(tool.effect.canonicalCommands.length > 0,
+      'every submission must project as at least one canonical command');
+  });
+}

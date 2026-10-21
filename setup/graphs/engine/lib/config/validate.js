@@ -10,7 +10,12 @@ const {
   listSupportedStacks,
 } = require('./catalog');
 
-const SUPPORTED_SCHEMA_VERSION = 1;
+const SUPPORTED_SCHEMA_VERSION = 2;
+
+// How the Claude Code CLI authenticates: a Claude Console API key, or the
+// long-lived OAuth token `claude setup-token` mints. The credential each
+// one requires is declared by scripts/startup/env-contract.sh, not here.
+const AUTH_METHODS = ['api-key', 'oauth-token'];
 
 // Mirrors scripts/init-project.sh's own interactive-flow project-name
 // check (`grep -qE '^[a-z][a-z0-9-]+$'`) so a config-driven name is held to
@@ -18,7 +23,7 @@ const SUPPORTED_SCHEMA_VERSION = 1;
 // second, possibly-looser one.
 const PROJECT_NAME_PATTERN = /^[a-z][a-z0-9-]+$/;
 
-const TOP_LEVEL_FIELDS = new Set(['schemaVersion', 'project', 'repository']);
+const TOP_LEVEL_FIELDS = new Set(['schemaVersion', 'authMethod', 'project', 'repository']);
 const PROJECT_FIELDS = new Set(['name', 'type', 'stack']);
 const REPOSITORY_FIELDS = new Set(['url']);
 
@@ -88,7 +93,8 @@ let templatePlaceholderCache = null;
 
 /**
  * { 'project.name': '<template value>', ... } for every string-valued
- * field of the shipped template's `project` and `repository` objects.
+ * field of the shipped template's `project` and `repository` objects, and
+ * for its top-level `authMethod`.
  * Throws if the template is missing or unreadable — that is a broken
  * checkout, not an operator mistake, and the platform validator turns it
  * into its own diagnostic.
@@ -104,6 +110,7 @@ function loadPlatformTemplatePlaceholders() {
       if (typeof value === 'string') placeholders.set(`${objectName}.${key}`, value);
     }
   }
+  if (typeof doc.authMethod === 'string') placeholders.set('authMethod', doc.authMethod);
   templatePlaceholderCache = placeholders;
   return placeholders;
 }
@@ -122,6 +129,9 @@ function placeholderGuidance(fieldPath, doc) {
     }
     const pairs = listSupportedTargets().map((t) => `${t}: ${listSupportedStacks(t).join(', ')}`);
     return ` (supported stack profiles — ${pairs.join('; ')})`;
+  }
+  if (fieldPath === 'authMethod') {
+    return ` (supported authentication methods: ${AUTH_METHODS.join(', ')})`;
   }
   if (fieldPath === 'repository.url') {
     return ' (the HTTPS URL of the empty GitHub repository created for this project)';
@@ -235,6 +245,19 @@ function validateText(text, { platform } = { platform: false }) {
     );
   }
 
+  // `authMethod` is required only by the platform configuration, the same
+  // rule `repository` follows below: the method is platform wide, so a
+  // project configuration may carry it or leave it out. Its value is held to
+  // the two supported methods after the placeholder scan, so the unedited
+  // template is told to fill the field in rather than that it is unsupported.
+  if (doc.authMethod === undefined) {
+    if (platform) {
+      errors.push('missing required field "authMethod"');
+    }
+  } else if (typeof doc.authMethod !== 'string' || doc.authMethod.length === 0) {
+    errors.push(`"authMethod" must be a nonempty string (got ${JSON.stringify(doc.authMethod)})`);
+  }
+
   if (doc.project === undefined) {
     errors.push('missing required field "project"');
   } else if (doc.project === null || typeof doc.project !== 'object' || Array.isArray(doc.project)) {
@@ -298,9 +321,15 @@ function validateText(text, { platform } = { platform: false }) {
     }
     for (const [fieldPath, placeholderValue] of placeholders) {
       const [objectName, key] = fieldPath.split('.');
-      const container = doc[objectName];
-      if (!container || typeof container !== 'object') continue;
-      if (container[key] === placeholderValue) {
+      let current;
+      if (key === undefined) {
+        current = doc[objectName];
+      } else {
+        const container = doc[objectName];
+        if (!container || typeof container !== 'object') continue;
+        current = container[key];
+      }
+      if (current === placeholderValue) {
         errors.push(
           `"${fieldPath}" is still at its ${PLATFORM_TEMPLATE_FILENAME} placeholder ` +
             `${JSON.stringify(placeholderValue)} — fill it in${placeholderGuidance(fieldPath, doc)}`
@@ -313,6 +342,12 @@ function validateText(text, { platform } = { platform: false }) {
   }
 
   const { name, type, stack } = doc.project;
+
+  if (doc.authMethod !== undefined && !AUTH_METHODS.includes(doc.authMethod)) {
+    errors.push(
+      `"authMethod" "${doc.authMethod}" is not a supported authentication method (supported: ${AUTH_METHODS.join(', ')})`
+    );
+  }
 
   if (doc.repository !== undefined && !URL_SAFE_PATTERN.test(doc.repository.url)) {
     errors.push(
@@ -344,6 +379,9 @@ function validateText(text, { platform } = { platform: false }) {
   }
 
   const decisions = { name, type, stack };
+  if (doc.authMethod !== undefined) {
+    decisions.authMethod = doc.authMethod;
+  }
   if (doc.repository !== undefined) {
     decisions.repositoryUrl = doc.repository.url;
   }

@@ -26,7 +26,10 @@ CMD="${SSH_ORIGINAL_COMMAND:-}"
 
 PROJECT_RE='^[a-z][a-z0-9-]{1,40}$'
 SHA_RE='^[0-9a-f]{7,40}$'
-ISSUE_KEY_RE='^[A-Z][A-Z0-9]{1,9}-[0-9]+$'
+# The canonical work-item id — a UUID, in every mode (V5.2 Canonical
+# Delivery State REQ-08). Replaces the Jira-key-shaped pattern this used to
+# validate; no tracker key reaches this script in either mode now.
+WORK_ITEM_ID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
 # shellcheck disable=SC2206
 ARGS=($CMD)
@@ -39,20 +42,20 @@ case "$OP" in
     exec "$DEPLOY_DIR/deploy.sh" "$PROJECT" "$SHA"
     ;;
   preview-deploy)
-    PROJECT="${ARGS[1]:-}"; SHA="${ARGS[2]:-}"; ISSUE_KEY="${ARGS[3]:-}"
-    [[ "$PROJECT" =~ $PROJECT_RE && "$SHA" =~ $SHA_RE && "$ISSUE_KEY" =~ $ISSUE_KEY_RE ]] \
+    PROJECT="${ARGS[1]:-}"; SHA="${ARGS[2]:-}"; WORK_ITEM_ID="${ARGS[3]:-}"
+    [[ "$PROJECT" =~ $PROJECT_RE && "$SHA" =~ $SHA_RE && "$WORK_ITEM_ID" =~ $WORK_ITEM_ID_RE ]] \
       || { echo "Refused: bad arguments" >&2; exit 1; }
-    exec "$DEPLOY_DIR/preview-deploy.sh" "$PROJECT" "$SHA" "$ISSUE_KEY"
+    exec "$DEPLOY_DIR/preview-deploy.sh" "$PROJECT" "$SHA" "$WORK_ITEM_ID"
     ;;
   preview-teardown)
     PROJECT="${ARGS[1]:-}"; SHA="${ARGS[2]:-}"
     [[ "$PROJECT" =~ $PROJECT_RE && "$SHA" =~ $SHA_RE ]] || { echo "Refused: bad arguments" >&2; exit 1; }
     exec "$DEPLOY_DIR/preview-teardown.sh" "$PROJECT" "$SHA"
     ;;
-  preview-teardown-by-issue)
-    PROJECT="${ARGS[1]:-}"; ISSUE_KEY="${ARGS[2]:-}"
-    [[ "$PROJECT" =~ $PROJECT_RE && "$ISSUE_KEY" =~ $ISSUE_KEY_RE ]] || { echo "Refused: bad arguments" >&2; exit 1; }
-    exec "$DEPLOY_DIR/preview-teardown-by-issue.sh" "$PROJECT" "$ISSUE_KEY"
+  preview-teardown-by-work-item)
+    PROJECT="${ARGS[1]:-}"; WORK_ITEM_ID="${ARGS[2]:-}"
+    [[ "$PROJECT" =~ $PROJECT_RE && "$WORK_ITEM_ID" =~ $WORK_ITEM_ID_RE ]] || { echo "Refused: bad arguments" >&2; exit 1; }
+    exec "$DEPLOY_DIR/preview-teardown-by-work-item.sh" "$PROJECT" "$WORK_ITEM_ID"
     ;;
   *)
     echo "Refused: unknown operation '${OP}'" >&2

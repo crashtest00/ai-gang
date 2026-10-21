@@ -1,0 +1,2106 @@
+"""
+This service's internal work-item write path. Every
+function here is the ONLY place canonical state is mutated — sole
+owner of the datastore — every caller (Streams command consumer, Jira
+webhook consumer, admin UI) goes through this module, never the ORM
+directly.
+
+Direct, function-for-function port of the Node implementation's src/store.js
+onto Django's ORM + transaction.atomic(). Every mutating function:
+ 1. Opens one transaction (transaction.atomic()) covering the datastore
+    change, its WorkItemHistory row(s), and its OutboxEvent row(s), which
+    are therefore always atomic with the change itself.
+ 2. Asks write_gate.route() what to do with the write, BEFORE it opens that
+    transaction or takes a lock, and acts on the answer.
+ 3. Recomputes the parent rollup synchronously, in the same
+    transaction, when a status transition lands on a work item with a
+    non-null parent_id — in local mode. In Jira mode the rollup and the
+    dependent unblock are pushed to Jira instead and reach this store only
+    from Jira's webhook.
+
+**From v5.2 the write gate is a router** (canonical-delivery-state.md REQ-09,
+"The routing layer"). The four functions that used to call
+`write_gate.assert_gated_write_allowed(mode, origin)` after reading the
+project's mode themselves now call `write_gate.route(project, origin)`, which
+reads the mode for them and answers `record`, `push` or `refuse`:
+
+  record  today's atomic code, unchanged;
+  push    every validation this module runs in local mode apart from the
+          gate, then jira_writer.py makes the equivalent Jira write and
+          NOTHING is recorded — the change arrives later, as a Jira webhook;
+  refuse  WriteGateRejectedError, and nothing is written.
+
+So no function here reads a project's mode, and none branches a write on it:
+`append_comment` is the one comment path in every mode, `transition_status`,
+`assign_work_item` and `create_link` are the other three routing handlers
+(`materialize.materialize_decomposition` is the fifth), and the two derived
+writes — `_recompute_parent_rollup` and `_unblock_dependents` — call `route`
+themselves with origin ROLLUP rather than going through `transition_status`.
+`create_work_item` is deliberately NOT routed: a Jira-mode work item is
+created in Jira, so it refuses every origin but JIRA_WEBHOOK, `push`
+included.
+
+Catalog-backed assignment validation is reused via workitems/assignment.py
+— a Python reimplementation of services/scrummaster/src/assignment.js reading the
+SAME on-disk catalog, not a require() (impossible cross-language) and not
+a runtime HTTP call — see assignment.py/registry.py's own module comments
+for the full tradeoff.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+from django.db import IntegrityError, models, transaction
+from django.utils import timezone
+
+from artifacts.models import Artifact
+
+from . import assignment, jira_writer, project_config, status_vocabulary, write_gate
+from .envelope import validate_envelope
+from .models import (
+    A2AArtifact, A2AConflict, A2AMessage, A2ATask, A2AVerdict,
+    OutboxEvent, WorkItem, WorkItemArtifact, WorkItemArtifactLink, WorkItemComment, WorkItemHistory, WorkItemLink,
+    WorkItemReleaseDetail, WorkItemSpecificationLink, WorkItemStoryDetail,
+)
+
+logger = logging.getLogger(__name__)
+
+# canonical-delivery-state.md REQ-02 — the association kinds
+# `models.py`'s WorkItemArtifact documents ("'commit', 'pull_request',
+# 'ci_build', 'deployment' at minimum"). The same column also carries
+# `canonical-work-model.md` REQ-19's durable per-item completion markers,
+# whose value is a STEP KEY rather than an artifact kind, so the resolver
+# below matches only these four and `record_completion_marker` refuses a
+# step key equal to any of them — no marker can ever answer the resolver.
+ASSOCIATION_KINDS = ('commit', 'pull_request', 'ci_build', 'deployment')
+
+
+class DependencyGateError(Exception):
+    code = 'DEPENDENCY_GATE_REJECTED'
+
+    def __init__(self, message: str, blockers: list):
+        super().__init__(message)
+        self.blockers = blockers
+
+
+class ValidationError(Exception):
+    code = 'VALIDATION_ERROR'
+
+
+class AssignmentRejectedError(Exception):
+    code = 'ASSIGNMENT_REJECTED'
+
+    def __init__(self, message: str, result: dict):
+        super().__init__(message)
+        self.result = result
+
+
+class UnresolvedArtifactError(Exception):
+    """work-items.md REQ-04 — a specification link or artifact link named
+    an artifact canonical id that does not resolve to a registered
+    artifact. The schema itself already refuses this (WorkItemSpecificationLink.artifact
+    / WorkItemArtifactLink.artifact are real foreign keys to artifacts.Artifact
+    with on_delete=PROTECT — see models.py), so this exception exists to
+    turn that into a clean, well-formed rejection at the application
+    boundary instead of a raw IntegrityError, the same way ValidationError
+    turns other rejections into a clean failure through the command path."""
+    code = 'UNRESOLVED_ARTIFACT'
+
+
+class ReleaseGateError(Exception):
+    """A release request — a local Release's `proposed` -> `in-progress`
+    (release-mode-parity.md REQ-09) — refused by the one release gate
+    (`release_request_refusal`, REQ-11). `outstanding` holds the ids of the
+    work items still awaiting acceptance on beta, empty when the cause is
+    something else."""
+    code = 'RELEASE_GATE_REJECTED'
+
+    def __init__(self, message: str, outstanding: list):
+        super().__init__(message)
+        self.outstanding = outstanding
+
+
+def write_outbox_event(*, project: Optional[str] = None, event_type: Optional[str] = None,
+                       work_item_id: Optional[str] = None, payload: Optional[dict] = None,
+                       stream: Optional[str] = None, envelope: Optional[dict] = None) -> str:
+    """Write an outbox row in the SAME transaction as the
+    datastore change it describes. Callers MUST already be inside a
+    transaction.atomic() block. Public: reused directly by catchup.py and
+    admin.py (both need to emit an outbound event for a write that isn't
+    one of this module's own named mutations). Returns the row's id.
+
+    Two forms (durable-artifact-event-history.md REQ-02):
+
+    - **A work-item event** — ``project``, ``event_type``, ``payload`` and
+      optionally ``work_item_id``; no ``stream``, no ``envelope``. The
+      relay derives the stream (``aigang:workitems:{project}:events``) and
+      builds the envelope around ``payload``, exactly as before these two
+      parameters existed.
+    - **An announcement** — ``stream`` and ``envelope`` together, and none
+      of the other four. ``envelope`` is a complete platform envelope
+      (``workitems/envelope.py``), validated here so a malformed one is
+      refused before it can commit (``EnvelopeError``), and the relay
+      publishes it to ``stream`` verbatim, keeping its ``messageId`` and
+      ``createdAt``. The row's ``project``, ``event_type`` and ``payload``
+      are copied from it — ``project``; ``payload.eventType`` where
+      present, else ``kind``; and ``payload`` — so the admin list and
+      filters read the same for both kinds of row.
+
+    The pairing is enforced by the database: ``outbox_stream_iff_envelope``
+    (``models.OutboxEvent``) refuses a row naming a stream without an
+    envelope, or carrying an envelope without a stream, with an
+    ``IntegrityError``.
+    """
+    if envelope is not None:
+        if project is not None or event_type is not None or payload is not None or work_item_id is not None:
+            raise TypeError('write_outbox_event: an announcement row takes its project, event_type and payload '
+                            'from its envelope; pass stream and envelope only')
+        validate_envelope(envelope)
+        project = envelope['project']
+        event_type = envelope['payload'].get('eventType') or envelope['kind']
+        payload = envelope['payload']
+    elif project is None or event_type is None or payload is None:
+        raise TypeError('write_outbox_event: a work-item row needs project, event_type and payload')
+    event = OutboxEvent.objects.create(
+        project=project, event_type=event_type, work_item_id=work_item_id, payload=payload,
+        stream=stream, envelope=envelope,
+    )
+    return str(event.id)
+
+
+# Back-compat internal alias — every call site within this module.
+_write_outbox_event = write_outbox_event
+
+
+def _append_history(work_item_id, field: str, old_value, new_value, actor: str) -> None:
+    WorkItemHistory.objects.create(
+        work_item_id=work_item_id, field=field, old_value=old_value, new_value=new_value,
+        actor=actor, occurred_at=timezone.now(),
+    )
+
+
+def get_work_item(work_item_id) -> Optional[WorkItem]:
+    return WorkItem.objects.filter(id=work_item_id).first()
+
+
+# ---------------------------------------------------------------------------
+# Canonical identity + create (full local-mode lifecycle)
+# ---------------------------------------------------------------------------
+
+def _assert_story_fields_present(detail: Optional[dict]) -> None:
+    required = ['behavior', 'acceptanceCriteria', 'constraints', 'edgeCases', 'outOfScope']
+    missing = [f for f in required if not (detail and str(detail.get(f) or '').strip())]
+    if missing:
+        raise ValidationError(
+            f'Story is missing required fields and cannot leave \'proposed\' status: {", ".join(missing)}'
+        )
+
+
+def _assert_artifact_resolves(artifact_id) -> None:
+    """work-items.md REQ-04. `WorkItemSpecificationLink.artifact`/
+    `WorkItemArtifactLink.artifact` are real foreign keys to
+    `artifacts.Artifact` (models.py), so an unresolved id would fail at the
+    database level regardless — this check exists to turn that into a
+    clean UnresolvedArtifactError before the INSERT is even attempted,
+    the same role `_assert_story_fields_present` plays for REQ-17."""
+    if not Artifact.objects.filter(id=artifact_id).exists():
+        raise UnresolvedArtifactError(f'artifact {artifact_id} does not resolve to a registered artifact')
+
+
+def _record_specification_link(item: WorkItem, artifact_id, requirement_id: str) -> WorkItemSpecificationLink:
+    """Shared by create_work_item (recorded at creation) and
+    record_specification_link (recorded/replaced later) — same
+    REQ-04 check, same upsert, same outbound event, regardless of when the
+    link is set. Upsert rather than create-once: work-items.md does not
+    make the link immutable, and a Streams command redelivered with the
+    SAME (artifactId, requirementId) must be a safe no-op, per REQ-03's
+    Streams delivery semantics (`redis-streams.md`'s idempotency
+    handling) — mirroring `_add_artifact_link`'s identical-payload early
+    return below, this returns the existing row unchanged (no write, no
+    second event) when it already holds the same (artifact_id,
+    requirement_id); a different pair still replaces and emits."""
+    _assert_artifact_resolves(artifact_id)
+    existing = WorkItemSpecificationLink.objects.filter(
+        work_item=item, artifact_id=artifact_id, requirement_id=requirement_id,
+    ).first()
+    if existing:
+        return existing
+
+    link, _created = WorkItemSpecificationLink.objects.update_or_create(
+        work_item=item, defaults={'artifact_id': artifact_id, 'requirement_id': requirement_id, 'updated_at': timezone.now()},
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.specification_link_recorded', work_item_id=item.id,
+        payload={'workItemId': str(item.id), 'artifactId': str(artifact_id), 'requirementId': requirement_id},
+    )
+    return link
+
+
+def _add_artifact_link(item: WorkItem, artifact_id) -> tuple[WorkItemArtifactLink, bool]:
+    """Shared by create_work_item and add_artifact_link. Idempotent on
+    (work_item, artifact) — a redelivered addArtifactLink command must not
+    create a duplicate list entry or disturb existing positions, mirroring
+    create_link's own dedupe-by-unique-edge precedent. `position` is
+    assigned here (count of existing links), never supplied by a caller —
+    REQ-02's "the order recorded"."""
+    _assert_artifact_resolves(artifact_id)
+    existing = WorkItemArtifactLink.objects.filter(work_item=item, artifact_id=artifact_id).first()
+    if existing:
+        return existing, True
+
+    next_position = WorkItemArtifactLink.objects.filter(work_item=item).count()
+    link = WorkItemArtifactLink.objects.create(
+        work_item=item, artifact_id=artifact_id, position=next_position, created_at=timezone.now(),
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.artifact_link_added', work_item_id=item.id,
+        payload={'id': str(link.id), 'workItemId': str(item.id), 'artifactId': str(artifact_id), 'position': next_position},
+    )
+    return link, False
+
+
+@transaction.atomic
+def create_work_item(input: dict, *, actor: Optional[str] = None, origin: str = write_gate.Origins.DIRECT) -> WorkItem:
+    """input: { id (REQUIRED), project, type, displayName, description,
+    status, priority, parentId, writesFiles, writesServices,
+    storyDetail: {...} (required if type === 'story' and status is leaving
+    'proposed'), specificationLink: {artifactId, requirementId} (optional,
+    work-items.md REQ-01 — "a Refinement Agent records them when it
+    creates the work item"), artifactLinks: [artifactId, ...] (optional,
+    REQ-02, order preserved) }"""
+    if not input or not input.get('id'):
+        raise ValidationError('createWorkItem requires an id (canonical identity)')
+    if not input.get('project'):
+        raise ValidationError('createWorkItem requires a project')
+    if not input.get('type'):
+        raise ValidationError('createWorkItem requires a type')
+    if not input.get('displayName'):
+        raise ValidationError('createWorkItem requires a displayName')
+
+    status = input.get('status') or 'proposed'
+
+    # NOT routed (REQ-09, "The routing layer"): in Jira mode a work item is
+    # created in Jira — by story intake, REQ-10's push or REQ-11's mirror —
+    # so a create is refused on `push` as well as on `refuse`, leaving
+    # JIRA_WEBHOOK as the one origin that creates one there. That is
+    # `canonical-work-model.md` REQ-10's single write path. (Before v5.2 the
+    # gate also let ROLLUP through, and nothing ever created with it.)
+    if write_gate.route(input['project'], origin) != write_gate.RECORD:
+        write_gate.refuse(origin, 'creating a work item')
+
+    custom_statuses = project_config.get_custom_statuses(input['project'])
+    validity = status_vocabulary.validate_status(status, custom_statuses)
+    if not validity['ok']:
+        raise ValidationError(f'createWorkItem: {validity["reason"]}')
+
+    if input.get('type') == 'story' and validity['baseline'] != 'proposed':
+        _assert_story_fields_present(input.get('storyDetail'))
+
+    item = WorkItem.objects.create(
+        id=input['id'],
+        external_key=input.get('externalKey'),
+        type=input['type'],
+        display_name=input['displayName'],
+        description=input.get('description'),
+        status=status,
+        assignee_agent_id=input.get('assigneeAgentId'),
+        priority=input.get('priority') if input.get('priority') is not None else 0,
+        writes_files=input.get('writesFiles'),
+        writes_services=input.get('writesServices'),
+        parent_id=input.get('parentId'),
+        project=input['project'],
+        created_at=timezone.now(),
+        updated_at=timezone.now(),
+    )
+
+    story_detail = input.get('storyDetail')
+    if input.get('type') == 'story' and story_detail:
+        WorkItemStoryDetail.objects.create(
+            work_item=item,
+            behavior=story_detail.get('behavior') or '',
+            acceptance_criteria=story_detail.get('acceptanceCriteria') or '',
+            constraints=story_detail.get('constraints') or '',
+            edge_cases=story_detail.get('edgeCases') or '',
+            out_of_scope=story_detail.get('outOfScope') or '',
+            value_hypothesis=story_detail.get('valueHypothesis'),
+            test_measurement=story_detail.get('testMeasurement'),
+        )
+
+    spec_link_input = input.get('specificationLink')
+    if spec_link_input:
+        _record_specification_link(item, spec_link_input['artifactId'], spec_link_input['requirementId'])
+
+    for artifact_id in (input.get('artifactLinks') or []):
+        _add_artifact_link(item, artifact_id)
+
+    _append_history(item.id, 'status', None, status, actor or 'system')
+    if input.get('assigneeAgentId'):
+        _append_history(item.id, 'assignee_agent_id', None, input['assigneeAgentId'], actor or 'system')
+
+    _write_outbox_event(
+        project=input['project'], event_type='work_item.created', work_item_id=item.id,
+        payload={'id': str(item.id), 'type': item.type, 'displayName': item.display_name, 'status': status, 'project': item.project},
+    )
+
+    return get_work_item(item.id)
+
+
+# ---------------------------------------------------------------------------
+# Canonical assignment authority
+# ---------------------------------------------------------------------------
+
+def _assert_assignment_valid(item: WorkItem, agent_id: str, work_item_id) -> None:
+    result = assignment.validate_assignment(item.project, agent_id)
+    if not result['ok']:
+        raise AssignmentRejectedError(
+            f'assignment of "{agent_id}" to {work_item_id} rejected: {result["code"]}', result,
+        )
+
+
+def assign_work_item(work_item_id, agent_id: str, *, actor: Optional[str] = None,
+                      origin: str = write_gate.Origins.DIRECT,
+                      completion_key: Optional[str] = None):
+    """REQ-09's assignment handler. The `route` call moved out of the
+    `@transaction.atomic` function into this undecorated entry — the shape
+    `transition_status` already had over `_transition_status_core` — because
+    a handler must ask the router before it opens a transaction or takes a
+    lock, and because the Jira call a `push` makes must not run inside
+    one."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'assignWorkItem: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'changing a work item\'s assignment')
+    if verdict == write_gate.PUSH:
+        # Every validation local mode runs apart from the gate, with no row
+        # locked and nothing written, and then the Jira write.
+        _assert_assignment_valid(item, agent_id, work_item_id)
+        return jira_writer.push_assignment(item, agent_id, completion_key=completion_key)
+
+    return _assign_work_item_core(work_item_id, agent_id, actor=actor)
+
+
+@transaction.atomic
+def _assign_work_item_core(work_item_id, agent_id: str, *, actor: Optional[str] = None) -> WorkItem:
+    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
+    if not item:
+        raise ValidationError(f'assignWorkItem: no work item {work_item_id}')
+
+    _assert_assignment_valid(item, agent_id, work_item_id)
+
+    old_value = item.assignee_agent_id
+    item.assignee_agent_id = agent_id
+    item.updated_at = timezone.now()
+    item.save(update_fields=['assignee_agent_id', 'updated_at'])
+    _append_history(work_item_id, 'assignee_agent_id', old_value, agent_id, actor or 'system')
+    _write_outbox_event(
+        project=item.project, event_type='work_item.assigned', work_item_id=work_item_id,
+        payload={'id': str(work_item_id), 'assigneeAgentId': agent_id, 'previous': old_value},
+    )
+
+    return get_work_item(work_item_id)
+
+
+# ---------------------------------------------------------------------------
+# Status lifecycle + dependency gating + parent rollup
+# ---------------------------------------------------------------------------
+
+def _blockers_of(work_item_id) -> list[dict]:
+    rows = WorkItemLink.objects.filter(
+        to_work_item_id=work_item_id, link_type='blocks',
+    ).select_related('from_work_item').values('from_work_item_id', 'from_work_item__status')
+    return [{'blocker_id': r['from_work_item_id'], 'blocker_status': r['from_work_item__status']} for r in rows]
+
+
+def inward_blockers_of(item: WorkItem) -> list[dict]:
+    """Every inward blocker of a work item: its canonical `blocks` links,
+    PLUS the Blocks pairs REQ-11's decomposition record holds with it as
+    the dependent, "a pair whose blocker has no row yet" counting as not
+    `done` (canonical-delivery-state.md REQ-11).
+
+    One rule, in every mode, for the two readers that need it: this
+    module's `_unblock_dependents` and `webhook_consumer.py`'s Sub-task
+    mirror, which derives a Backlog subtask's status from exactly this set.
+    A Jira-mode decomposition's Blocks link reaches `core` as a Jira link
+    event that may land after the subtask it names, so a record pair is an
+    inward blocker the canonical graph does not hold yet.
+
+    The record row is found by the item's own Jira key where it has one,
+    falling back to its canonical id — the proposal id the mirror normally
+    gives a mirrored subtask, and §4 records the one case where it does not
+    (a Sub-task webhook landing before the writer recorded its key).
+
+    Each entry is `{'blocker_id', 'blocker_status'}`, with `blocker_status`
+    None for a blocker with no canonical row, which is not `done`."""
+    blockers = _blockers_of(item.id)
+    seen = {str(entry['blocker_id']) for entry in blockers}
+
+    record = (jira_writer.proposal_record_for_key(item.external_key) if item.external_key else None) \
+        or jira_writer.proposal_record(item.id)
+    for pair in (record.blocks_pairs or []) if record is not None else []:
+        blocker_key = pair.get('blockerKey')
+        blocker_proposal_id = pair.get('blockerProposalId')
+        blocker = None
+        if blocker_key:
+            blocker = WorkItem.objects.filter(external_key=blocker_key).first()
+        if blocker is None and blocker_proposal_id:
+            blocker = WorkItem.objects.filter(id=blocker_proposal_id).first()
+        blocker_id = str(blocker.id) if blocker is not None else (blocker_proposal_id or blocker_key)
+        if str(blocker_id) in seen:
+            continue
+        seen.add(str(blocker_id))
+        blockers.append({'blocker_id': blocker_id,
+                          'blocker_status': blocker.status if blocker is not None else None})
+    return blockers
+
+
+def _apply_status_change(item: WorkItem, new_status: str, actor: Optional[str],
+                          origin: str = write_gate.Origins.DIRECT) -> Optional[dict]:
+    """Internal: applies a status transition with no gating/validation of
+    its own — caller has already validated. Used both by the public
+    transition_status and by the rollup recomputation below, inside the
+    SAME transaction.
+
+    `origin` is carried onto the `work_item.status_changed` event
+    (canonical-delivery-state.md REQ-09, "Canonical events with a Jira side
+    effect": "Every `work_item.status_changed` MUST still carry its write's
+    `origin`"). Before v5.2 the event carried none, so a derived write was
+    indistinguishable from the transition that triggered it."""
+    old_status = item.status
+    if old_status == new_status:
+        return None  # no-op: if there's no change, nothing to record or publish.
+
+    item.status = new_status
+    item.updated_at = timezone.now()
+    item.save(update_fields=['status', 'updated_at'])
+    _append_history(item.id, 'status', old_status, new_status, actor)
+    _write_outbox_event(
+        project=item.project, event_type='work_item.status_changed', work_item_id=item.id,
+        payload={'id': str(item.id), 'status': new_status, 'previous': old_status, 'origin': origin},
+    )
+    return {'id': item.id, 'status': new_status, 'previous': old_status}
+
+
+def _recompute_parent_rollup(parent_id, actor: Optional[str]) -> None:
+    """Recompute a parent's canonical status against its
+    children's CURRENT states, synchronously, in the same transaction as
+    the triggering child transition. Default policy: all children done =>
+    parent done. Any child cancelled/failed => parent holds its last
+    non-terminal status (no automatic resolution). Recurses if the parent
+    itself has a parent."""
+    parent = WorkItem.objects.filter(id=parent_id).first()
+    if not parent:
+        return
+
+    # REQ-09, "Derived writes go through the router too": this is a write
+    # like any other, so it asks the router rather than writing past the
+    # gate through `_apply_status_change` as it did up to v5.1. It does NOT
+    # call `transition_status` — the rollup is not a caller's transition and
+    # must not re-run its release gate or its release event.
+    verdict = write_gate.route(parent.project, write_gate.Origins.ROLLUP)
+    if verdict == write_gate.RECORD:
+        parent = WorkItem.objects.select_for_update().filter(id=parent_id).first()
+        if not parent:
+            return
+
+    custom_statuses = project_config.get_custom_statuses(parent.project)
+    children = list(WorkItem.objects.filter(parent_id=parent_id))
+    if not children:
+        return
+
+    baselines = [status_vocabulary.baseline_of(c.status, custom_statuses) for c in children]
+
+    all_done = all(b == 'done' for b in baselines)
+    any_terminal_not_done = any(b in ('cancelled', 'failed') for b in baselines)
+
+    target = None
+    if all_done:
+        target = 'done'
+    elif any_terminal_not_done:
+        target = None  # "the parent holds at its last non-terminal status" — no change.
+
+    if target and target != parent.status:
+        if verdict == write_gate.PUSH:
+            # No canonical change: the writer's `transition_issue` is
+            # registered with `transaction.on_commit`, and `core` records the
+            # parent's `done` from that issue's own webhook. A grandparent's
+            # rollup runs then, not now. §4 states the cost: the chain is one
+            # webhook round trip longer, and a lost webhook or a failed push
+            # stalls it.
+            jira_writer.register_derived_status_push(parent, target)
+            return
+        changed = _apply_status_change(parent, target, 'system:rollup', write_gate.Origins.ROLLUP)
+        if changed and parent.parent_id:
+            _recompute_parent_rollup(parent.parent_id, actor)
+
+
+RELEASE_EVENT_TYPE = 'work_item.jira_release_event'
+RELEASE_CANDIDATE_RECORDED_EVENT_TYPE = 'work_item.release_candidate_recorded'
+
+
+def publish_release_event(item: WorkItem, kind: str, *, stream_project: str) -> None:
+    """**The one writer of every `work_item.jira_release_event`**
+    (release-mode-parity.md REQ-10), in both modes: `requested`, `done` or
+    `abandoned`. Its two callers are `_transition_status_core` (a Release
+    change whose origin is not JIRA_WEBHOOK) and `webhook_consumer.py`'s
+    release handlers, and each passes the stream the outbox row goes on:
+    `item.project` in local mode, the Release ticket's own containing
+    project in Jira mode (v5.2 Pass 9). The payload's `project` is always
+    the Release's Target Project, `item.project`.
+
+    Must be called inside the caller's `transaction.atomic()` block, beside
+    the change the event describes, so a crash between them loses neither."""
+    _write_outbox_event(
+        project=stream_project, event_type=RELEASE_EVENT_TYPE, work_item_id=item.id,
+        payload={'kind': kind, 'workItemId': str(item.id), 'project': item.project},
+    )
+
+
+def _release_event_kind(previous_status: str, new_status: str) -> Optional[str]:
+    """Which release event a recorded change of a Release publishes, keyed on
+    the MOVE rather than on the new status alone (REQ-10): `requested` on
+    `proposed` -> `in-progress` only — the move the release gate guards — so
+    a Release moved back to `in-progress` from `in-review` cuts no second
+    candidate; `done` on any change to `done`; `abandoned` on any change to
+    `cancelled`."""
+    if previous_status == 'proposed' and new_status == 'in-progress':
+        return 'requested'
+    if new_status == 'done':
+        return 'done'
+    if new_status == 'cancelled':
+        return 'abandoned'
+    return None
+
+
+def _release_beta_queue_outstanding(project: str) -> list[WorkItem]:
+    """Local-mode equivalent of
+    `services/scrummaster/src/handlers.js`'s `handleReleaseRequested` JQL check
+    (`issuetype != Release AND status = "In Review"`): any non-release work
+    item on the target project still sitting in tester-acceptance review.
+    Literal status comparison rather than baseline resolution, matching
+    `_blockers_of`'s precedent elsewhere in this module — this check doesn't
+    ask for baseline resolution and the Jira-mode check it mirrors doesn't
+    do it either."""
+    return list(WorkItem.objects.filter(project=project, status='in-review').exclude(type='release'))
+
+
+class ReleaseRefusal:
+    """What `release_request_refusal` returns when a release request is
+    refused: the message, and the work items still awaiting acceptance on
+    beta when the beta queue is the cause (empty otherwise)."""
+
+    def __init__(self, message: str, outstanding: Optional[list] = None):
+        self.message = message
+        self.outstanding = list(outstanding or [])
+
+
+RELEASE_REJECTION_AUTHOR = 'system'
+
+
+def release_request_refusal(item: WorkItem, *, target_project_set: bool = True) -> Optional[ReleaseRefusal]:
+    """**The one release gate** (release-mode-parity.md REQ-11), in both
+    modes. Runs the two checks in turn — the Target Project is set, then
+    the Target Project's beta queue is clear — writes nothing, and returns
+    the refusal, or None when the request may proceed.
+
+    `target_project_set` is the caller's: `_handle_release_requested` passes
+    whether `parse_release_fields` found the field, read before
+    `_materialize_release`'s fallback to the ticket's own project (v5.2
+    REQ-08); a local Release's project is its Target Project, so local mode
+    passes nothing. Only the first failing check is reported, so a request
+    is refused for one reason at a time."""
+    if not target_project_set:
+        return ReleaseRefusal('Target Project is not set')
+    outstanding = _release_beta_queue_outstanding(item.project)
+    if outstanding:
+        return ReleaseRefusal(f'{len(outstanding)} work item(s) are still awaiting acceptance on beta', outstanding)
+    return None
+
+
+def _release_rejection_text(refusal: ReleaseRefusal) -> str:
+    """v5.2's rejection format ("Rejections, in every mode"), the one text a
+    refused release request gets in either mode: the rejection line, the
+    outstanding items when the beta queue is the cause, and the closing
+    instruction (REQ-11)."""
+    body = f'[system] release request rejected: {refusal.message}'
+    if refusal.outstanding:
+        body += '\n\n' + '\n'.join(
+            f'  - {o.display_name} ({o.external_key or o.id})' for o in refusal.outstanding
+        )
+    return body + '\n\nResolve this and request the release again.'
+
+
+def post_release_rejection(item: WorkItem, refusal: ReleaseRefusal, *, source_message_id: Optional[str]) -> dict:
+    """**The one poster of a release refusal** (REQ-11): one comment, through
+    the one comment path, keyed `source_message_id` so a redelivered request
+    adds none — `<completion_key>:release-gate` from `check_release_request`,
+    `<messageId>:release-check` from the Jira webhook consumer. Called with
+    no transaction open by both, so a Jira-mode post is made in-process and
+    its failure fails the caller's message."""
+    return append_comment(
+        item.id, RELEASE_REJECTION_AUTHOR, _release_rejection_text(refusal),
+        source_message_id=source_message_id, origin=write_gate.Origins.DIRECT,
+    )
+
+
+def check_release_request(item: WorkItem, *, source_message_id: Optional[str]) -> None:
+    """Local mode's release gate (REQ-11): runs `release_request_refusal`
+    and, on a refusal, posts it with `post_release_rejection` and then raises
+    `ReleaseGateError`. `transition_status` calls it OUTSIDE
+    `_transition_status_core`'s atomic block, so the comment survives the
+    raise that refuses the transition."""
+    refusal = release_request_refusal(item)
+    if refusal is None:
+        return
+    post_release_rejection(item, refusal, source_message_id=source_message_id)
+    raise ReleaseGateError(
+        f'{item.id}: release request rejected: {refusal.message}',
+        [str(o.id) for o in refusal.outstanding],
+    )
+
+
+def transition_status(work_item_id, new_status: str, *, actor: Optional[str] = None,
+                       origin: str = write_gate.Origins.DIRECT,
+                       completion_key: Optional[str] = None):
+    """`origin` per write_gate.Origins — webhook_consumer.py passes
+    JIRA_WEBHOOK after its own pre-validation; direct callers
+    (Streams commands, admin UI in local mode) pass DIRECT/ADMIN_UI.
+
+    A Release's request — its `proposed` -> `in-progress` move
+    (release-mode-parity.md REQ-09) — additionally passes the one release
+    gate, `check_release_request` (REQ-11), which comments and raises on a
+    refusal. It runs HERE, outside `_transition_status_core`'s atomic
+    block, because a comment written inside the same atomic block as a
+    subsequent raise would roll back along with it. Every internal-API
+    surface (Django Admin, external HTTP API, Streams command) reaches this
+    same gate, since all three call this function rather than the atomic
+    core directly.
+
+    `completion_key`, when given, is the command or event's `messageId`
+    (REQ-09, step 5): on `push` the writer skips any step its completion
+    record already shows done, and the release gate's comment is keyed
+    `<completion_key>:release-gate` so a redelivered command adds none. The
+    admin and the external API pass none.
+
+    For a Release, `origin=JIRA_WEBHOOK` runs no release gate and (in
+    `_transition_status_core`) publishes no release event
+    (canonical-delivery-state.md REQ-08, kept by release-mode-parity.md
+    REQ-10): `webhook_consumer.py`'s release handlers are Jira mode's
+    publishers, and a Jira status echo must not publish a second event.
+    This keys on the origin, not the mode: `JIRA_WEBHOOK` reaches here only
+    for a project in Jira mode (`webhook_consumer.py` only passes it after
+    its own mode check)."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'transitionStatus: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'changing a work item\'s status')
+
+    if (item.type == 'release' and item.status == 'proposed' and new_status == 'in-progress'
+            and origin != write_gate.Origins.JIRA_WEBHOOK):
+        check_release_request(
+            item, source_message_id=f'{completion_key}:release-gate' if completion_key else None,
+        )
+
+    if verdict == write_gate.PUSH:
+        # Every validation local mode runs apart from the gate (the release
+        # gate above included), with no row locked and nothing written, then
+        # the Jira write. The change reaches this store only from Jira's own
+        # webhook, so nothing is recorded here.
+        _validate_transition(item, new_status)
+        return jira_writer.push_status(item, new_status, completion_key=completion_key)
+
+    return _transition_status_core(work_item_id, new_status, actor=actor, origin=origin)
+
+
+def _validate_transition(item: WorkItem, new_status: str) -> dict:
+    """Every validation a status transition runs apart from the gate
+    itself: the status vocabulary, a story's required fields, and the
+    dependency gate. Shared by the recording path (inside its transaction,
+    under its row lock) and the pushing path (which locks nothing and
+    writes nothing), so a Jira-mode push is refused by exactly what refuses
+    the same write in local mode."""
+    custom_statuses = project_config.get_custom_statuses(item.project)
+    validity = status_vocabulary.validate_status(new_status, custom_statuses)
+    if not validity['ok']:
+        raise ValidationError(f'transitionStatus: {validity["reason"]}')
+
+    if item.type == 'story' and validity['baseline'] != 'proposed':
+        detail = WorkItemStoryDetail.objects.filter(work_item_id=item.id).first()
+        _assert_story_fields_present(detail and {
+            'behavior': detail.behavior,
+            'acceptanceCriteria': detail.acceptance_criteria,
+            'constraints': detail.constraints,
+            'edgeCases': detail.edge_cases,
+            'outOfScope': detail.out_of_scope,
+        })
+
+    # A dependent MUST NOT reach 'ready' until every declared
+    # blocker has reached 'done'.
+    if validity['baseline'] == 'ready':
+        blockers = _blockers_of(item.id)
+        incomplete = [b for b in blockers if b['blocker_status'] != 'done']
+        if incomplete:
+            raise DependencyGateError(
+                f'{item.id} cannot transition to "{new_status}" — {len(incomplete)} blocker(s) not yet done',
+                [b['blocker_id'] for b in incomplete],
+            )
+
+    return validity
+
+
+@transaction.atomic
+def _transition_status_core(work_item_id, new_status: str, *, actor: Optional[str] = None,
+                             origin: str = write_gate.Origins.DIRECT) -> WorkItem:
+    item = WorkItem.objects.select_for_update().filter(id=work_item_id).first()
+    if not item:
+        raise ValidationError(f'transitionStatus: no work item {work_item_id}')
+
+    validity = _validate_transition(item, new_status)
+
+    changed = _apply_status_change(item, new_status, actor or 'system', origin)
+    if changed and item.parent_id:
+        _recompute_parent_rollup(item.parent_id, actor)
+    if changed and validity['baseline'] == 'done':
+        _unblock_dependents(work_item_id, actor)
+    if changed and item.type == 'release' and origin != write_gate.Origins.JIRA_WEBHOOK:
+        # The first of `publish_release_event`'s two callers (REQ-10). The
+        # other is `webhook_consumer.py`'s release handlers, which apply a
+        # Jira-mode Release's change through this function with
+        # `origin=JIRA_WEBHOOK`; this branch publishes nothing for that
+        # origin, so a Jira status echo cuts no second candidate and
+        # promotes nothing twice (canonical-delivery-state.md REQ-08).
+        kind = _release_event_kind(changed['previous'], new_status)
+        if kind:
+            publish_release_event(item, kind, stream_project=item.project)
+
+    return get_work_item(work_item_id)
+
+
+# ---------------------------------------------------------------------------
+# Release-candidate writeback
+# ---------------------------------------------------------------------------
+
+def release_candidate_note(candidate_sha: str, build_identifier: Optional[str] = None,
+                            preview_url: Optional[str] = None) -> str:
+    """The one candidate note, in both modes (release-mode-parity.md
+    REQ-12): the build and preview lines only when their values are
+    present, and the release PR, which is built from the SHA."""
+    first = f'Release candidate cut: {candidate_sha}'
+    if build_identifier:
+        first += f' (build {build_identifier})'
+    lines = [first]
+    if preview_url:
+        lines.append(f'Preview: {preview_url}')
+    lines.append(f'Release PR: release/{candidate_sha} → prod')
+    return '\n'.join(lines)
+
+
+def record_release_candidate_step(item: WorkItem, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                                   preview_url: Optional[str] = None, author: str = 'jenkins') -> None:
+    """**The candidate's recording step** (REQ-13): publish
+    `work_item.release_candidate_recorded` and post REQ-12's note. One step,
+    two callers: `record_release_candidate` in local mode, and
+    `webhook_consumer.py`'s Release sync in Jira mode, once the webhook has
+    recorded a new, non-empty candidate SHA.
+
+    Must be called inside the caller's `transaction.atomic()` block, beside
+    the recorded fields, so the fields and their event commit together: a
+    field recorded without its event would never publish, since the
+    redelivered webhook then changes nothing. The note goes through the one
+    comment path, which records it in the same transaction in local mode
+    and, in Jira mode, registers its post for after the commit (no Jira call
+    is made inside an open transaction)."""
+    _write_outbox_event(
+        project=item.project, event_type=RELEASE_CANDIDATE_RECORDED_EVENT_TYPE, work_item_id=item.id,
+        payload={'id': str(item.id), 'candidateSha': candidate_sha, 'buildIdentifier': build_identifier,
+                 'previewUrl': preview_url},
+    )
+    append_comment(item.id, author, release_candidate_note(candidate_sha, build_identifier, preview_url))
+
+
+def record_release_candidate(work_item_id, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                              preview_url: Optional[str] = None, actor: Optional[str] = None) -> WorkItem:
+    """Local mode's record of a candidate the release-candidate job reports
+    (REQ-13, "In local mode the endpoint records directly"): the three
+    fields, then the recording step, in one transaction.
+    Write-once-per-candidate: a new candidate replaces the three fields, it
+    does not append.
+
+    In Jira mode the report records nothing (`report_release_candidate`
+    pushes the fields to Jira) and the same recording step runs from the
+    Release's webhook instead."""
+    with transaction.atomic():
+        item = _record_release_candidate_fields(
+            work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url,
+        )
+        record_release_candidate_step(
+            item, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url, author=actor or 'jenkins',
+        )
+    return get_work_item(work_item_id)
+
+
+def _get_release(work_item_id, what: str) -> WorkItem:
+    item = get_work_item(work_item_id)
+    if not item or item.type != 'release':
+        raise ValidationError(f'{what}: no release work item {work_item_id}')
+    return item
+
+
+def _record_release_candidate_fields(work_item_id, *, candidate_sha: str,
+                                      build_identifier: Optional[str] = None,
+                                      preview_url: Optional[str] = None) -> WorkItem:
+    item = _get_release(work_item_id, 'recordReleaseCandidate')
+
+    detail = WorkItemReleaseDetail.objects.filter(work_item_id=item.id).first() \
+        or WorkItemReleaseDetail(work_item=item)
+    detail.candidate_sha = candidate_sha
+    detail.build_identifier = build_identifier
+    detail.preview_url = preview_url
+    detail.save()
+    return item
+
+
+def native_build_comment_text(native_build_url: Optional[str], native_build_status: Optional[str]) -> Optional[str]:
+    """REQ-12's native-build comment, `Native build (<status>): <URL>`, or
+    None when the report carries neither field (the release-candidate job
+    sends both only when a native build ran)."""
+    if not native_build_url and not native_build_status:
+        return None
+    return f'Native build ({native_build_status or "unknown"}): {native_build_url or "(no URL)"}'
+
+
+def report_release_candidate(work_item_id, *, candidate_sha: str, build_identifier: Optional[str] = None,
+                              preview_url: Optional[str] = None, native_build_url: Optional[str] = None,
+                              native_build_status: Optional[str] = None, actor: Optional[str] = None,
+                              origin: str = write_gate.Origins.EXTERNAL_API):
+    """The release-candidate job's report (`/admin/work-items/<id>/release-candidate`),
+    routed like every other machine write (release-mode-parity.md REQ-13,
+    "The report"; v5.2 REQ-09's `write_gate.route`). Called with no
+    transaction open.
+
+      push    (Jira mode) the writer sends the three candidate fields to the
+              Release ticket in ONE edit, then the native-build comment is
+              posted through the comment path (REQ-12), and NOTHING is
+              recorded: the fields come back on the ticket's webhook, which
+              runs the recording step. A failed push raises to the job, which
+              fails visibly. Returns the writer's posted result.
+      record  (local mode) the native-build comment, then the fields and the
+              recording step (`record_release_candidate`), then the move to
+              `in-review` (REQ-09), origin `origin` — the same order Jira mode
+              reaches them in — all in ONE transaction that first re-checks
+              `in-progress` under the Release's row lock. Returns the work
+              item.
+
+    The native-build comment is keyed `release-candidate:<sha>:native-build`,
+    so a repeated report with the same SHA posts it once, in either mode.
+
+    **A report only for an `in-progress` Release, in both modes** (REQ-09).
+    The report is accepted only while `core` holds the Release at
+    `in-progress`. At any other status (`proposed`, `in-review`, `done`,
+    `cancelled`) it raises `ValidationError` before anything else happens —
+    before the write gate, the native-build comment, the Jira push and the
+    local record — so nothing is recorded, no comment is posted, nothing is
+    pushed, and the endpoint returns a 4xx the job's `curl -sf` fails on. A
+    late report therefore never reopens a finished Release, and the next
+    Done never publishes a second `done`. A new candidate for an `in-review`
+    Release needs it moved back to `in-progress` first, a move that
+    publishes no release event (`_release_event_kind`).
+
+    In local mode the same check is made again under the Release's row lock,
+    in the transaction that posts the native-build comment, records the
+    candidate and makes the `in-review` move, so a cancel or Done that
+    commits after the first check refuses the report the same way and
+    leaves nothing of it behind."""
+    item = _get_release(work_item_id, 'reportReleaseCandidate')
+    _refuse_report_unless_in_progress(item)
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'recording a release candidate')
+
+    native_text = native_build_comment_text(native_build_url, native_build_status)
+    author = actor or 'jenkins'
+
+    def post_native_build_comment():
+        if native_text is not None:
+            append_comment(item.id, author, native_text,
+                           source_message_id=f'release-candidate:{candidate_sha}:native-build', origin=origin)
+
+    if verdict == write_gate.PUSH:
+        result = jira_writer.push_release_candidate_fields(
+            item, candidate_sha=candidate_sha, build_identifier=build_identifier, preview_url=preview_url,
+        )
+        post_native_build_comment()
+        return result
+
+    with transaction.atomic():
+        # The guard above ran unlocked. A cancel or a Done that commits
+        # after it would otherwise be overwritten by the move below, which
+        # checks no transition graph; so the status is checked again here
+        # under the Release's row lock, and the comment, the record and the
+        # move land together on an `in-progress` Release or not at all.
+        locked = WorkItem.objects.select_for_update().filter(id=item.id).first()
+        _refuse_report_unless_in_progress(locked)
+        post_native_build_comment()
+        record_release_candidate(
+            work_item_id, candidate_sha=candidate_sha, build_identifier=build_identifier,
+            preview_url=preview_url, actor=author,
+        )
+        # The atomic core, not `transition_status`: `in-progress` ->
+        # `in-review` runs no release gate (that is `proposed` ->
+        # `in-progress` only), and this branch is already routed RECORD, so
+        # `transition_status` would add only a second `write_gate.route`,
+        # whose PUSH branch makes a Jira call — never to be made inside this
+        # open transaction, should the project's mode change mid-report.
+        return _transition_status_core(work_item_id, 'in-review', actor=author, origin=origin)
+
+
+def _refuse_report_unless_in_progress(item: WorkItem) -> None:
+    """REQ-09's precondition on a release-candidate report: `core` holds the
+    Release at `in-progress`. The advice to move the Release back to
+    `in-progress` is given only for `in-review`, the one status REQ-09 says
+    takes a new candidate that way; for `done` or `cancelled` that move
+    would lead to a second `done`, and for `proposed` it is the release
+    request itself."""
+    if item.status == 'in-progress':
+        return
+    message = (f'reportReleaseCandidate: release {item.id} is at "{item.status}"; a candidate is '
+               'reported only for a release at "in-progress"')
+    if item.status == 'in-review':
+        message += ' — move it back to "in-progress" first'
+    elif item.status == 'proposed':
+        message += ' — the release must be requested first'
+    raise ValidationError(message)
+
+
+def _unblock_dependents(blocker_work_item_id, actor: Optional[str]) -> None:
+    """The dependency graph's "Done Handler" logic, ported to operate against
+    this service's own graph instead of Jira issue links. Stateless and
+    idempotent: a dependent only moves if it is CURRENTLY
+    'waiting-on-dependency' with every blocker done, which becomes false
+    the instant it has already moved.
+
+    **The dependents are the canonical `blocks` links PLUS the Blocks pairs
+    REQ-11's decomposition record holds, in every mode** (§4's "Jira-mode
+    unblocking from the decomposition record" row; REQ-11:
+    "`_unblock_dependents` applies the same rule in every mode and reads no
+    mode"). In Jira mode a decomposition's Blocks link reaches `core` as a
+    Jira link event, which may land after the subtask it names, so the
+    canonical link may not exist yet when the blocker reaches `done` — and
+    the record, written by the writer as it created each link, is what
+    stops the dependent being stranded. Only a Jira-mode decomposition
+    writes that record, so a project that was never in Jira mode has no
+    pair to count; a project returned to local mode by `disconnect_jira`
+    keeps its pairs, and they still count, so an operator who deletes a
+    blocker the record names moves its dependent by hand (REQ-11).
+
+    No mode is read to decide this: the union is the same in both modes,
+    and each dependent is routed by `write_gate.route` exactly as before."""
+    linked_ids = list(WorkItemLink.objects.filter(
+        from_work_item_id=blocker_work_item_id, link_type='blocks',
+    ).values_list('to_work_item_id', flat=True))
+    recorded_ids = jira_writer.dependent_proposal_ids_for_blocker(blocker_work_item_id)
+
+    seen: set = set()
+    dependent_ids = []
+    for dependent_id in [*linked_ids, *recorded_ids]:
+        if str(dependent_id) in seen:
+            continue
+        seen.add(str(dependent_id))
+        dependent_ids.append(dependent_id)
+
+    for dependent_id in dependent_ids:
+        dependent = WorkItem.objects.filter(id=dependent_id).first()
+        if not dependent:
+            continue
+
+        # REQ-09, "Derived writes go through the router too" — the same rule
+        # the parent rollup follows, for the same reason.
+        verdict = write_gate.route(dependent.project, write_gate.Origins.ROLLUP)
+        if verdict == write_gate.RECORD:
+            dependent = WorkItem.objects.select_for_update().filter(id=dependent_id).first()
+            if not dependent:
+                continue
+        if dependent.status != 'waiting-on-dependency':
+            continue
+
+        # The same inward-blocker rule the mirror applies, so a dependent
+        # whose Blocks pair the record holds but whose canonical link has
+        # not landed yet is not moved early (REQ-11).
+        blockers = inward_blockers_of(dependent)
+        all_done = all(b['blocker_status'] == 'done' for b in blockers)
+        if not all_done:
+            continue
+
+        if verdict == write_gate.PUSH:
+            # No canonical change: `core` records the dependent's `ready`
+            # from its own Jira webhook. One webhook can register two
+            # pushes of the same status for one dependent (this unblock and
+            # REQ-11's link reconciliation); the second is harmless —
+            # either Jira re-applies a transition whose webhook changes
+            # nothing here, or the writer finds the issue already there
+            # with its Blocked flag clear and counts it done.
+            jira_writer.register_derived_status_push(dependent, 'ready')
+            continue
+
+        changed = _apply_status_change(dependent, 'ready', 'system:unblock', write_gate.Origins.ROLLUP)
+        if changed and dependent.parent_id:
+            _recompute_parent_rollup(dependent.parent_id, actor)
+
+
+# ---------------------------------------------------------------------------
+# Artifact association (not subject to the write-gate)
+# ---------------------------------------------------------------------------
+
+def normalize_reference(reference: Optional[str]) -> Optional[str]:
+    """canonical-delivery-state.md REQ-01 — "REQ-02 and REQ-03 normalize a
+    reference the same way before matching or writing it: lower-case scheme,
+    host, owner and repository; no trailing slash, query or fragment."
+
+    A pull request is identified by its web URL,
+    `https://github.com/<owner>/<repo>/pull/<number>` — the form
+    `gh pr create` prints and an agent passes as `--pull-request`, and the
+    form Jenkins emits as a PR's `html_url` (or `CHANGE_URL`). The two
+    producers can differ in case or a trailing slash and mean the same pull
+    request, so both are normalized here, by one function, rather than at
+    each site.
+
+    A reference that is not a URL — a bare commit SHA — has no scheme or
+    host to lower-case and is returned stripped and unchanged, so the
+    completion-marker reuse of the same column (REQ-19) is unaffected."""
+    if reference is None:
+        return None
+    text = str(reference).strip()
+    if not text:
+        return text
+    parsed = urlsplit(text)
+    if not parsed.scheme or not parsed.netloc:
+        return text
+
+    segments = parsed.path.rstrip('/').split('/')
+    # '' / '<owner>' / '<repo>' / 'pull' / '<number>' — the owner and the
+    # repository are case-insensitive on GitHub; the rest of the path (a PR
+    # number, a ref name) is not and is left exactly as given.
+    for index in (1, 2):
+        if len(segments) > index:
+            segments[index] = segments[index].lower()
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), '/'.join(segments), '', ''))
+
+
+def resolve_work_items_for_reference(reference: str, *, message: Optional[str] = None) -> list[str]:
+    """canonical-delivery-state.md REQ-02 — the reverse lookup: a commit
+    SHA or pull-request reference to the work item(s) that recorded it.
+
+    Matches only `ASSOCIATION_KINDS`, never a completion marker's step key,
+    and matches the NORMALIZED reference, so an agent's `--pull-request`
+    URL and Jenkins' `html_url` for the same pull request resolve to each
+    other even when they differ only in case or a trailing slash.
+
+    Resolution is total in its failure handling: a reference with no
+    association is logged at error level, naming the reference and the
+    message that carried it, rather than dropped silently — a silently
+    dropped deployment is the class of defect V5 exists to remove. No table
+    holds it (Shovel Ready Pass 5, decision 5.3).
+
+    The query is answered by `idx_work_item_artifact_ref`, the
+    `(artifact_type, reference)` index this requirement's migration adds."""
+    normalized = normalize_reference(reference)
+    rows = WorkItemArtifact.objects.filter(
+        artifact_type__in=ASSOCIATION_KINDS, reference=normalized,
+    ).values_list('work_item_id', flat=True)
+    work_item_ids = list(dict.fromkeys(str(row) for row in rows))
+
+    if not work_item_ids:
+        logger.error(
+            '[store] Unresolved delivery reference "%s" (normalized "%s") carried by %s — '
+            'no work item recorded it, so nothing could be attributed to it',
+            reference, normalized, message or '(no message named)',
+        )
+    return work_item_ids
+
+
+@transaction.atomic
+def attach_artifact(work_item_id, artifact_type: str, reference: str, *, actor: Optional[str] = None) -> dict:
+    """Not routed by the write gate: an association is neither a status,
+    an assignment, a dependency link nor a comment, and Jira carries no
+    field for one (§4).
+
+    REQ-03 makes this idempotent for an association kind: ScrumMaster
+    records the `pull-request` Artifact's URL on every completion, and
+    `publishCommand`'s `dedupeKey` expires, so a repeated completion must
+    not leave a second row. The reference is normalized first (REQ-01), so
+    the same pull request under a different case or a trailing slash is the
+    same row. A completion marker (REQ-19), whose `artifact_type` is a step
+    key rather than an association kind, is unaffected — `record_completion_marker`
+    has its own marker check and refuses a step key that collides with these
+    kinds."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'attachArtifact: no work item {work_item_id}')
+
+    if artifact_type in ASSOCIATION_KINDS:
+        reference = normalize_reference(reference)
+        existing = WorkItemArtifact.objects.filter(
+            work_item=item, artifact_type=artifact_type, reference=reference,
+        ).first()
+        if existing:
+            return {'id': str(existing.id), 'workItemId': str(work_item_id),
+                    'artifactType': artifact_type, 'reference': reference, 'deduped': True}
+
+    artifact = WorkItemArtifact.objects.create(
+        work_item=item, artifact_type=artifact_type, reference=reference, created_at=timezone.now(),
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.artifact_attached', work_item_id=work_item_id,
+        payload={'id': str(artifact.id), 'workItemId': str(work_item_id), 'artifactType': artifact_type, 'reference': reference},
+    )
+    return {'id': str(artifact.id), 'workItemId': str(work_item_id), 'artifactType': artifact_type, 'reference': reference}
+
+
+# ---------------------------------------------------------------------------
+# work-items.md REQ-01/REQ-02 — specification link and artifact links (not
+# subject to the write-gate, same as artifact association/comments above:
+# neither is a status/assignment/dependency field write_gate.py governs).
+# ---------------------------------------------------------------------------
+
+@transaction.atomic
+def record_specification_link(work_item_id, artifact_id, requirement_id: str, *, actor: Optional[str] = None) -> dict:
+    """REQ-01. Sets (or replaces) the work item's single specification
+    link. Called from command_consumer.py (Streams path) and admin.py
+    (the admin-UI path — see that module's own comment on why this is a
+    direct write rather than a Streams round-trip)."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'recordSpecificationLink: no work item {work_item_id}')
+
+    link = _record_specification_link(item, artifact_id, requirement_id)
+    return {'workItemId': str(work_item_id), 'artifactId': str(link.artifact_id), 'requirementId': link.requirement_id}
+
+
+@transaction.atomic
+def add_artifact_link(work_item_id, artifact_id, *, actor: Optional[str] = None) -> dict:
+    """REQ-02. Appends one artifact link to the work item's ordered list.
+    Same two callers as record_specification_link above."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'addArtifactLink: no work item {work_item_id}')
+
+    link, deduped = _add_artifact_link(item, artifact_id)
+    return {
+        'id': str(link.id), 'workItemId': str(work_item_id), 'artifactId': str(link.artifact_id),
+        'position': link.position, 'deduped': deduped,
+    }
+
+
+# Durable per-item completion marker check, so an evidence-posting
+# step determines completion from this service's own durable record
+# instead of a before/after comparison of external state.
+def has_completion_marker(work_item_id, step_key: str) -> bool:
+    return WorkItemArtifact.objects.filter(work_item_id=work_item_id, artifact_type=step_key).exists()
+
+
+def record_completion_marker(work_item_id, step_key: str, reference: str, *, actor: Optional[str] = None) -> dict:
+    """canonical-delivery-state.md REQ-02 — a step key equal to one of the
+    association kinds is refused, and no row is written. The marker reuses
+    `work_item_artifact.artifact_type` for a value that is a step key rather
+    than an artifact kind, and REQ-02's resolver queries that same column:
+    were a marker allowed to use one of the four kinds as its step key, the
+    resolver would resolve a deployment to whatever work item happened to
+    carry that marker."""
+    if step_key in ASSOCIATION_KINDS:
+        raise ValidationError(
+            f'recordCompletionMarker: "{step_key}" is one of the delivery-association kinds '
+            f'({", ".join(ASSOCIATION_KINDS)}) and cannot be used as a completion-marker step key — '
+            'it would be matched by the commit/pull-request resolver'
+        )
+    if has_completion_marker(work_item_id, step_key):
+        return {'alreadyMarked': True}
+    artifact = attach_artifact(work_item_id, step_key, reference, actor=actor)
+    return {'alreadyMarked': False, 'artifact': artifact}
+
+
+# ---------------------------------------------------------------------------
+# Comment-thread communication contract (not subject to the write-gate)
+# ---------------------------------------------------------------------------
+
+def _row_to_comment(row: WorkItemComment) -> dict:
+    return {
+        'id': str(row.id), 'workItemId': str(row.work_item_id), 'author': row.author, 'body': row.body,
+        'referenceFile': row.reference_file, 'referenceFunction': row.reference_function,
+    }
+
+
+def append_comment(work_item_id, author: str, body: str, *, reference_file: Optional[str] = None,
+                    reference_function: Optional[str] = None, source_message_id: Optional[str] = None,
+                    origin: str = write_gate.Origins.DIRECT) -> dict:
+    """**The one comment path, in every mode** (REQ-09, "One comment path,
+    in every mode"). Every comment on a work item from any caller — the
+    `appendComment` command, the admin, the external API, and `core`'s own
+    logic (REQ-01's failure comment, REQ-05's evidence,
+    `record_release_candidate`'s note, story intake's comments, REQ-08's
+    release rejection, and the rejection comments) — comes through here.
+
+    It is the only code on a caller's path whose comment write differs by
+    mode, and it reads no mode: `write_gate.route` decides.
+
+      record  the comment is recorded atomically, as today, deduplicated on
+              `source_message_id`;
+      push    the writer posts `[<author>] <body>` to Jira and NOTHING is
+              recorded — the comment reaches `core` on its `comment_created`
+              webhook, origin JIRA_WEBHOOK, which `_handle_comment_event`
+              records through this same function. `source_message_id` is
+              then the completion record's key instead of the row's dedupe
+              key, because there is no row;
+      refuse  origin ADMIN_UI only, because in a Jira-mode project a person
+              comments in Jira.
+
+    On `push` this function opens NO transaction. It posts, or — when its
+    caller already holds one (`connection.in_atomic_block`) — registers the
+    post with `transaction.on_commit` and returns at once, so the caller
+    keeps its own ordering (REQ-05's evidence-before-transition) and no Jira
+    call is ever made inside an open transaction."""
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'appendComment: no work item {work_item_id}')
+
+    verdict = write_gate.route(item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'commenting on a work item')
+    if verdict == write_gate.PUSH:
+        return jira_writer.push_comment(item, author, body, completion_key=source_message_id)
+
+    return _append_comment_core(
+        work_item_id, author, body, reference_file=reference_file,
+        reference_function=reference_function, source_message_id=source_message_id,
+    )
+
+
+@transaction.atomic
+def _append_comment_core(work_item_id, author: str, body: str, *, reference_file: Optional[str] = None,
+                          reference_function: Optional[str] = None,
+                          source_message_id: Optional[str] = None) -> dict:
+    item = get_work_item(work_item_id)
+    if not item:
+        raise ValidationError(f'appendComment: no work item {work_item_id}')
+
+    if source_message_id:
+        existing = WorkItemComment.objects.filter(source_message_id=source_message_id).first()
+        if existing:
+            # Redelivery of the same message MUST NOT produce a second row.
+            return _row_to_comment(existing)
+
+    comment = WorkItemComment.objects.create(
+        work_item=item, author=author, body=body, reference_file=reference_file,
+        reference_function=reference_function, source_message_id=source_message_id,
+        created_at=timezone.now(),
+    )
+    _write_outbox_event(
+        project=item.project, event_type='work_item.comment_added', work_item_id=work_item_id,
+        payload={'id': str(comment.id), 'workItemId': str(work_item_id), 'author': author, 'body': body},
+    )
+    return _row_to_comment(comment)
+
+
+# ---------------------------------------------------------------------------
+# Dependency graph (link create) — gated by the write-gate like status/assignment.
+# ---------------------------------------------------------------------------
+
+def create_link(from_work_item_id, to_work_item_id, link_type: str, *, actor: Optional[str] = None,
+                 origin: str = write_gate.Origins.DIRECT,
+                 completion_key: Optional[str] = None) -> dict:
+    """REQ-09's link handler. Like `assign_work_item`, the `route` call
+    moved out of the `@transaction.atomic` function into this undecorated
+    entry. On `push` the result names the DEPENDENT (`to_work_item_id`) —
+    the item whose history records a link in local mode."""
+    from_item = get_work_item(from_work_item_id)
+    to_item = get_work_item(to_work_item_id)
+    if not from_item or not to_item:
+        raise ValidationError('createLink: both work items must exist')
+    if from_item.project != to_item.project:
+        raise ValidationError('createLink: work items must belong to the same project')
+
+    verdict = write_gate.route(from_item.project, origin)
+    if verdict == write_gate.REFUSE:
+        write_gate.refuse(origin, 'creating a dependency link')
+    if verdict == write_gate.PUSH:
+        return jira_writer.push_link(from_item, to_item, completion_key=completion_key)
+
+    return _create_link_core(from_work_item_id, to_work_item_id, link_type, actor=actor)
+
+
+@transaction.atomic
+def _create_link_core(from_work_item_id, to_work_item_id, link_type: str, *,
+                       actor: Optional[str] = None) -> dict:
+    from_item = get_work_item(from_work_item_id)
+    to_item = get_work_item(to_work_item_id)
+    if not from_item or not to_item:
+        raise ValidationError('createLink: both work items must exist')
+
+    existing = WorkItemLink.objects.filter(
+        from_work_item_id=from_work_item_id, to_work_item_id=to_work_item_id, link_type=link_type,
+    ).first()
+    if existing:
+        # Idempotent redelivery: a
+        # retry never creates a duplicate edge.
+        return {'id': str(existing.id), 'deduped': True}
+
+    link = WorkItemLink.objects.create(
+        id=uuid.uuid4(), from_work_item_id=from_work_item_id, to_work_item_id=to_work_item_id,
+        link_type=link_type, created_at=timezone.now(),
+    )
+    _append_history(to_work_item_id, 'work_item_link', None, f'{link_type}:{from_work_item_id}', actor or 'system')
+    _write_outbox_event(
+        project=from_item.project, event_type='work_item.link_created', work_item_id=to_work_item_id,
+        payload={'id': str(link.id), 'fromWorkItemId': str(from_work_item_id), 'toWorkItemId': str(to_work_item_id), 'linkType': link_type},
+    )
+    return {'id': str(link.id), 'fromWorkItemId': str(from_work_item_id), 'toWorkItemId': str(to_work_item_id),
+            'linkType': link_type, 'deduped': False}
+
+
+# ---------------------------------------------------------------------------
+# The durable A2A record (durable-a2a-message-record.md)
+# ---------------------------------------------------------------------------
+#
+# Two writes and two reads. Neither write is routed by tracker mode (§4,
+# "`core`'s write functions are routed by tracker mode", property 2): the work
+# tracker has no surface for an A2A envelope or a verdict, so both are
+# recorded in every mode, like `record_specification_link` and
+# `add_artifact_link`.
+#
+#   record_a2a_message   the archive group's write (a2a_archive.py): the Task
+#                        record, the message, its artifacts, or a content
+#                        conflict, with their outbox rows, in one transaction.
+#   record_a2a_verdict   the command consumer's `recordA2AVerdict` (REQ-04).
+#   get_a2a_task         REQ-06's direct read, access-logged.
+#   list_a2a_tasks       REQ-11's paged changed-since enumeration, not logged.
+#
+# A Task's current `state` is never stored. `a2a_task_record` derives it
+# from the messages and verdict rows it reads (REQ-01).
+
+A2A_EVENT_TASK_RECORDED = 'a2a.task_recorded'
+A2A_EVENT_MESSAGE_RECORDED = 'a2a.message_recorded'
+A2A_EVENT_ARTIFACT_RECORDED = 'a2a.artifact_recorded'
+A2A_EVENT_CONFLICT_RECORDED = 'a2a.conflict_recorded'
+A2A_EVENT_VERDICT_RECORDED = 'a2a.verdict_recorded'
+
+
+def _a2a_write_checkpoint(point: str, **detail) -> None:
+    """Called inside ``record_a2a_message``'s transaction at two points —
+    ``'task_inserted'`` and ``'message_inserted'`` — and does nothing. It is
+    where a test holds a transaction open (REQ-01's concurrent Task record and
+    its archive-versus-verdict commit order) or fails a write after its
+    insert (§4's rollback), so that those tests run the real write rather than
+    a copy of it."""
+
+
+def _resolve_a2a_association(task_id: str) -> tuple[Optional[uuid.UUID], Optional[str]]:
+    """REQ-09: a Task's work item is the one whose canonical id IS the Task's
+    own id, in both tracker modes (`taskStore.js`, "A Task's own id is the
+    work item's own canonical id, in both modes"). Nothing here reads
+    ``external_key``. Returns ``(work_item_id, None)``, or ``(None, why)``
+    when the id resolves to no work item — the Task is still recorded."""
+    try:
+        candidate = uuid.UUID(str(task_id))
+    except ValueError:
+        return None, f'the Task id {task_id!r} is not a canonical work item id'
+    if WorkItem.objects.filter(id=candidate).exists():
+        return candidate, None
+    return None, f'no canonical work item has the id {task_id}'
+
+
+def _parse_entry_id(entry_id: str) -> tuple[int, int]:
+    ms, _, seq = str(entry_id).partition('-')
+    return int(ms), int(seq or 0)
+
+
+def _raw_a2a_content(direction: str, envelope: dict) -> tuple[Any, Any, Any]:
+    """What REQ-05 compares: the A2A message, the state and the artifacts, as
+    the envelope carried them. The envelope around them may differ — a
+    dead-letter replay adds a ``correlationId`` — without being a
+    conflict."""
+    payload = envelope.get('payload') or {}
+    if direction == A2AMessage.DISPATCH:
+        return payload, None, None
+    return payload.get('message'), payload.get('state'), payload.get('artifacts')
+
+
+def _ensure_a2a_task(task_id: str, context_id: Optional[str], project: str, message_id: str,
+                     outbox_project: str) -> A2ATask:
+    """REQ-01: the Task record, created from the Task's first archived
+    message, or found when it exists — including when another stream's
+    archive consumer inserted it concurrently: the insert then waits for that
+    transaction, fails on the primary key once it commits, and the savepoint
+    lets this transaction read the committed record and go on."""
+    task = A2ATask.objects.filter(id=task_id).first()
+    if task is not None:
+        return task
+    work_item_id, association_error = _resolve_a2a_association(task_id)
+    try:
+        with transaction.atomic():
+            task = A2ATask.objects.create(
+                id=task_id, context_id=context_id, project=project, work_item_id=work_item_id,
+                association_error=association_error, created_from_message_id=message_id,
+                created_at=timezone.now(),
+            )
+            _a2a_write_checkpoint('task_inserted', task_id=task_id, message_id=message_id)
+    except IntegrityError:
+        return A2ATask.objects.get(id=task_id)
+    _write_outbox_event(
+        project=outbox_project, event_type=A2A_EVENT_TASK_RECORDED, work_item_id=work_item_id,
+        payload={'taskId': task_id},
+    )
+    return task
+
+
+def _record_a2a_conflict(existing: A2AMessage, *, stream: str, entry_id: str, envelope: dict,
+                         outbox_project: str) -> dict:
+    """REQ-05: the stored message stays as it is; the conflicting entry is
+    recorded once per stream entry, with its outbox row."""
+    try:
+        with transaction.atomic():
+            conflict = A2AConflict.objects.create(
+                task_id=existing.task_id, message_id=existing.message_id, stream=stream, entry_id=entry_id,
+                envelope=envelope, recorded_at=timezone.now(),
+            )
+    except IntegrityError:
+        return {'stored': False, 'conflict': True, 'recorded': False, 'messageId': existing.message_id}
+    task = A2ATask.objects.get(id=existing.task_id)
+    _write_outbox_event(
+        project=outbox_project, event_type=A2A_EVENT_CONFLICT_RECORDED, work_item_id=task.work_item_id,
+        payload={'taskId': existing.task_id, 'messageId': existing.message_id, 'stream': stream, 'entryId': entry_id},
+    )
+    logger.warning('[a2a] %s entry %s carries A2A message %s, already stored with different content — '
+                   'recorded as conflict %s', stream, entry_id, existing.message_id, conflict.id)
+    return {'stored': False, 'conflict': True, 'recorded': True, 'messageId': existing.message_id}
+
+
+def _already_stored_a2a_message(existing: A2AMessage, *, direction: str, stream: str, entry_id: str,
+                                envelope: dict, outbox_project: str) -> dict:
+    if _raw_a2a_content(existing.direction, existing.envelope) == _raw_a2a_content(direction, envelope):
+        return {'stored': False, 'conflict': False, 'messageId': existing.message_id}
+    return _record_a2a_conflict(existing, stream=stream, entry_id=entry_id, envelope=envelope,
+                                outbox_project=outbox_project)
+
+
+def record_a2a_message(*, outbox_project: str, stream: str, entry_id: str, direction: str, envelope: dict,
+                       task_id: str, message_id: str) -> dict:
+    """The archive group's one write (§4, "One transaction, acknowledged
+    after commit"): the Task record when this is its Task's first message,
+    the message with its state, its artifacts, and an outbox row for each, all
+    in one transaction. The caller (``a2a_archive.archive_entry``) has already
+    decided the entry is an A2A message and found its keys.
+
+    Idempotent on the A2A ``messageId`` (REQ-05): an entry whose message is
+    already stored with the same message, state and artifacts writes nothing;
+    one with different content writes only a conflict record.
+
+    ``outbox_project`` is the configured project whose stream the entry was
+    read from; its event stream is where the relay announces these rows.
+
+    Returns ``{'stored': bool, 'conflict': bool, 'messageId': ...}``."""
+    message, raw_state, raw_artifacts = _raw_a2a_content(direction, envelope)
+    message = message if isinstance(message, dict) else {}
+    entry_ms, entry_seq = _parse_entry_id(entry_id)
+    context_id = envelope.get('contextId')
+    if not (isinstance(context_id, str) and context_id):
+        context_id = message.get('contextId') if isinstance(message.get('contextId'), str) else None
+
+    def text_or_none(value):
+        return value if isinstance(value, str) else None
+
+    with transaction.atomic():
+        existing = A2AMessage.objects.filter(message_id=message_id).first()
+        if existing is not None:
+            return _already_stored_a2a_message(existing, direction=direction, stream=stream, entry_id=entry_id,
+                                               envelope=envelope, outbox_project=outbox_project)
+
+        task = _ensure_a2a_task(task_id, context_id, envelope['project'], message_id, outbox_project)
+
+        try:
+            with transaction.atomic():
+                row = A2AMessage.objects.create(
+                    message_id=message_id, task=task, direction=direction, stream=stream, entry_id=entry_id,
+                    entry_ms=entry_ms, entry_seq=entry_seq, envelope=envelope, message=message,
+                    role=text_or_none(message.get('role')), parts=message.get('parts'),
+                    reference_message_id=text_or_none(message.get('referenceMessageId')),
+                    metadata=message.get('metadata'), timestamp=text_or_none(message.get('timestamp')),
+                    state=raw_state if isinstance(raw_state, str) and raw_state else None,
+                    recorded_at=timezone.now(),
+                )
+        except IntegrityError:
+            # The same A2A messageId committed by another stream's consumer
+            # while this transaction was open.
+            existing = A2AMessage.objects.get(message_id=message_id)
+            return _already_stored_a2a_message(existing, direction=direction, stream=stream, entry_id=entry_id,
+                                               envelope=envelope, outbox_project=outbox_project)
+
+        _write_outbox_event(
+            project=outbox_project, event_type=A2A_EVENT_MESSAGE_RECORDED, work_item_id=task.work_item_id,
+            payload={'taskId': task.id, 'messageId': message_id},
+        )
+        _a2a_write_checkpoint('message_inserted', task_id=task.id, message_id=message_id)
+
+        for position, artifact in enumerate(raw_artifacts if isinstance(raw_artifacts, list) else []):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = artifact.get('artifactId')
+            if not (isinstance(artifact_id, str) and artifact_id):
+                continue  # kept in the stored envelope only (REQ-03)
+            A2AArtifact.objects.create(
+                task=task, message=row, position=position, artifact_id=artifact_id,
+                name=text_or_none(artifact.get('name')), parts=artifact.get('parts'),
+                reference_artifact_id=text_or_none(artifact.get('referenceArtifactId')),
+                metadata=artifact.get('metadata'), artifact=artifact, recorded_at=timezone.now(),
+            )
+            _write_outbox_event(
+                project=outbox_project, event_type=A2A_EVENT_ARTIFACT_RECORDED, work_item_id=task.work_item_id,
+                payload={'taskId': task.id, 'messageId': message_id, 'artifactId': artifact_id},
+            )
+
+    return {'stored': True, 'conflict': False, 'messageId': message_id}
+
+
+def _parse_command_created_at(value: str):
+    from datetime import datetime
+    from datetime import timezone as dt_timezone
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_timezone.utc)
+
+
+def _validate_a2a_verdict(payload: dict) -> None:
+    """REQ-04's shape and values, §4 "How Core applies a verdict". Anything
+    else is a ``ValidationError``, which the command consumer dead-letters at
+    once."""
+    problems = []
+    for field in ('taskId', 'messageId'):
+        if not (isinstance(payload.get(field), str) and payload.get(field)):
+            problems.append(f'{field} is required')
+    verdict, outcome, reason = payload.get('verdict'), payload.get('outcome'), payload.get('reason')
+    if verdict is None and outcome is None:
+        problems.append('a verdict or an outcome is required')
+    if verdict is not None and outcome is not None:
+        problems.append('carries both a verdict and an outcome')
+    if verdict is not None and verdict not in A2AVerdict.VERDICTS:
+        problems.append(f'verdict must be one of {", ".join(A2AVerdict.VERDICTS)}, got {verdict!r}')
+    if verdict == A2AVerdict.REFUSED and reason is None:
+        problems.append('a refused verdict needs a reason')
+    if reason is not None and reason not in A2AVerdict.REASONS:
+        problems.append(f'reason must be one of {", ".join(A2AVerdict.REASONS)}, got {reason!r}')
+    if outcome is not None and outcome not in A2AVerdict.OUTCOMES:
+        problems.append(f'outcome must be one of {", ".join(A2AVerdict.OUTCOMES)}, got {outcome!r}')
+    if problems:
+        raise ValidationError('recordA2AVerdict: ' + '; '.join(problems))
+
+
+def record_a2a_verdict(envelope: dict) -> dict:
+    """REQ-04: store one ``recordA2AVerdict`` command as an append-only row,
+    with its ``a2a.verdict_recorded`` outbox row, in one transaction —
+    whether or not the archive group has stored the message or its Task yet.
+    A redelivered command (its envelope ``messageId`` already stored) stores
+    nothing. Applies none of ``taskStore``'s rules; it records what
+    ScrumMaster decided."""
+    payload = envelope.get('payload') or {}
+    _validate_a2a_verdict(payload)
+    command_message_id = envelope['messageId']
+    finished_state = payload.get('finishedState')
+    source_message_id = payload.get('sourceMessageId')
+    actor = payload.get('actor')
+
+    with transaction.atomic():
+        if A2AVerdict.objects.filter(command_message_id=command_message_id).exists():
+            return {'deduped': True, 'commandMessageId': command_message_id}
+        try:
+            with transaction.atomic():
+                row = A2AVerdict.objects.create(
+                    task_id=payload['taskId'], message_id=payload['messageId'],
+                    verdict=payload.get('verdict'), reason=payload.get('reason'),
+                    finished_state=finished_state if isinstance(finished_state, str) else None,
+                    outcome=payload.get('outcome'),
+                    source_message_id=source_message_id if isinstance(source_message_id, str) else None,
+                    actor=actor if isinstance(actor, str) else None,
+                    command=payload, command_message_id=command_message_id,
+                    command_created_at=_parse_command_created_at(envelope['createdAt']),
+                    project=envelope['project'], recorded_at=timezone.now(),
+                )
+        except IntegrityError:
+            return {'deduped': True, 'commandMessageId': command_message_id}
+
+        task = A2ATask.objects.filter(id=payload['taskId']).first()
+        announced = {'taskId': payload['taskId'], 'messageId': payload['messageId']}
+        if row.verdict is not None:
+            announced['verdict'] = row.verdict
+        else:
+            announced['outcome'] = row.outcome
+        _write_outbox_event(
+            project=envelope['project'], event_type=A2A_EVENT_VERDICT_RECORDED,
+            work_item_id=task.work_item_id if task is not None else None, payload=announced,
+        )
+    return {'deduped': False, 'id': str(row.id), 'commandMessageId': command_message_id}
+
+
+def _a2a_message_order(row: A2AMessage) -> tuple:
+    """REQ-02: by stream entry id across the gateway and agent channel
+    streams — milliseconds, then stream name, then sequence."""
+    return (row.entry_ms, row.stream, row.entry_seq)
+
+
+def _a2a_verdict_row_view(row: A2AVerdict) -> dict:
+    return {
+        'verdict': row.verdict, 'reason': row.reason, 'finishedState': row.finished_state, 'outcome': row.outcome,
+        'sourceMessageId': row.source_message_id, 'commandMessageId': row.command_message_id,
+        'commandCreatedAt': row.command_created_at.isoformat(), 'recordedAt': row.recorded_at.isoformat(),
+    }
+
+
+def _a2a_reading(rows: list[A2AVerdict]) -> dict:
+    """REQ-04's reading of one message's verdict rows, already in publish
+    order: ``applied`` once any row records it, otherwise the refusal
+    published last, otherwise none; the outcome published last, ``pending``
+    while the verdict is ``applied`` and none is recorded, otherwise none."""
+    verdict = reason = finished_state = None
+    if any(r.verdict == A2AVerdict.APPLIED for r in rows):
+        verdict = A2AVerdict.APPLIED
+    else:
+        refusals = [r for r in rows if r.verdict == A2AVerdict.REFUSED]
+        if refusals:
+            verdict, reason, finished_state = A2AVerdict.REFUSED, refusals[-1].reason, refusals[-1].finished_state
+    outcomes = [r for r in rows if r.outcome is not None]
+    if outcomes:
+        outcome = outcomes[-1].outcome
+    else:
+        outcome = 'pending' if verdict == A2AVerdict.APPLIED else None
+    return {'verdict': verdict, 'reason': reason, 'finishedState': finished_state, 'outcome': outcome,
+            'verdictRows': [_a2a_verdict_row_view(r) for r in rows]}
+
+
+def _a2a_artifact_view(row: A2AArtifact, message_id: str) -> dict:
+    return {
+        'artifactId': row.artifact_id, 'name': row.name, 'parts': row.parts,
+        'referenceArtifactId': row.reference_artifact_id, 'metadata': row.metadata,
+        'messageId': message_id, 'position': row.position, 'artifact': row.artifact,
+        'recordedAt': row.recorded_at.isoformat(),
+    }
+
+
+def a2a_task_record(task_id: str) -> Optional[dict]:
+    """A Task's full durable record, as REQ-06 returns it and REQ-11 returns
+    each Task: the Task record, every archived message in stream-entry-id
+    order with its artifacts and its verdict, reason, ``finishedState`` and
+    outcome as REQ-04 reads them, every verdict whose message Core has not yet
+    archived (under its ``messageId``, with no message), every content
+    conflict, the state history, and the current ``state`` — derived here,
+    from the rows this read sees (REQ-01), never stored.
+
+    ``None`` when Core holds neither a Task record nor a verdict for the id.
+    A Task with verdicts and no record yet reads with ``recorded`` false."""
+    task = A2ATask.objects.filter(id=task_id).first()
+    verdict_rows = list(A2AVerdict.objects.filter(task_id=task_id)
+                        .order_by('command_created_at', 'recorded_at', 'id'))
+    if task is None and not verdict_rows:
+        return None
+
+    messages = sorted(A2AMessage.objects.filter(task_id=task_id), key=_a2a_message_order) if task else []
+    artifacts_by_message: dict = {}
+    for artifact in A2AArtifact.objects.filter(task_id=task_id).order_by('position'):
+        artifacts_by_message.setdefault(artifact.message_id, []).append(artifact)
+    rows_by_message: dict[str, list[A2AVerdict]] = {}
+    for row in verdict_rows:
+        rows_by_message.setdefault(row.message_id, []).append(row)
+
+    message_views = []
+    for row in messages:
+        reading = _a2a_reading(rows_by_message.get(row.message_id, []))
+        message_views.append({
+            'messageId': row.message_id, 'direction': row.direction, 'stream': row.stream,
+            'entryId': row.entry_id, 'role': row.role, 'parts': row.parts,
+            'referenceMessageId': row.reference_message_id, 'metadata': row.metadata,
+            'timestamp': row.timestamp, 'state': row.state, 'recordedAt': row.recorded_at.isoformat(),
+            'message': row.message, 'envelope': row.envelope,
+            'artifacts': [_a2a_artifact_view(a, row.message_id) for a in artifacts_by_message.get(row.id, [])],
+            **reading,
+        })
+
+    archived_ids = {row.message_id for row in messages}
+    unarchived = [
+        {'messageId': message_id, **_a2a_reading(rows)}
+        for message_id, rows in rows_by_message.items() if message_id not in archived_ids
+    ]
+
+    state_history = [
+        {'messageId': m['messageId'], 'state': m['state'], 'stream': m['stream'], 'entryId': m['entryId'],
+         'verdict': m['verdict'], 'reason': m['reason'], 'finishedState': m['finishedState'],
+         'outcome': m['outcome']}
+        for m in message_views if m['state'] is not None
+    ]
+    applied = [m for m in state_history if m['verdict'] == A2AVerdict.APPLIED]
+    current_state = applied[-1]['state'] if applied else None
+
+    conflicts = [
+        {'messageId': c.message_id, 'stream': c.stream, 'entryId': c.entry_id, 'envelope': c.envelope,
+         'recordedAt': c.recorded_at.isoformat()}
+        for c in A2AConflict.objects.filter(task_id=task_id).order_by('recorded_at', 'id')
+    ] if task else []
+
+    return {
+        'id': task_id,
+        'recorded': task is not None,
+        'contextId': task.context_id if task else None,
+        'project': task.project if task else None,
+        'workItemId': str(task.work_item_id) if task and task.work_item_id else None,
+        'associationError': task.association_error if task else None,
+        'createdFromMessageId': task.created_from_message_id if task else None,
+        'createdAt': task.created_at.isoformat() if task else None,
+        'state': current_state,
+        'stateHistory': state_history,
+        'messages': message_views,
+        'artifacts': [a for m in message_views for a in m['artifacts']],
+        'unarchivedVerdicts': unarchived,
+        'conflicts': conflicts,
+    }
+
+
+def get_a2a_task(task_id: str, *, actor: Optional[str] = None) -> Optional[dict]:
+    """REQ-06: the direct, synchronous read of a Task's full record,
+    recorded in ``access_log`` (internal-work-item-service.md REQ-04), never
+    in Streams."""
+    from .readstore import log_access
+
+    record = a2a_task_record(task_id)
+    work_item_id = record['workItemId'] if record else None
+    log_access('getA2ATask', project=record['project'] if record else None, work_item_id=work_item_id, actor=actor)
+    return record
+
+
+def _a2a_snapshot_xmin() -> int:
+    """The oldest transaction id still running, as of now: every transaction
+    below it has finished, so a row stamped below it can no longer appear."""
+    from django.db import connection
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint')
+        return int(cursor.fetchone()[0])
+
+
+def _encode_a2a_cursor(state: dict) -> str:
+    import base64
+    import json
+    return base64.urlsafe_b64encode(json.dumps(state, separators=(',', ':')).encode()).decode()
+
+
+def _decode_a2a_cursor(cursor: Optional[str]) -> dict:
+    import base64
+    import binascii
+    import json
+    if not cursor:
+        return {'since': 0, 'upto': None, 'after': None}
+    try:
+        state = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        since, upto, after = state['since'], state.get('upto'), state.get('after')
+        if not isinstance(since, int) or (upto is not None and not isinstance(upto, int)) \
+                or (after is not None and not isinstance(after, str)):
+            raise ValueError('cursor fields have the wrong types')
+    except (ValueError, KeyError, TypeError, binascii.Error) as err:
+        raise ValidationError(f'not an A2A Task enumeration cursor: {err}') from err
+    return {'since': since, 'upto': upto, 'after': after}
+
+
+def list_a2a_tasks(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11: a read-only, paged enumeration of A2A Tasks changed since a
+    cursor, each with its full record as REQ-06 returns it, and no
+    access-log row.
+
+    A Task has changed when its record, a message, an artifact, a content
+    conflict or a verdict row for it was written by a transaction at or above
+    the cursor's transaction id (``change_xid``, stamped by the database). A
+    verdict written before Core held its Task changes that Task once its
+    record exists, because the record's own row then carries a later id.
+
+    The cursor is opaque. An empty one enumerates every Task. One round of
+    pages is fixed at its first page: it takes the oldest transaction still
+    running (``pg_snapshot_xmin``) as the next round's start, so a row whose
+    transaction was open while the round was read is returned again next
+    round rather than skipped. A Task can therefore appear in two rounds; no
+    change is ever missed. Within a round, Tasks come in id order.
+
+    Returns ``{'tasks': [...], 'nextCursor': str, 'hasMore': bool}``:
+    ``hasMore`` says the round has further pages; once it is false,
+    ``nextCursor`` is the changed-since cursor for the next round."""
+    from django.db.models import Exists, OuterRef, Q
+
+    if not isinstance(limit, int) or limit < 1:
+        raise ValidationError('limit must be a positive integer')
+    state = _decode_a2a_cursor(cursor)
+    since = state['since']
+    upto = state['upto'] if state['upto'] is not None else _a2a_snapshot_xmin()
+
+    changed = (
+        Q(change_xid__gte=since)
+        | Exists(A2AMessage.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AArtifact.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AConflict.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+        | Exists(A2AVerdict.objects.filter(task_id=OuterRef('id'), change_xid__gte=since))
+    )
+    query = A2ATask.objects.filter(changed)
+    if state['after'] is not None:
+        query = query.filter(id__gt=state['after'])
+    ids = list(query.order_by('id').values_list('id', flat=True)[:limit + 1])
+    has_more = len(ids) > limit
+    page = ids[:limit]
+
+    if has_more:
+        next_state = {'since': since, 'upto': upto, 'after': page[-1]}
+    else:
+        next_state = {'since': upto, 'upto': None, 'after': None}
+    return {
+        'tasks': [a2a_task_record(task_id) for task_id in page],
+        'nextCursor': _encode_a2a_cursor(next_state),
+        'hasMore': has_more,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core's enumeration of work items, comments and delivery artifacts
+# (corpus-indexing.md REQ-11) and the outbox row of an admin delete (REQ-07)
+# ---------------------------------------------------------------------------
+#
+#   list_work_items_changed          work items with their history and links.
+#   list_work_item_comments_changed  comments, each with its work item's project.
+#   list_delivery_artifacts_changed  delivery artifacts, each with its work
+#                                    item's project and specification link.
+#   record_deletion                  the outbox row `GatedAdminMixin` writes in a
+#                                    delete's transaction, and the stamp of the
+#                                    surviving work item(s) there.
+#
+# The three reads follow `list_a2a_tasks`: the same `pg_snapshot_xmin` cursor
+# over `change_xid` (stamped by the database, migration 0010), so a row whose
+# transaction commits after a later one was read is returned again next round
+# and never skipped. None of them writes an access-log row.
+
+RECORD_DELETED_EVENT_TYPE = 'work_item.record_deleted'
+
+_ENUMERATION_RECORD_CLASSES = {
+    WorkItem: 'work_item',
+    WorkItemComment: 'comment',
+    WorkItemArtifact: 'delivery_artifact',
+    WorkItemLink: 'work_item_link',
+    WorkItemSpecificationLink: 'specification_link',
+    WorkItemArtifactLink: 'artifact_link',
+}
+
+
+def _decode_enumeration_cursor(cursor: Optional[str]) -> dict:
+    import base64
+    import binascii
+    import json
+    if not cursor:
+        return {'since': 0, 'upto': None, 'after': None}
+    try:
+        state = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        since, upto, after = state['since'], state.get('upto'), state.get('after')
+        if not isinstance(since, int) or (upto is not None and not isinstance(upto, int)):
+            raise ValueError('cursor fields have the wrong types')
+        if after is not None:
+            after = uuid.UUID(after)
+    except (ValueError, KeyError, TypeError, AttributeError, binascii.Error) as err:
+        raise ValidationError(f'not an enumeration cursor: {err}') from err
+    return {'since': since, 'upto': upto, 'after': after}
+
+
+def _enumerate_changed(cursor: Optional[str], limit: int, model, changed_q, build_records) -> dict:
+    """One page of a changed-since round over ``model``'s rows, in id order.
+
+    ``changed_q`` selects the rows that changed at or after the cursor's
+    transaction id; it is not applied to an empty cursor, which enumerates
+    every row (rows that predate migration 0010 have a NULL ``change_xid``).
+    ``build_records`` turns a page of ids into the response's records."""
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValidationError('limit must be a positive integer')
+    state = _decode_enumeration_cursor(cursor)
+    since = state['since']
+    upto = state['upto'] if state['upto'] is not None else _a2a_snapshot_xmin()
+
+    query = model.objects.filter(changed_q(since)) if since > 0 else model.objects.all()
+    if state['after'] is not None:
+        query = query.filter(id__gt=state['after'])
+    ids = list(query.order_by('id').values_list('id', flat=True)[:limit + 1])
+    has_more = len(ids) > limit
+    page = ids[:limit]
+
+    if has_more:
+        next_state = {'since': since, 'upto': upto, 'after': str(page[-1])}
+    else:
+        next_state = {'since': upto, 'upto': None, 'after': None}
+    return {
+        'records': build_records(page),
+        'nextCursor': _encode_a2a_cursor(next_state),
+        'hasMore': has_more,
+    }
+
+
+def list_work_items_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, work items: a paged, changed-since enumeration, each record
+    the same body ``GET /work-items/<id>?full=true`` returns (the item, its
+    story and release detail, its history, its links to other work items, its
+    specification link, its artifact links, its delivery artifacts and its
+    comments; the parent is ``parent_id``) and no access-log row.
+
+    A work item has changed when its own row, its detail, or any row hanging
+    off it was written at or above the cursor's transaction id. A deletion
+    leaves no row of its own to compare, so ``record_deletion`` stamps the
+    surviving work item(s) in the delete's transaction (and writes an outbox
+    row): the deletion is a change to them. Returns ``{'workItems': [...], 'nextCursor': str,
+    'hasMore': bool}``; as ``list_a2a_tasks``, a work item can appear in two
+    rounds and no change is missed."""
+    from django.db.models import Exists, OuterRef, Q
+
+    from .serializers import serialize_work_item_full
+
+    def changed_q(since):
+        def hanging(model, field='work_item_id'):
+            return Exists(model.objects.filter(**{field: OuterRef('id'), 'change_xid__gte': since}))
+        return (
+            Q(change_xid__gte=since)
+            | hanging(WorkItemStoryDetail) | hanging(WorkItemReleaseDetail) | hanging(WorkItemHistory)
+            | hanging(WorkItemArtifact) | hanging(WorkItemSpecificationLink) | hanging(WorkItemArtifactLink)
+            | hanging(WorkItemComment)
+            | hanging(WorkItemLink, 'from_work_item_id') | hanging(WorkItemLink, 'to_work_item_id')
+        )
+
+    def build(ids):
+        items = {i.id: i for i in WorkItem.objects.filter(id__in=ids)}
+
+        def group(rows, key):
+            grouped: dict = {}
+            for row in rows:
+                grouped.setdefault(key(row), []).append(row)
+            return grouped
+
+        story = {d.work_item_id: d for d in WorkItemStoryDetail.objects.filter(work_item_id__in=ids)}
+        release = {d.work_item_id: d for d in WorkItemReleaseDetail.objects.filter(work_item_id__in=ids)}
+        spec = {s.work_item_id: s for s in WorkItemSpecificationLink.objects.filter(work_item_id__in=ids)}
+        history = group(WorkItemHistory.objects.filter(work_item_id__in=ids).order_by('occurred_at', 'id'),
+                        lambda r: r.work_item_id)
+        artifacts = group(WorkItemArtifact.objects.filter(work_item_id__in=ids).order_by('created_at', 'id'),
+                          lambda r: r.work_item_id)
+        comments = group(WorkItemComment.objects.filter(work_item_id__in=ids).order_by('created_at', 'id'),
+                         lambda r: r.work_item_id)
+        artifact_links = group(WorkItemArtifactLink.objects.filter(work_item_id__in=ids).order_by('position'),
+                               lambda r: r.work_item_id)
+        links: dict = {}
+        for link in WorkItemLink.objects.filter(Q(from_work_item_id__in=ids) | Q(to_work_item_id__in=ids)):
+            for end in {link.from_work_item_id, link.to_work_item_id}:
+                if end in items:
+                    links.setdefault(end, []).append(link)
+        return [
+            serialize_work_item_full({
+                'item': items[i], 'storyDetail': story.get(i), 'releaseDetail': release.get(i),
+                'links': links.get(i, []), 'history': history.get(i, []), 'artifacts': artifacts.get(i, []),
+                'comments': comments.get(i, []), 'specificationLink': spec.get(i),
+                'artifactLinks': artifact_links.get(i, []),
+            })
+            for i in ids if i in items
+        ]
+
+    page = _enumerate_changed(cursor, limit, WorkItem, changed_q, build)
+    return {'workItems': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def list_work_item_comments_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, work-item comments: a paged, changed-since enumeration. Each
+    record is the comment as ``serialize_comment`` returns it, with the
+    ``project`` of the work item it belongs to (its link: ``work_item_id``).
+    Writes no access-log row. Core has no comment-update path (and no
+    database trigger makes the table append-only), and an UPDATE would still
+    be returned because the ``change_xid`` trigger stamps on UPDATE."""
+    from .serializers import serialize_comment
+
+    def build(ids):
+        rows = WorkItemComment.objects.filter(id__in=ids).select_related('work_item').order_by('id')
+        return [{**serialize_comment(row), 'project': row.work_item.project} for row in rows]
+
+    page = _enumerate_changed(cursor, limit, WorkItemComment, _changed_since, build)
+    return {'comments': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def list_delivery_artifacts_changed(cursor: Optional[str] = None, *, limit: int = 50) -> dict:
+    """REQ-11, delivery artifacts (the ``work_item_artifact`` associations):
+    a paged, changed-since enumeration. Each record is the association as
+    ``serialize_artifact`` returns it, with the ``project`` of its work item
+    and that work item's specification link (``specification_link``, null when
+    it has none), which is what a consumer needs to relate it to the
+    requirement that authorized it. Writes no access-log row."""
+    from .serializers import serialize_artifact, serialize_specification_link
+
+    def build(ids):
+        rows = WorkItemArtifact.objects.filter(id__in=ids).select_related('work_item').order_by('id')
+        specs = {s.work_item_id: s for s in WorkItemSpecificationLink.objects.filter(
+            work_item_id__in={r.work_item_id for r in rows})}
+        return [
+            {**serialize_artifact(row), 'project': row.work_item.project,
+             'specification_link': serialize_specification_link(specs.get(row.work_item_id))}
+            for row in rows
+        ]
+
+    page = _enumerate_changed(cursor, limit, WorkItemArtifact, _changed_since, build)
+    return {'deliveryArtifacts': page['records'], 'nextCursor': page['nextCursor'], 'hasMore': page['hasMore']}
+
+
+def _changed_since(since: int):
+    from django.db.models import Q
+    return Q(change_xid__gte=since)
+
+
+def record_deletion(obj, *, actor: str) -> None:
+    """REQ-07's Core half: an outbox row naming a work-item row the admin is
+    deleting, written in the delete's own transaction (the caller holds the
+    ``transaction.atomic`` block, ``GatedAdminMixin``). The row rides the
+    project's work-item stream as ``work_item.record_deleted``; the payload
+    names the record's class and id and the work item it belonged to, so the
+    indexer removes that record's units. Three readers act on the stream by
+    event type: ScrumMaster's ``dispatchConsumer``, Core's Jira writer, and
+    Memory's indexer (``services/memory/index/events.py``,
+    ``RECORD_DELETED``). Only the indexer consumes this type; the other two
+    ignore it.
+
+    REQ-11: the same call stamps the surviving work item(s), so a changed-since
+    enumeration re-returns them (a deleted row leaves nothing to stamp): both
+    ends of a deleted ``WorkItemLink``, the owning work item of any other
+    record; a deleted work item has no survivor. The stamp is a no-op UPDATE
+    (``change_xid = change_xid``) that fires ``work_item_set_change_xid``
+    (migration 0010), which overwrites ``change_xid`` with this transaction's
+    id; no other column (``updated_at`` included) changes, and no history row
+    is written (history is written by store functions, not by a trigger on
+    ``work_item``)."""
+    record_class = _ENUMERATION_RECORD_CLASSES.get(type(obj))
+    if record_class is None:
+        raise TypeError(f'record_deletion: {type(obj).__name__} is not a work-item record')
+    if isinstance(obj, WorkItem):
+        work_item_id, project = obj.id, obj.project
+    elif isinstance(obj, WorkItemLink):
+        work_item_id, project = obj.from_work_item_id, obj.from_work_item.project
+    else:
+        work_item_id, project = obj.work_item_id, obj.work_item.project
+    data = {'recordClass': record_class, 'id': str(obj.pk), 'workItemId': str(work_item_id), 'deletedBy': actor}
+    if isinstance(obj, WorkItemLink):
+        data['toWorkItemId'] = str(obj.to_work_item_id)
+    if isinstance(obj, WorkItemLink):
+        survivors = [obj.from_work_item_id, obj.to_work_item_id]
+    elif isinstance(obj, WorkItem):
+        survivors = []
+    else:
+        survivors = [obj.work_item_id]
+    if survivors:
+        WorkItem.objects.filter(id__in=survivors).update(change_xid=models.F('change_xid'))
+    _write_outbox_event(
+        project=project, event_type=RECORD_DELETED_EVENT_TYPE, work_item_id=work_item_id, payload=data,
+    )
