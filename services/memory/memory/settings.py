@@ -147,7 +147,9 @@ MEMORY_INDEX_CONSUMER = os.environ.get('MEMORY_INDEX_CONSUMER', '')
 # in here at build time (scripts/fetch-embedding-model.sh). Memory never
 # downloads them; a missing model is an error. A host test run points this at
 # the directory run_tests.sh names. MEMORY_EMBED_THREADS caps ONNX Runtime's
-# threads per process; 0 lets it use every core.
+# threads per process; 0 lets it use every core. docker-compose.yml runs
+# memory-indexer capped at 2 threads and 2 CPUs; memory-api is uncapped, for
+# query embedding latency.
 MEMORY_EMBED_MODEL_DIR = os.environ.get('MEMORY_EMBED_MODEL_DIR', '/opt/memory-embedding-model')
 MEMORY_EMBED_THREADS = int(os.environ.get('MEMORY_EMBED_THREADS') or 0)
 

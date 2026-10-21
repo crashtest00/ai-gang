@@ -150,9 +150,15 @@ services:
     container_name: memory-indexer
     env_file: .env
     command: python manage.py run_indexer
+    # Capped at 2 threads and 2 CPUs: the first full embedding otherwise
+    # runs ONNX Runtime on every core and saturates a small host, starving
+    # the platform's health checks (validation #327, #330, #331). The
+    # environment entry below overrides MEMORY_EMBED_THREADS in .env.
+    cpus: "2"
     environment:
       - MEMORY_API_URL=http://memory-api:9200
       - MEMORY_PLATFORM_CORPUS_ROOT=/platform-source
+      - MEMORY_EMBED_THREADS=2
     volumes:
       # The platform corpus (REQ-08): the Markdown under docs/ and setup/ in
       # this deployment's own Source checkout, read at its current commit,
